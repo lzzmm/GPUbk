@@ -18,7 +18,7 @@ from .gpu import GpuSnapshot, snapshot
 from .scheduler import list_active
 from .storage import FileLock, LedgerStore
 from .timeparse import parse_iso, to_iso, utc_now
-from .usage import ProcessUsage, classify_process_usage
+from .usage import GPU_LIVE_BUSY, ProcessUsage, assess_gpu_live_states, classify_process_usage
 
 
 SnapshotProvider = Callable[[Config], List[GpuSnapshot]]
@@ -42,6 +42,7 @@ class UsageAuditStore:
         self.state_path = data_dir / "usage-state.json"
         self.events_path = data_dir / "usage-events.jsonl"
         self.rollups_path = data_dir / "usage-rollups.jsonl"
+        self.load_path = data_dir / "usage-load.json"
 
     def ensure(self) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)
@@ -94,15 +95,44 @@ class UsageAuditStore:
     def recent_rollups(self, limit: int = 20) -> List[dict]:
         return self._recent_jsonl(self.rollups_path, limit)
 
+    def load_load_history(self) -> dict:
+        self.ensure()
+        if not self.load_path.exists():
+            return {"version": 1, "updated_at": None, "gpus": {}}
+        try:
+            payload = json.loads(self.load_path.read_text(encoding="utf-8"))
+            if payload.get("version") != 1 or not isinstance(payload.get("gpus"), dict):
+                raise ValueError("invalid load history")
+            return payload
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {"version": 1, "updated_at": None, "gpus": {}}
+
+    def save_load_history(self, history: dict) -> None:
+        self.ensure()
+        payload = json.dumps(history, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        fd, tmp_name = tempfile.mkstemp(prefix=".usage-load.", suffix=".tmp", dir=str(self.data_dir))
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(payload)
+                fh.flush()
+                os.fsync(fh.fileno())
+            os.replace(tmp_path, self.load_path)
+            _fsync_dir(self.data_dir)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
     def clear_unlocked(self) -> dict:
         result = {
             "usage_events": _line_count(self.events_path),
             "usage_rollups": _line_count(self.rollups_path),
             "usage_state": 1 if self.state_path.exists() else 0,
+            "usage_load": 1 if self.load_path.exists() else 0,
         }
         self.events_path.unlink(missing_ok=True)
         self.rollups_path.unlink(missing_ok=True)
         self.state_path.unlink(missing_ok=True)
+        self.load_path.unlink(missing_ok=True)
         return result
 
     def _append_jsonl(self, path: Path, records: Iterable[dict]) -> int:
@@ -154,7 +184,9 @@ class UsageMonitor:
         self.rollup_seconds = rollup_seconds
         self.snapshot_provider = snapshot_provider
         self.previous_state = audit_store.load_state()
+        self.load_history = audit_store.load_load_history()
         self._rollups: Dict[Tuple[object, ...], dict] = {}
+        self._device_rollups: Dict[Tuple[object, ...], dict] = {}
 
     def collect(self, sampled_at: Optional[datetime] = None) -> MonitorSample:
         sampled_at = sampled_at or utc_now()
@@ -171,6 +203,7 @@ class UsageMonitor:
 
         groups = _usage_groups(devices, usage_by_gpu, reservations, sampled_at)
         self._record_groups(groups, sampled_at)
+        self._record_device_load(devices, sampled_at)
         flushed = self.flush_rollups(sampled_at)
         process_count = sum(len(rows) for rows in usage_by_gpu.values())
         violation_count = sum(1 for rows in usage_by_gpu.values() for item in rows if item.violation)
@@ -197,6 +230,18 @@ class UsageMonitor:
         written = self.audit_store.append_rollups(ready)
         for key in keys:
             self._rollups.pop(key, None)
+        ready_loads = []
+        load_keys = []
+        for key, aggregate in self._device_rollups.items():
+            bucket_end = parse_iso(aggregate["window_end"])
+            if force or bucket_end <= at:
+                ready_loads.append(_finalize_device_load(aggregate, at, partial=force and at < bucket_end))
+                load_keys.append(key)
+        if ready_loads:
+            self.load_history = _merge_device_load_history(self.load_history, ready_loads, at)
+            self.audit_store.save_load_history(self.load_history)
+        for key in load_keys:
+            self._device_rollups.pop(key, None)
         return written
 
     def _record_groups(self, groups: Sequence[dict], sampled_at: datetime) -> None:
@@ -252,6 +297,39 @@ class UsageMonitor:
                 aggregate["max_device_util_percent"] = (
                     group["device_util_percent"] if previous_util is None else max(previous_util, group["device_util_percent"])
                 )
+
+    def _record_device_load(self, devices: Sequence[GpuSnapshot], sampled_at: datetime) -> None:
+        bucket_start = _bucket_start(sampled_at, self.rollup_seconds)
+        bucket_end = bucket_start + timedelta(seconds=self.rollup_seconds)
+        by_index = {device.index: device for device in devices}
+        live_states = assess_gpu_live_states(devices, self.config.gpu_count)
+        for gpu in range(self.config.gpu_count):
+            device = by_index.get(gpu)
+            state = live_states[gpu]
+            key = (to_iso(bucket_start), gpu)
+            aggregate = self._device_rollups.setdefault(
+                key,
+                {
+                    "window_start": to_iso(bucket_start),
+                    "window_end": to_iso(bucket_end),
+                    "gpu": gpu,
+                    "sample_count": 0,
+                    "known_samples": 0,
+                    "_util_total": 0.0,
+                    "_memory_total": 0.0,
+                    "_busy_total": 0,
+                },
+            )
+            aggregate["sample_count"] += 1
+            if device is None or device.source == "none":
+                continue
+            aggregate["known_samples"] += 1
+            aggregate["_util_total"] += float(device.utilization_percent or 0)
+            memory_percent = 0.0
+            if device.memory_total_mb:
+                memory_percent = min(100.0, device.memory_used_mb * 100.0 / device.memory_total_mb)
+            aggregate["_memory_total"] += memory_percent
+            aggregate["_busy_total"] += int(state.status == GPU_LIVE_BUSY)
 
 
 def run_monitor(
@@ -471,6 +549,38 @@ def _finalize_rollup(aggregate: dict, flushed_at: datetime, partial: bool) -> di
             round(aggregate["_device_util_total"] / device_samples, 3) if device_samples else None
         ),
         "max_device_util_percent": aggregate["max_device_util_percent"],
+    }
+
+
+def _finalize_device_load(aggregate: dict, flushed_at: datetime, partial: bool) -> dict:
+    known = aggregate["known_samples"]
+    return {
+        "window_start": aggregate["window_start"],
+        "window_end": aggregate["window_end"],
+        "flushed_at": to_iso(flushed_at),
+        "partial": partial,
+        "gpu": aggregate["gpu"],
+        "sample_count": aggregate["sample_count"],
+        "known_samples": known,
+        "avg_utilization_percent": round(aggregate["_util_total"] / known, 3) if known else None,
+        "avg_memory_percent": round(aggregate["_memory_total"] / known, 3) if known else None,
+        "busy_fraction": round(aggregate["_busy_total"] / known, 4) if known else None,
+    }
+
+
+def _merge_device_load_history(history: dict, records: Sequence[dict], at: datetime, keep_per_gpu: int = 120) -> dict:
+    raw_gpus = history.get("gpus", {}) if isinstance(history, dict) else {}
+    gpus = {str(key): list(value) for key, value in raw_gpus.items() if isinstance(value, list)}
+    for record in records:
+        key = str(record["gpu"])
+        existing = [item for item in gpus.get(key, []) if item.get("window_start") != record.get("window_start")]
+        existing.append(record)
+        existing.sort(key=lambda item: str(item.get("window_start", "")))
+        gpus[key] = existing[-keep_per_gpu:]
+    return {
+        "version": 1,
+        "updated_at": to_iso(at),
+        "gpus": gpus,
     }
 
 

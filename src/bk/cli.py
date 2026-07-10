@@ -9,13 +9,29 @@ import sys
 from datetime import timedelta
 from typing import List, Optional
 
+from .advisor import GpuAdvice, build_gpu_advice
 from .config import Config, load_config
 from .gpu import snapshot
 from .monitor import UsageAuditStore, run_monitor
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, EditRequest
-from .scheduler import add_booking, cancel_booking, edit_booking, find_policy_violations, list_active
+from .scheduler import (
+    add_booking,
+    cancel_booking,
+    edit_booking,
+    find_policy_violations,
+    list_active,
+    shared_memory_headroom_for_reservation,
+)
 from .storage import LedgerStore
-from .timeparse import format_local, format_local_range, parse_duration_seconds, parse_iso, parse_start, utc_now
+from .timeparse import (
+    format_local,
+    format_local_range,
+    parse_duration_seconds,
+    parse_iso,
+    parse_memory_mb,
+    parse_start,
+    utc_now,
+)
 from .tui import run_tui
 from .usage import classify_process_usage
 
@@ -36,32 +52,32 @@ def main(argv: Optional[List[str]] = None) -> int:
         head = argv[0]
         if _looks_like_auto_request(argv):
             return _book_command(argv, MODE_SHARED, config, store)
-        if head in {"auto", "shared"}:
+        if head in {"auto", "shared", "s"}:
             return _book_command(argv[1:], MODE_SHARED, config, store)
         if head in {"exclusive", "x"}:
             return _book_command(argv[1:], MODE_EXCLUSIVE, config, store)
-        if head == "tui":
+        if head in {"tui", "t"}:
             return run_tui(config, store)
-        if head == "monitor":
+        if head in {"monitor", "m"}:
             return _monitor_command(argv[1:], config, store)
-        if head == "usage":
+        if head in {"usage", "u"}:
             return _usage_command(argv[1:], config)
-        if head in {"status", "timeline"}:
+        if head in {"status", "timeline", "st"}:
             _print_status(config, store)
             return 0
-        if head == "add":
+        if head in {"add", "a"}:
             return _add_interactive(config, store)
-        if head == "edit":
+        if head in {"edit", "e"}:
             return _edit_command(argv[1:], config, store)
-        if head == "del":
+        if head in {"del", "delete", "d", "rm"}:
             return _delete_command(argv[1:], store)
         if head == "reset":
             return _reset_command(argv[1:], config, store)
-        if head == "log":
+        if head in {"log", "lg"}:
             return _log_command(config, store)
-        if head == "doctor":
+        if head in {"doctor", "dr"}:
             return _doctor_command(config, store)
-        if head == "list":
+        if head in {"list", "ls", "l"}:
             return _list_command(store)
         if head in {"-h", "--help", "help"}:
             _print_help()
@@ -125,43 +141,43 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
     if head in {"h", "help", "?"}:
         _print_shell_help()
         return True
-    if head in {"status", "refresh", "r", "timeline"}:
+    if head in {"status", "refresh", "r", "timeline", "st"}:
         _print_status(config, store)
         return True
-    if head in {"list", "ls"}:
+    if head in {"list", "ls", "l"}:
         _list_command(store)
         return True
-    if head in {"log", "logs"}:
+    if head in {"log", "logs", "lg"}:
         _log_command(config, store)
         return True
-    if head == "doctor":
+    if head in {"doctor", "dr"}:
         _doctor_command(config, store)
         return True
-    if head in {"del", "delete", "cancel"}:
+    if head in {"del", "delete", "cancel", "d", "rm"}:
         _delete_command(args[1:], store)
         return True
-    if head == "edit":
+    if head in {"edit", "e"}:
         _edit_command(args[1:], config, store)
         return True
     if head == "reset":
         _reset_command(args[1:], config, store)
         return True
-    if head == "add":
+    if head in {"add", "a"}:
         _add_interactive(config, store)
         return True
-    if head == "tui":
+    if head in {"tui", "t"}:
         run_tui(config, store)
         return True
-    if head == "monitor":
+    if head in {"monitor", "m"}:
         _monitor_command(args[1:], config, store)
         return True
-    if head == "usage":
+    if head in {"usage", "u"}:
         _usage_command(args[1:], config)
         return True
     if _looks_like_auto_request(args):
         _book_command(args, MODE_SHARED, config, store)
         return True
-    if head in {"auto", "shared"}:
+    if head in {"auto", "shared", "s"}:
         _book_command(args[1:], MODE_SHARED, config, store)
         return True
     if head in {"exclusive", "x"}:
@@ -178,10 +194,13 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
     parser.add_argument("duration")
     parser.add_argument("--start", help="ISO time; omitted means now with automatic queueing")
     parser.add_argument("--gpu", help="comma separated GPU indexes, for example 0,1")
+    parser.add_argument("--mem", help="expected memory on each GPU, for example 12g or 4096m")
     args = parser.parse_args(argv)
 
     start_raw = args.start or "now"
     preferred = _parse_gpu_list(args.gpu) if args.gpu else None
+    advice = build_gpu_advice(config)
+    expected_memory_mb = parse_memory_mb(args.mem) if args.mem else None
     request = BookingRequest(
         actor=_current_actor(),
         count=args.count,
@@ -189,7 +208,11 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
         start_at=parse_start(start_raw),
         mode=mode,
         preferred_gpus=preferred,
+        gpu_order=advice.order,
+        gpu_scores=advice.scores,
         allow_queue=args.start is None,
+        expected_memory_mb=expected_memory_mb,
+        gpu_memory_capacity_mb=advice.memory_capacities_mb,
     )
     result = add_booking(store, config, request)
     reservation = result.reservation
@@ -204,6 +227,7 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
         f"{status}: {_short_id(reservation)} mode={reservation['mode']} "
         f"gpu={gpus} {format_local_range(reservation['start_at'], reservation['end_at'])}"
     )
+    _print_booking_advice(config, store, reservation, advice, expected_memory_mb)
     return 0
 
 
@@ -249,12 +273,15 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
     if mode_raw not in {MODE_SHARED, MODE_EXCLUSIVE}:
         raise ValueError("mode must be shared or exclusive")
     count = int(input("gpu count: ").strip())
-    duration = parse_duration_seconds(input("duration (30m/4h/1d): ").strip())
+    duration = parse_duration_seconds(input("duration (30m/1h30m/1d): ").strip())
     start_raw = input("start ISO or now (now): ").strip()
     allow_queue = start_raw in {"", "now"}
     start = parse_start(start_raw or "now")
     gpu_raw = input("gpu indexes optional, for example 0,1: ").strip()
     preferred = _parse_gpu_list(gpu_raw) if gpu_raw else None
+    memory_raw = input("expected memory per GPU optional, for example 12g: ").strip()
+    expected_memory_mb = parse_memory_mb(memory_raw) if memory_raw else None
+    advice = build_gpu_advice(config)
     result = add_booking(
         store,
         config,
@@ -265,11 +292,16 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
             start_at=start,
             mode=mode_raw,
             preferred_gpus=preferred,
+            gpu_order=advice.order,
+            gpu_scores=advice.scores,
             allow_queue=allow_queue,
+            expected_memory_mb=expected_memory_mb,
+            gpu_memory_capacity_mb=advice.memory_capacities_mb,
         ),
     )
     reservation = result.reservation
     print(f"{'queued' if result.queued else 'created'}: {_short_id(reservation)} {format_local_range(reservation['start_at'], reservation['end_at'])}")
+    _print_booking_advice(config, store, reservation, advice, expected_memory_mb)
     return 0
 
 
@@ -458,6 +490,84 @@ def _parse_gpu_list(value: str) -> List[int]:
     return gpus
 
 
+def _print_booking_advice(
+    config: Config,
+    store: LedgerStore,
+    reservation: dict,
+    advice: GpuAdvice,
+    expected_memory_mb: Optional[int],
+) -> None:
+    selected = [int(gpu) for gpu in reservation.get("gpus", [])]
+    has_telemetry = any(item.source != "none" for item in advice.snapshots)
+    has_history = any(item.sample_count for item in advice.historical_loads.values())
+    if has_telemetry or has_history:
+        parts = []
+        for gpu in selected:
+            state = advice.live_states[gpu]
+            recent = advice.historical_loads[gpu]
+            recent_text = f"{recent.predicted_percent:.0f}%" if recent.sample_count else "n/a"
+            parts.append(f"GPU {gpu} score={advice.scores[gpu]:.1f} now={state.status} recent={recent_text}")
+        print("selection: " + "; ".join(parts))
+
+    busy_selected = [gpu for gpu in selected if advice.live_states[gpu].status == "busy"]
+    busy_avoided = [
+        gpu
+        for gpu in advice.order
+        if gpu not in selected and advice.live_states[gpu].status == "busy"
+    ]
+    if busy_selected:
+        details = ", ".join(f"GPU {gpu} ({advice.live_states[gpu].reason})" for gpu in busy_selected)
+        print(f"warning: selected GPU currently busy: {details}", file=sys.stderr)
+    elif busy_avoided:
+        details = ", ".join(f"GPU {gpu} ({advice.live_states[gpu].reason})" for gpu in busy_avoided)
+        print(f"note: avoided currently busy {details}")
+
+    capacities = advice.memory_capacities_mb
+    if not capacities:
+        if reservation.get("mode") == MODE_SHARED and expected_memory_mb is None:
+            print("note: GPU memory telemetry unavailable; shared memory admission used record limit only")
+        return
+
+    snapshots = {item.index: item for item in advice.snapshots}
+    headroom = shared_memory_headroom_for_reservation(
+        list_active(store.load(), parse_iso(reservation["start_at"])),
+        reservation,
+        capacities,
+        config.max_shared_users,
+        config.shared_memory_reserve_mb,
+    )
+    memory_parts = []
+    for gpu in selected:
+        item = snapshots.get(gpu)
+        if item is None or not item.memory_total_mb:
+            continue
+        now_free = max(0, item.memory_total_mb - item.memory_used_mb)
+        projected = headroom.get(gpu)
+        projected_text = f", projected-headroom={_format_memory_mb(projected)}" if projected is not None else ""
+        memory_parts.append(f"GPU {gpu} now-free={_format_memory_mb(now_free)}{projected_text}")
+    if memory_parts:
+        print("memory: " + "; ".join(memory_parts))
+    if reservation.get("mode") == MODE_SHARED and expected_memory_mb is None:
+        assumptions = [
+            max(1, (capacities[gpu] - config.shared_memory_reserve_mb) // config.max_shared_users)
+            for gpu in selected
+            if gpu in capacities
+        ]
+        if assumptions:
+            print(
+                f"note: --mem omitted; assumed {_format_memory_mb(min(assumptions))} per GPU "
+                f"from shared limit {config.max_shared_users}"
+            )
+
+
+def _format_memory_mb(value: Optional[int]) -> str:
+    if value is None:
+        return "unknown"
+    if value >= 1024:
+        return f"{value / 1024:.1f}GiB"
+    return f"{value}MiB"
+
+
 def _current_actor() -> Actor:
     return Actor(uid=os.getuid(), username=getpass.getuser())
 
@@ -515,15 +625,15 @@ def _print_help(file=None) -> None:
         """usage:
   bk
   bk <count> <duration> [--gpu 0,1] [--start ISO]
-  bk auto <count> <duration>
-  bk shared <count> <duration>
-  bk exclusive <count> <duration>
-  bk tui
-  bk monitor [--once] [--interval 2] [--rollup 60]
-  bk usage [--rollups] [--limit 20]
-  bk add
-  bk edit [number_or_short_id]
-  bk del <reservation_id>
+  bk s <count> <duration>       shared (shared/auto also accepted)
+  bk x <count> <duration>       exclusive
+  bk t                          TUI
+  bk m [--once]                 monitor
+  bk u [--rollups]              usage records
+  bk a                          guided add
+  bk e [number_or_short_id]     edit
+  bk d <number_or_short_id>     delete
+  bk l                          list
   bk reset --yes
   bk list
   bk log
@@ -542,21 +652,20 @@ default interaction: plain prompt, no fullscreen terminal takeover
 def _print_shell_help() -> None:
     print(
         """Commands:
-  status | refresh          show GPU summary and active reservations
+  st | status               show GPU summary and active reservations
   1 4h [--gpu 0]            shared booking, default mode
-  shared 1 4h [--gpu 0]     shared booking
-  auto 1 4h [--gpu 0]       shared booking compatibility alias
-  exclusive 1 4h [--gpu 0]  exclusive booking
-  add                       guided booking prompts
-  edit <number|short_id>    modify your reservation
-  del <number|short_id>     cancel your reservation
-  list                      list active reservations
-  log                       show your operation log
-  doctor                    report policy violations in the ledger
-  monitor                   continuously audit GPU process usage
-  usage [--rollups]         show recent usage events or minute rollups
+  s 1 4h [--gpu 0]          shared booking
+  x 1 4h [--gpu 0]          exclusive booking
+  a | add                   guided booking prompts
+  e <number|short_id>       modify your reservation
+  d <number|short_id>       cancel your reservation
+  l | list                  list active reservations
+  lg | log                  show your operation log
+  dr | doctor               report policy violations in the ledger
+  m | monitor               continuously audit GPU process usage
+  u [--rollups]             show recent usage events or minute rollups
   reset --yes               clear ledger, logs, and backups in this data dir
-  tui                       available as top-level command: bk tui
+  t | tui                   open full-screen TUI
   quit                      exit
 """
     )

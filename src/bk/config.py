@@ -19,6 +19,8 @@ class Config:
     lock_timeout_seconds: float = 10.0
     backup_keep: int = 10
     timeline_hours: int = 24
+    require_shared_memory: bool = False
+    shared_memory_reserve_mb: int = 512
 
 
 def _read_config_file(data_dir: Path) -> Dict[str, Any]:
@@ -54,6 +56,32 @@ def _float_value(raw: Dict[str, Any], key: str, default: float) -> float:
     return parsed
 
 
+def _bool_value(raw: Dict[str, Any], key: str, default: bool) -> bool:
+    value = raw.get(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    if isinstance(value, int) and value in {0, 1}:
+        return bool(value)
+    raise ValueError(f"{key} must be a boolean")
+
+
+def _nonnegative_int_value(raw: Dict[str, Any], key: str, default: int) -> int:
+    value = raw.get(key, default)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be an integer") from exc
+    if parsed < 0:
+        raise ValueError(f"{key} must be >= 0")
+    return parsed
+
+
 def load_config() -> Config:
     data_dir = Path(os.environ.get("BK_DATA_DIR", DEFAULT_DATA_DIR)).expanduser()
     raw = _read_config_file(data_dir)
@@ -65,6 +93,8 @@ def load_config() -> Config:
         "lock_timeout_seconds": "BK_LOCK_TIMEOUT_SECONDS",
         "backup_keep": "BK_BACKUP_KEEP",
         "timeline_hours": "BK_TIMELINE_HOURS",
+        "require_shared_memory": "BK_REQUIRE_SHARED_MEMORY",
+        "shared_memory_reserve_mb": "BK_SHARED_MEMORY_RESERVE_MB",
     }
     for key, env_name in env_map.items():
         if env_name in os.environ:
@@ -78,4 +108,6 @@ def load_config() -> Config:
         lock_timeout_seconds=_float_value(raw, "lock_timeout_seconds", 10.0),
         backup_keep=_int_value(raw, "backup_keep", 10),
         timeline_hours=_int_value(raw, "timeline_hours", 24),
+        require_shared_memory=_bool_value(raw, "require_shared_memory", False),
+        shared_memory_reserve_mb=_nonnegative_int_value(raw, "shared_memory_reserve_mb", 512),
     )

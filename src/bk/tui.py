@@ -46,6 +46,7 @@ ZOOM_LEVELS = [5, 10, 15, 30, 60]
 DEFAULT_ZOOM_INDEX = 0
 FOCUS_RESERVATIONS = "reservations"
 FOCUS_GPUS = "gpus"
+WEEKDAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 RESERVATION_COLORS = [
     curses.COLOR_CYAN,
     curses.COLOR_YELLOW,
@@ -221,9 +222,9 @@ def _handle_key(stdscr, key: int, config: Config, store: LedgerStore, state: Tui
                 "GPU focus shows that GPU's shared reservations and live processes",
                 "TUI refreshes telemetry every second without a key press",
                 "a add   e edit selected   d delete selected",
-                "Add/Edit: arrows move cursor/time, space toggles GPU, [/] duration",
-                "Add: f find nearest slot on any GPUs, g keep selected GPUs",
-                "Add/Edit: s shared, x exclusive, Enter exact submit, Esc cancel",
+                "Add/Edit: arrows move time/GPU, space toggles GPU, +/- duration",
+                "Add/Edit: 1-9 set GPU count + auto-find, f any GPUs, g fixed GPUs",
+                "Add/Edit: s shared, x exclusive, r reset, Enter submit, Esc cancel",
                 "Timeline: . free, solid = one booking, split = two shared bookings",
                 "Three or more shared bookings use an equal-area woven color pattern",
                 "Select a shared booking to show its exact colored reservation lanes",
@@ -295,7 +296,7 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
     usage_by_gpu = classify_process_usage(gpu_snapshots, active, now)
     gpu_by_index = {gpu.index: gpu for gpu in gpu_snapshots}
 
-    timeline_top = 4
+    timeline_top = 3
     label_width = min(32, max(20, width // 4))
     timeline_width = max(24, width - label_width - 2)
     default_view_start = _ceil_to_add_step(now) + timedelta(minutes=state.offset_slots * state.slot_minutes)
@@ -305,8 +306,9 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
     color_map = _reservation_color_map(active)
 
     _draw_header(stdscr, config, now, view_start, view_end, width, state)
+    _draw_editor_banner(stdscr, 2, width, state, preview)
     _draw_time_axis(stdscr, timeline_top, label_width, timeline_width, view_start, view_end, width)
-    row = timeline_top + 3
+    row = timeline_top + 4
     for gpu in gpu_snapshots:
         if row + 1 > height - 8:
             break
@@ -393,13 +395,45 @@ def _draw_header(
 
 
 def _draw_time_axis(stdscr, row: int, label_width: int, timeline_width: int, start: datetime, end: datetime, width: int) -> None:
-    hours, minutes, ruler = _time_axis_lines(start, end, timeline_width)
-    _addstr(stdscr, row, 0, "Hour".ljust(label_width), width, COLOR_MUTED)
-    _addstr(stdscr, row + 1, 0, "Minute".ljust(label_width), width, COLOR_MUTED)
-    _addstr(stdscr, row + 2, 0, "".ljust(label_width), width, COLOR_MUTED)
-    _addstr(stdscr, row, label_width, hours, width, COLOR_MUTED)
-    _addstr(stdscr, row + 1, label_width, minutes, width, COLOR_MUTED)
-    _addstr(stdscr, row + 2, label_width, ruler, width, COLOR_MUTED)
+    dates, hours, minutes, ruler = _time_axis_lines(start, end, timeline_width)
+    local_start = start.astimezone()
+    _addstr(stdscr, row, 0, f"Date {_date_label(local_start)}".ljust(label_width), width, COLOR_MUTED)
+    _addstr(stdscr, row + 1, 0, "Hour".ljust(label_width), width, COLOR_MUTED)
+    _addstr(stdscr, row + 2, 0, "Minute".ljust(label_width), width, COLOR_MUTED)
+    _addstr(stdscr, row + 3, 0, "".ljust(label_width), width, COLOR_MUTED)
+    _addstr(stdscr, row, label_width, dates, width, COLOR_MUTED)
+    _addstr(stdscr, row + 1, label_width, hours, width, COLOR_MUTED)
+    _addstr(stdscr, row + 2, label_width, minutes, width, COLOR_MUTED)
+    _addstr(stdscr, row + 3, label_width, ruler, width, COLOR_MUTED)
+
+
+def _draw_editor_banner(
+    stdscr,
+    row: int,
+    width: int,
+    state: TuiState,
+    preview: Optional[AddPreview],
+) -> None:
+    if not state.editor_active or preview is None:
+        return
+    color = _preview_color(preview.mode) if preview.valid else COLOR_ERROR
+    _addstr(stdscr, row, 0, _editor_banner_text(state, preview), width, color, curses.A_BOLD)
+
+
+def _editor_banner_text(state: TuiState, preview: AddPreview) -> str:
+    operation = "EDIT" if state.edit_mode else "ADD"
+    if state.edit_mode and state.edit_reservation_id:
+        operation += f" {state.edit_reservation_id[:8]}"
+    mode = "S" if preview.mode == MODE_SHARED else "X"
+    gpu_text = ",".join(map(str, preview.selected_gpus)) or "-"
+    local_start = preview.start.astimezone()
+    local_end = preview.end.astimezone()
+    status = "READY" if preview.valid else "BLOCKED"
+    return (
+        f" {operation} {mode} | {len(preview.selected_gpus)} GPU [{gpu_text}] | "
+        f"{_weekday_label(local_start)} {local_start:%m-%d %H:%M}->{local_end:%H:%M} | "
+        f"{_duration_text(local_end - local_start)} | {status} "
+    )
 
 
 def _draw_gpu_row(
@@ -692,9 +726,9 @@ def _draw_footer(stdscr, height: int, width: int, state: TuiState, preview: Opti
         message = state.message or _preview_status_text(preview, operation)
         message_color = COLOR_ERROR if state.error or not preview.valid else _preview_color(preview.mode)
         if state.add_mode:
-            footer = " ADD | arrows | space GPU | [/] dur | s/x | f auto | g fixed | Enter | Esc "
+            footer = " ADD | arrows | Space | 1-9 GPUs | +/- dur | s/x | f/g find | r | Enter/Esc "
         else:
-            footer = " EDIT | arrows | space GPU | [/] dur | s/x mode | Enter submit | Esc cancel "
+            footer = " EDIT | arrows | Space | 1-9 GPUs | +/- dur | s/x | f/g find | r | Enter/Esc "
     elif state.focus == FOCUS_GPUS:
         message = state.message or f"GPU {state.selected_gpu} focus"
         message_color = COLOR_ERROR if state.error else COLOR_SELECTED
@@ -748,7 +782,7 @@ def _load_edit_state(config: Config, state: TuiState, reservation: dict) -> None
     state.add_selected_gpus = gpus
     state.add_cursor_gpu = min(gpus) if gpus else 0
     state.add_booking_mode = reservation.get("mode") if reservation.get("mode") in {MODE_SHARED, MODE_EXCLUSIVE} else MODE_SHARED
-    state.message = f"editing {reservation['id'][:8]}"
+    state.message = ""
     state.error = False
 
 
@@ -785,11 +819,11 @@ def _handle_add_key(key: int, config: Config, store: LedgerStore, state: TuiStat
             state.add_selected_gpus.add(state.add_cursor_gpu)
         _clear_editor_feedback(state)
         return
-    if key == ord("["):
+    if key in (ord("["), ord("-"), ord("_")):
         state.add_duration_steps = max(1, state.add_duration_steps - 1)
         _clear_editor_feedback(state)
         return
-    if key == ord("]"):
+    if key in (ord("]"), ord("+"), ord("=")):
         state.add_duration_steps += 1
         _clear_editor_feedback(state)
         return
@@ -801,10 +835,16 @@ def _handle_add_key(key: int, config: Config, store: LedgerStore, state: TuiStat
         state.add_booking_mode = MODE_EXCLUSIVE
         _clear_editor_feedback(state)
         return
-    if key == ord("f") and state.add_mode:
+    if key in (ord("r"), ord("R")):
+        _reset_editor(config, store, state)
+        return
+    if ord("1") <= key <= ord("9"):
+        _find_add_slot(config, store, state, fixed_gpus=False, requested_count=key - ord("0"))
+        return
+    if key == ord("f"):
         _find_add_slot(config, store, state, fixed_gpus=False)
         return
-    if key == ord("g") and state.add_mode:
+    if key == ord("g"):
         _find_add_slot(config, store, state, fixed_gpus=True)
         return
     if key in (curses.KEY_ENTER, 10, 13):
@@ -858,20 +898,31 @@ def _handle_add_key(key: int, config: Config, store: LedgerStore, state: TuiStat
         state.error = False
 
 
-def _find_add_slot(config: Config, store: LedgerStore, state: TuiState, fixed_gpus: bool) -> None:
+def _find_add_slot(
+    config: Config,
+    store: LedgerStore,
+    state: TuiState,
+    fixed_gpus: bool,
+    requested_count: Optional[int] = None,
+) -> None:
     selected = sorted(gpu for gpu in state.add_selected_gpus if 0 <= gpu < config.gpu_count)
     if fixed_gpus and not selected:
         state.message = "select at least one GPU before fixed search"
         state.error = True
         return
 
-    count = len(selected) or 1
+    count = requested_count if requested_count is not None else (len(selected) or 1)
+    if count < 1 or count > config.gpu_count:
+        state.message = f"GPU count must be between 1 and {config.gpu_count}"
+        state.error = True
+        return
     view_start = _editor_view_start(state)
     earliest_start = view_start + timedelta(minutes=state.add_start_steps * ADD_STEP_MINUTES)
     duration = timedelta(minutes=max(1, state.add_duration_steps) * ADD_STEP_MINUTES)
     mode = state.add_booking_mode if state.add_booking_mode in {MODE_SHARED, MODE_EXCLUSIVE} else MODE_SHARED
+    ledger = _availability_ledger(store.load(), state)
     slot = find_earliest_slot(
-        store.load(),
+        ledger,
         config,
         count,
         earliest_start,
@@ -899,8 +950,42 @@ def _find_add_slot(config: Config, store: LedgerStore, state: TuiState, fixed_gp
     local_start = scheduled_start.astimezone()
     gpu_text = ",".join(map(str, gpus))
     search_kind = "fixed" if fixed_gpus else "auto"
-    state.message = f"{search_kind} found GPU={gpu_text} at {local_start:%m-%d %H:%M}; Enter confirms"
+    state.message = (
+        f"{search_kind} found {count} GPU [{gpu_text}] at "
+        f"{_weekday_label(local_start)} {local_start:%m-%d %H:%M}; Enter confirms"
+    )
     state.error = False
+
+
+def _reset_editor(config: Config, store: LedgerStore, state: TuiState) -> None:
+    if state.edit_mode and state.edit_reservation_id:
+        for reservation in store.load().get("reservations", []):
+            if reservation.get("id") == state.edit_reservation_id:
+                _load_edit_state(config, state, reservation)
+                state.message = "edit reset to original"
+                return
+        state.message = "reservation not found"
+        state.error = True
+        return
+    cursor_gpu = state.add_cursor_gpu
+    state.add_duration_steps = 6
+    _start_add_select(config, state)
+    state.add_cursor_gpu = min(max(cursor_gpu, 0), max(0, config.gpu_count - 1))
+    state.add_selected_gpus = {state.add_cursor_gpu} if config.gpu_count else set()
+    state.message = "add reset to 1 GPU / 30m / shared"
+
+
+def _availability_ledger(ledger: dict, state: TuiState) -> dict:
+    if not state.edit_mode or not state.edit_reservation_id:
+        return ledger
+    return {
+        **ledger,
+        "reservations": [
+            item
+            for item in ledger.get("reservations", [])
+            if item.get("id") != state.edit_reservation_id
+        ],
+    }
 
 
 def _clear_editor_feedback(state: TuiState) -> None:
@@ -1031,16 +1116,7 @@ def _build_add_preview(ledger: dict, config: Config, state: TuiState, view_start
             "select at least one GPU with space",
             blink=state.add_mode,
         )
-    availability_ledger = ledger
-    if state.edit_mode and state.edit_reservation_id:
-        availability_ledger = {
-            **ledger,
-            "reservations": [
-                item
-                for item in ledger.get("reservations", [])
-                if item.get("id") != state.edit_reservation_id
-            ],
-        }
+    availability_ledger = _availability_ledger(ledger, state)
     for gpu in selected:
         ok, reason = availability_detail(
             availability_ledger,
@@ -1064,7 +1140,8 @@ def _preview_status_text(preview: AddPreview, operation: str = "add") -> str:
     status = "ok" if preview.valid else preview.reason
     return (
         f"{operation} {preview.mode} GPU={gpu_text} "
-        f"{local_start:%m-%d %H:%M}->{local_end:%m-%d %H:%M} {duration} | {status}"
+        f"{_weekday_label(local_start)} {local_start:%m-%d %H:%M}->{local_end:%m-%d %H:%M} "
+        f"{duration} | {status}"
     )
 
 
@@ -1366,9 +1443,10 @@ def _reservations_overlap(left: dict, right: dict) -> bool:
     return parse_iso(left["start_at"]) < parse_iso(right["end_at"]) and parse_iso(right["start_at"]) < parse_iso(left["end_at"])
 
 
-def _time_axis_lines(start: datetime, end: datetime, timeline_width: int) -> Tuple[str, str, str]:
+def _time_axis_lines(start: datetime, end: datetime, timeline_width: int) -> Tuple[str, str, str, str]:
     if timeline_width <= 0:
-        return "", "", ""
+        return "", "", "", ""
+    dates = [" "] * timeline_width
     hours = [" "] * timeline_width
     minutes = [" "] * timeline_width
     ruler = ["─"] * timeline_width
@@ -1382,6 +1460,22 @@ def _time_axis_lines(start: datetime, end: datetime, timeline_width: int) -> Tup
         cursor += timedelta(minutes=minor_minutes)
 
     start_local = start.astimezone()
+    end_local = end.astimezone(start_local.tzinfo)
+    date_boundaries = []
+    midnight = start_local.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    while midnight < end_local:
+        col = _time_col(midnight.astimezone(timezone.utc), start, total, timeline_width)
+        date_boundaries.append((col, _date_label(midnight)))
+        midnight += timedelta(days=1)
+    start_date_label = _date_label(start_local)
+    if not date_boundaries or date_boundaries[0][0] >= len(start_date_label) + 1:
+        _place_label(dates, 0, start_date_label)
+    date_occupied_until = 0
+    for col, label in date_boundaries:
+        if col >= date_occupied_until and col + len(label) <= timeline_width:
+            _place_label(dates, col, label)
+            date_occupied_until = col + len(label) + 1
+
     minutes_to_next_hour = (60 - start_local.minute) % 60
     cols_to_next_hour = minutes_to_next_hour / slot_minutes if minutes_to_next_hour else timeline_width
     hour_occupied_until = 0
@@ -1402,7 +1496,7 @@ def _time_axis_lines(start: datetime, end: datetime, timeline_width: int) -> Tup
         col = _time_col(cursor, start, total, timeline_width)
         local = cursor.astimezone()
         if local.minute == 0:
-            label = local.strftime("%m-%d") if local.hour == 0 else _hour_label(local)
+            label = _hour_label(local)
             if col >= hour_occupied_until and col + len(label) <= timeline_width:
                 _place_label(hours, col, label)
                 hour_occupied_until = col + len(label) + 1
@@ -1415,7 +1509,7 @@ def _time_axis_lines(start: datetime, end: datetime, timeline_width: int) -> Tup
             ruler[col] = "┿" if _is_tick_aligned(cursor, major_minutes) else "┬"
         cursor += timedelta(minutes=minor_minutes)
 
-    return "".join(hours), "".join(minutes), "".join(ruler)
+    return "".join(dates), "".join(hours), "".join(minutes), "".join(ruler)
 
 
 def _axis_tick_minutes(slot_minutes: int) -> Tuple[int, int]:
@@ -1458,6 +1552,14 @@ def _hour_label(value: datetime) -> str:
 
 def _minute_label(value: datetime) -> str:
     return f"{value.minute:02d}"
+
+
+def _weekday_label(value: datetime) -> str:
+    return WEEKDAY_LABELS[value.weekday()]
+
+
+def _date_label(value: datetime) -> str:
+    return f"{value:%m-%d} {_weekday_label(value)}"
 
 
 def _duration_text(delta: timedelta) -> str:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -13,6 +14,12 @@ USAGE_WRONG_GPU = "wrong-gpu"
 USAGE_UNRESERVED = "unreserved"
 USAGE_UNKNOWN = "unknown"
 USAGE_SYSTEM = "system"
+
+GPU_LIVE_IDLE = "idle"
+GPU_LIVE_UNKNOWN = "unknown"
+GPU_LIVE_BUSY = "busy"
+GPU_BUSY_UTILIZATION_PERCENT = 10
+GPU_BUSY_MEMORY_MIN_MB = 1024
 
 SYSTEM_GPU_PROCESS_NAMES = {
     "gnome-shell",
@@ -37,6 +44,27 @@ class ProcessUsage:
         return self.status in {USAGE_WRONG_GPU, USAGE_UNRESERVED}
 
 
+@dataclass(frozen=True)
+class GpuLiveState:
+    index: int
+    status: str
+    reason: str = ""
+    score: int = 0
+    utilization_percent: Optional[int] = None
+    memory_percent: float = 0.0
+    process_count: int = 0
+
+
+@dataclass(frozen=True)
+class HistoricalGpuLoad:
+    index: int
+    predicted_percent: float = 0.0
+    average_utilization_percent: float = 0.0
+    busy_fraction: float = 0.0
+    memory_percent: float = 0.0
+    sample_count: int = 0
+
+
 def classify_process_usage(
     snapshots: Sequence[GpuSnapshot],
     reservations: Sequence[dict],
@@ -55,6 +83,180 @@ def classify_process_usage(
         rows = [_classify_process(gpu.index, process, current) for process in gpu.processes]
         result[gpu.index] = sorted(rows, key=lambda item: (not item.violation, item.process.username, item.process.pid))
     return result
+
+
+def assess_gpu_live_states(snapshots: Sequence[GpuSnapshot], gpu_count: int) -> Dict[int, GpuLiveState]:
+    """Classify current hardware activity for soft, idle-first GPU selection."""
+    by_index = {item.index: item for item in snapshots}
+    result: Dict[int, GpuLiveState] = {}
+    for index in range(gpu_count):
+        gpu = by_index.get(index)
+        if gpu is None or gpu.source == "none":
+            result[index] = GpuLiveState(index, GPU_LIVE_UNKNOWN, "live state unavailable", 0)
+            continue
+
+        active_processes = [process for process in gpu.processes if not is_system_gpu_process(process)]
+        if active_processes:
+            process = sorted(
+                active_processes,
+                key=lambda item: (-(item.sm_utilization_percent or 0), -item.gpu_memory_mb, item.pid),
+            )[0]
+            owner = process.username or (str(process.uid) if process.uid is not None else "unknown")
+            reason = f"user={owner} pid={process.pid}"
+            score = 100_000 + len(active_processes) * 10_000 + (gpu.utilization_percent or 0) * 100 + gpu.memory_used_mb
+            memory_percent = _memory_percent(gpu)
+            result[index] = GpuLiveState(
+                index,
+                GPU_LIVE_BUSY,
+                reason,
+                score,
+                gpu.utilization_percent,
+                memory_percent,
+                len(active_processes),
+            )
+            continue
+
+        utilization = gpu.utilization_percent or 0
+        memory_limit = max(
+            GPU_BUSY_MEMORY_MIN_MB,
+            int(gpu.memory_total_mb * 0.10) if gpu.memory_total_mb else GPU_BUSY_MEMORY_MIN_MB,
+        )
+        if utilization >= GPU_BUSY_UTILIZATION_PERCENT:
+            reason = f"util={utilization}%"
+            score = 50_000 + utilization * 100 + gpu.memory_used_mb
+            result[index] = GpuLiveState(
+                index,
+                GPU_LIVE_BUSY,
+                reason,
+                score,
+                gpu.utilization_percent,
+                _memory_percent(gpu),
+                0,
+            )
+            continue
+        if gpu.memory_used_mb >= memory_limit:
+            reason = f"memory={gpu.memory_used_mb}MiB"
+            score = 40_000 + gpu.memory_used_mb
+            result[index] = GpuLiveState(
+                index,
+                GPU_LIVE_BUSY,
+                reason,
+                score,
+                gpu.utilization_percent,
+                _memory_percent(gpu),
+                0,
+            )
+            continue
+
+        score = utilization * 100 + gpu.memory_used_mb
+        result[index] = GpuLiveState(
+            index,
+            GPU_LIVE_IDLE,
+            "",
+            score,
+            gpu.utilization_percent,
+            _memory_percent(gpu),
+            0,
+        )
+    return result
+
+
+def historical_gpu_loads(
+    history: dict,
+    gpu_count: int,
+    at: Optional[datetime] = None,
+    window_minutes: int = 30,
+    half_life_minutes: int = 10,
+) -> Dict[int, HistoricalGpuLoad]:
+    at = at or utc_now()
+    raw_gpus = history.get("gpus", {}) if isinstance(history, dict) else {}
+    result: Dict[int, HistoricalGpuLoad] = {}
+    for index in range(gpu_count):
+        records = raw_gpus.get(str(index), []) if isinstance(raw_gpus, dict) else []
+        weighted_util = 0.0
+        weighted_busy = 0.0
+        weighted_memory = 0.0
+        total_weight = 0.0
+        sample_count = 0
+        for record in records if isinstance(records, list) else []:
+            try:
+                window_end = parse_iso(str(record["window_end"]))
+                age_minutes = max(0.0, (at - window_end).total_seconds() / 60.0)
+                if age_minutes > window_minutes:
+                    continue
+                samples = max(1, int(record.get("known_samples", record.get("sample_count", 1))))
+                weight = math.exp(-math.log(2) * age_minutes / max(1, half_life_minutes)) * samples
+                util = float(record.get("avg_utilization_percent") or 0.0)
+                busy = float(record.get("busy_fraction") or 0.0)
+                memory = float(record.get("avg_memory_percent") or 0.0)
+            except (KeyError, TypeError, ValueError):
+                continue
+            weighted_util += util * weight
+            weighted_busy += busy * weight
+            weighted_memory += memory * weight
+            total_weight += weight
+            sample_count += samples
+
+        if total_weight <= 0:
+            result[index] = HistoricalGpuLoad(index=index)
+            continue
+        average_util = weighted_util / total_weight
+        busy_fraction = weighted_busy / total_weight
+        memory_percent = weighted_memory / total_weight
+        predicted = min(100.0, average_util * 0.65 + busy_fraction * 25.0 + memory_percent * 0.10)
+        result[index] = HistoricalGpuLoad(
+            index=index,
+            predicted_percent=predicted,
+            average_utilization_percent=average_util,
+            busy_fraction=busy_fraction,
+            memory_percent=memory_percent,
+            sample_count=sample_count,
+        )
+    return result
+
+
+def combined_gpu_scores(
+    states: Dict[int, GpuLiveState],
+    historical: Dict[int, HistoricalGpuLoad],
+) -> Dict[int, float]:
+    scores: Dict[int, float] = {}
+    for index, state in states.items():
+        utilization = float(state.utilization_percent or 0)
+        if state.status == GPU_LIVE_BUSY:
+            live_score = min(100.0, 70.0 + utilization * 0.20 + state.memory_percent * 0.10 + state.process_count * 5.0)
+        elif state.status == GPU_LIVE_UNKNOWN:
+            live_score = 45.0
+        else:
+            live_score = min(20.0, utilization * 0.50 + state.memory_percent * 0.10)
+
+        recent = historical.get(index, HistoricalGpuLoad(index=index))
+        if recent.sample_count:
+            scores[index] = round(live_score * 0.65 + recent.predicted_percent * 0.35, 3)
+        else:
+            scores[index] = round(live_score, 3)
+    return scores
+
+
+def gpu_selection_order(states: Dict[int, GpuLiveState], scores: Optional[Dict[int, float]] = None) -> List[int]:
+    status_order = {GPU_LIVE_IDLE: 0, GPU_LIVE_UNKNOWN: 1, GPU_LIVE_BUSY: 2}
+    return [
+        item.index
+        for item in sorted(
+            states.values(),
+            key=lambda item: (
+                scores.get(item.index, 0.0) if scores is not None else status_order.get(item.status, 1),
+                status_order.get(item.status, 1),
+                item.score,
+                item.index,
+            ),
+        )
+    ]
+
+
+def _memory_percent(gpu: GpuSnapshot) -> float:
+    if not gpu.memory_total_mb:
+        return 0.0
+    return min(100.0, max(0.0, gpu.memory_used_mb * 100.0 / gpu.memory_total_mb))
 
 
 def _classify_process(gpu: int, process: GpuProcessSnapshot, current: Sequence[dict]) -> ProcessUsage:
@@ -77,3 +279,7 @@ def _is_system_process(process: GpuProcessSnapshot) -> bool:
     executable = process.command.strip().split(maxsplit=1)[0] if process.command.strip() else ""
     name = executable.rsplit("/", 1)[-1].lower()
     return name in SYSTEM_GPU_PROCESS_NAMES
+
+
+def is_system_gpu_process(process: GpuProcessSnapshot) -> bool:
+    return _is_system_process(process)

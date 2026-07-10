@@ -25,6 +25,8 @@ from bk.tui import (
     _build_add_preview,
     _capacity_text,
     _cell_for_gpu,
+    _date_label,
+    _editor_banner_text,
     _gpu_label,
     _handle_add_key,
     _handle_key,
@@ -44,6 +46,7 @@ from bk.tui import (
     _time_axis_lines,
     _toggle_focus,
     _visible_shared_reservations,
+    _weekday_label,
 )
 from bk.timeparse import utc_now
 from bk.usage import ProcessUsage, USAGE_AUTHORIZED, USAGE_UNRESERVED
@@ -201,7 +204,7 @@ class TuiAddPreviewTests(unittest.TestCase):
             self.assertEqual(state.add_cursor_gpu, 1)
             self.assertEqual(state.add_start_steps, 0)
             self.assertFalse(state.error)
-            self.assertIn("auto found GPU=1", state.message)
+            self.assertIn("auto found 1 GPU [1]", state.message)
             self.assertEqual(len(store.load()["reservations"]), 1)
 
     def test_add_auto_find_preserves_the_selected_gpu_count(self):
@@ -221,7 +224,7 @@ class TuiAddPreviewTests(unittest.TestCase):
 
             self.assertEqual(state.add_selected_gpus, {1, 2})
             self.assertEqual(state.add_start_steps, 0)
-            self.assertIn("auto found GPU=1,2", state.message)
+            self.assertIn("auto found 2 GPU [1,2]", state.message)
             self.assertEqual(len(store.load()["reservations"]), 1)
 
     def test_add_fixed_find_keeps_selected_gpu_and_jumps_to_its_next_slot(self):
@@ -245,7 +248,7 @@ class TuiAddPreviewTests(unittest.TestCase):
             preview = _build_add_preview(store.load(), config, state, state.editor_view_start)
             self.assertEqual(preview.start, self.start + timedelta(minutes=45))
             self.assertTrue(preview.valid, preview.reason)
-            self.assertIn("fixed found GPU=0", state.message)
+            self.assertIn("fixed found 1 GPU [0]", state.message)
             self.assertEqual(len(store.load()["reservations"]), 1)
 
     def test_add_fixed_find_requires_a_gpu_selection(self):
@@ -273,6 +276,40 @@ class TuiAddPreviewTests(unittest.TestCase):
 
             self.assertEqual(state.message, "")
             self.assertFalse(state.error)
+
+    def test_number_key_sets_gpu_count_and_auto_finds_nearest_slot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=3, max_shared_users=1)
+            store = LedgerStore(config.data_dir)
+            actor = Actor(uid=os.getuid(), username="current")
+            add_booking(
+                store,
+                config,
+                BookingRequest(actor, 1, 30 * 60, self.start, MODE_EXCLUSIVE, [0]),
+            )
+            state = self.state(mode=MODE_EXCLUSIVE, gpus={0})
+            state.editor_view_start = self.start
+
+            _handle_add_key(ord("2"), config, store, state)
+
+            self.assertEqual(state.add_selected_gpus, {1, 2})
+            self.assertEqual(state.add_start_steps, 0)
+            self.assertIn("auto found 2 GPU [1,2]", state.message)
+
+    def test_plus_and_minus_adjust_duration_in_five_minute_steps(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=1)
+            store = LedgerStore(config.data_dir)
+            state = self.state(duration_steps=6)
+
+            _handle_add_key(ord("+"), config, store, state)
+            self.assertEqual(state.add_duration_steps, 7)
+            _handle_add_key(ord("-"), config, store, state)
+            self.assertEqual(state.add_duration_steps, 6)
+            _handle_add_key(ord("["), config, store, state)
+            self.assertEqual(state.add_duration_steps, 5)
+            _handle_add_key(ord("]"), config, store, state)
+            self.assertEqual(state.add_duration_steps, 6)
 
     def test_arrow_navigation_moves_between_gpu_and_reservation_focus(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -348,6 +385,52 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertEqual(state.add_selected_gpus, {1})
         self.assertEqual(state.add_cursor_gpu, 1)
         self.assertEqual(state.add_booking_mode, MODE_EXCLUSIVE)
+
+    def test_edit_auto_find_excludes_original_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=1, max_shared_users=1)
+            store = LedgerStore(config.data_dir)
+            actor = Actor(uid=os.getuid(), username="current")
+            created = add_booking(
+                store,
+                config,
+                BookingRequest(actor, 1, 30 * 60, self.start, MODE_EXCLUSIVE, [0]),
+            )
+            state = TuiState(selected=_own_reservation_index(store, created.reservation["id"]))
+            _start_edit_select(config, store, state)
+
+            _handle_add_key(ord("f"), config, store, state)
+
+            preview = _build_add_preview(store.load(), config, state, state.editor_view_start)
+            self.assertEqual(preview.start, self.start)
+            self.assertEqual(preview.selected_gpus, (0,))
+            self.assertTrue(preview.valid, preview.reason)
+            self.assertIn("auto found 1 GPU [0]", state.message)
+
+    def test_edit_reset_restores_original_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=2, max_shared_users=2)
+            store = LedgerStore(config.data_dir)
+            actor = Actor(uid=os.getuid(), username="current")
+            created = add_booking(
+                store,
+                config,
+                BookingRequest(actor, 1, 30 * 60, self.start, MODE_SHARED, [0]),
+            )
+            state = TuiState(selected=_own_reservation_index(store, created.reservation["id"]))
+            _start_edit_select(config, store, state)
+            _handle_add_key(curses.KEY_RIGHT, config, store, state)
+            _handle_add_key(ord("+"), config, store, state)
+            _handle_add_key(ord("x"), config, store, state)
+
+            _handle_add_key(ord("r"), config, store, state)
+
+            preview = _build_add_preview(store.load(), config, state, state.editor_view_start)
+            self.assertEqual(preview.start, self.start)
+            self.assertEqual(preview.end, self.start + timedelta(minutes=30))
+            self.assertEqual(preview.mode, MODE_SHARED)
+            self.assertEqual(preview.selected_gpus, (0,))
+            self.assertEqual(state.message, "edit reset to original")
 
     def test_timeline_edit_submits_exact_updated_selection(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -583,12 +666,15 @@ class TuiAddPreviewTests(unittest.TestCase):
 
         self.assertEqual(_hour_label(value), "17h")
         self.assertEqual(_minute_label(value), "15")
+        self.assertEqual(_weekday_label(datetime(2030, 1, 1)), "Tue")
+        self.assertEqual(_date_label(datetime(2030, 1, 1)), "01-01 Tue")
 
     def test_axis_draws_quarter_hour_labels_and_ruler(self):
         local_tz = datetime.now().astimezone().tzinfo
         start = datetime(2030, 1, 1, 17, 0, tzinfo=local_tz)
-        hours, minutes, ruler = _time_axis_lines(start, start + timedelta(minutes=125), 25)
+        dates, hours, minutes, ruler = _time_axis_lines(start, start + timedelta(minutes=125), 25)
 
+        self.assertEqual(dates[0:9], "01-01 Tue")
         self.assertEqual(hours[0:3], "17h")
         self.assertEqual(hours[12:15], "18h")
         self.assertEqual(minutes[3:5], "15")
@@ -601,12 +687,40 @@ class TuiAddPreviewTests(unittest.TestCase):
     def test_axis_keeps_first_quarter_tick_when_view_starts_near_it(self):
         local_tz = datetime.now().astimezone().tzinfo
         start = datetime(2030, 1, 1, 17, 25, tzinfo=local_tz)
-        hours, minutes, ruler = _time_axis_lines(start, start + timedelta(minutes=100), 20)
+        dates, hours, minutes, ruler = _time_axis_lines(start, start + timedelta(minutes=100), 20)
 
+        self.assertEqual(dates[0:9], "01-01 Tue")
         self.assertEqual(hours[0:3], "17h")
         self.assertEqual(minutes[1:3], "30")
         self.assertNotEqual(minutes[0:2], "25")
         self.assertEqual(ruler[1], "┿")
+
+    def test_axis_marks_new_date_and_weekday_at_midnight(self):
+        local_tz = datetime.now().astimezone().tzinfo
+        start = datetime(2030, 1, 1, 23, 30, tzinfo=local_tz)
+
+        dates, hours, _minutes, ruler = _time_axis_lines(start, start + timedelta(minutes=120), 24)
+
+        self.assertEqual(dates[6:15], "01-02 Wed")
+        self.assertEqual(hours[6:8], "0h")
+        self.assertEqual(ruler[6], "╋")
+
+    def test_editor_banner_summarizes_mode_count_date_and_duration(self):
+        local_tz = datetime.now().astimezone().tzinfo
+        start = datetime(2030, 1, 1, 17, 30, tzinfo=local_tz)
+        preview = AddPreview(start, start + timedelta(minutes=45), (0, 2), 0, MODE_EXCLUSIVE, True, blink=True)
+
+        add_text = _editor_banner_text(TuiState(add_mode=True), preview)
+        edit_text = _editor_banner_text(
+            TuiState(edit_mode=True, edit_reservation_id="abcdef123456"),
+            preview,
+        )
+
+        self.assertIn("ADD X", add_text)
+        self.assertIn("2 GPU [0,2]", add_text)
+        self.assertIn("Tue 01-01 17:30->18:15", add_text)
+        self.assertIn("45m", add_text)
+        self.assertIn("EDIT abcdef12 X", edit_text)
 
     def test_gpu_label_is_compact_and_shows_shared_peak(self):
         label = _gpu_label(GpuSnapshot(index=0, name="unknown"), 30, peak_shared=4, shared_limit=4)

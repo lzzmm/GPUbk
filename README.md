@@ -7,24 +7,26 @@
 ```bash
 bk
 bk 1 4h
-bk auto 1 4h
-bk exclusive 1 4h
-bk tui
-bk add
-bk edit <number_or_short_id>
-bk del <reservation_id>
-bk log
-bk doctor
-bk monitor
-bk usage
+bk 2 1h30m --mem 12g
+bk s 1 4h
+bk x 1 4h
+bk t
+bk a
+bk e <number_or_short_id>
+bk d <number_or_short_id>
+bk l
+bk m
+bk u
 bk reset --yes
 ```
 
 - `bk`：进入普通行式交互会话，不接管屏幕、不切换背景。
 - `bk 1 4h`：默认共享模式，自动预约 1 张 GPU 4 小时。
-- `bk auto 1 4h`：兼容别名，等价于 `bk 1 4h`。
-- `bk exclusive 1 4h`：排他模式，预约期间不允许其他人共享同一张卡。
-- `bk tui`：显式进入全屏 TUI 实验界面。
+- `bk 2 1h30m --mem 12g`：预约 2 张卡 1 小时 30 分钟，并声明每张卡预计使用 12 GiB 显存。
+- `bk s 1 4h`：显式 shared；`shared` / `auto` 仍兼容。
+- `bk x 1 4h`：exclusive 排他模式；完整单词 `exclusive` 仍兼容。
+- `bk t`：进入全屏 TUI；完整命令是 `bk tui`。
+- `a/e/d/l/m/u` 分别是 `add/edit/del/list/monitor/usage` 的短命令。
 - `bk doctor`：只读检查台账里违反当前策略的记录，例如 shared 超容量或 exclusive 重叠。
 - `bk monitor`：低开销持续采集 GPU 进程行为，记录状态变化和分钟级汇总。
 - `bk usage`：查看最近的进程事件；`bk usage --rollups` 查看利用率汇总。
@@ -38,6 +40,10 @@ bk reset --yes
 
 共享模式按预约记录计数：同一张 GPU 的同一 5 分钟时间片最多允许 `BK_MAX_SHARED_USERS` 条 shared 预约，哪怕这些预约来自同一个 UID；exclusive 仍然与任何重叠预约互斥。
 
+自动选卡不只看预约台账。系统按“当前进程与整卡利用率 + 最近 30 分钟衰减加权负载 + 请求时段内已有预约密度”生成可解释评分，优先选择当前空闲、近期负载低、未来预约稀疏的 GPU。实时任务没有可靠结束时间，因此它们是强优先级提示而不是伪造的永久预约：空闲卡足够时自动避开忙卡；不得不选择忙卡时明确输出当前用户/PID 或利用率警告。
+
+shared 预约建议使用 `--mem` 声明每张 GPU 的预计显存。调度器会同时检查 shared 记录数和预计显存总量；未声明的记录按“可分配显存 / shared limit”保守估算。创建结果会显示当前物理空闲显存和预约区间的预计剩余显存。管理员可设置 `BK_REQUIRE_SHARED_MEMORY=true` 将声明改为必填。
+
 所有对用户显示的时间都是本地时间，例如 `2026-07-08 14:30 +0800`；台账内部仍使用 UTC 保存。
 
 ## 配置
@@ -49,6 +55,8 @@ export BK_DATA_DIR=/data2/shared/bk
 export BK_GPU_COUNT=8
 export BK_MAX_SHARED_USERS=2
 export BK_QUEUE_SEARCH_HOURS=168
+export BK_REQUIRE_SHARED_MEMORY=false
+export BK_SHARED_MEMORY_RESERVE_MB=512
 ```
 
 也可以在数据目录下放置 `config.json`：
@@ -58,7 +66,9 @@ export BK_QUEUE_SEARCH_HOURS=168
   "gpu_count": 8,
   "max_shared_users": 2,
   "queue_search_hours": 168,
-  "lock_timeout_seconds": 10
+  "lock_timeout_seconds": 10,
+  "require_shared_memory": false,
+  "shared_memory_reserve_mb": 512
 }
 ```
 
@@ -106,6 +116,7 @@ bk usage --rollups --limit 20
 - `usage-events.jsonl`：只追加的 `process-start`、`process-stop`、`authorization-change` 事件。
 - `usage-rollups.jsonl`：按 GPU、UID、授权状态和预约集合聚合的利用率；包含进程数、SM、显存、整卡利用率和观察时长。
 - `usage-state.json`：当前进程状态，用于监测器重启后避免重复产生开始事件。
+- `usage-load.json`：每张 GPU 最近的紧凑负载窗口，用于自动选卡预测；默认只保留有限窗口，不在每次预约时扫描完整历史日志。
 - `usage.lock`：保证同一数据目录只有一个监测器运行。
 
 预约存在但没有对应进程时仍会生成 `status=ok`、`avg_process_count=0` 的汇总，用来识别预约空置。`bk reset --yes` 会在监测器未运行时一起清理这些审计文件；监测器正在运行时 reset 会因 `usage.lock` 超时而拒绝执行。
@@ -179,7 +190,7 @@ BK_DATA_DIR=/tmp/bk-dev BK_GPU_COUNT=2 BK_MAX_SHARED_USERS=2 PYTHONPATH=src pyth
 ```text
 bk> status
 bk> 1 2h --gpu 0
-bk> exclusive 1 2h --gpu 1
+bk> x 1 2h --gpu 1
 bk> list
 bk> edit 1
 bk> del 1
@@ -229,17 +240,20 @@ e 将当前选中的预约载入时间轴编辑模式
 ←/→ 以 5 分钟粒度移动开始时间
 ↑/↓ 移动 GPU 光标
 space 选中/取消当前 GPU，支持多卡
-[/] 缩短/延长持续时间，每次 5 分钟
++/- 或 [/] 缩短/延长持续时间，每次 5 分钟
+1-9 设置 GPU 数量，并立即自动跳到最近满足数量的时间和卡组
 s/x 切换 shared/exclusive
 f 按当前已选 GPU 数量，自动查找任意 GPU 的最近可用时段
 g 固定当前已选 GPU，仅查找这些卡的最近可用时段
+r 恢复 Add 默认值，或将 Edit 恢复为原预约
 Enter 提交当前时间轴选区，冲突时不会自动挪时间
 Esc 取消
 ```
 
-- `f` / `g` 从当前时间游标向后搜索，并把时间轴直接定位到结果；它们只更新闪烁预览，不会直接创建预约，仍需按 `Enter` 确认。
+- Add/Edit 顶部会显示模式、短 ID、GPU 数量与卡号、日期星期、起止时间、时长以及 `READY/BLOCKED` 状态。
+- `1-9`、`f` / `g` 从当前时间游标向后搜索，并把时间轴直接定位到结果；它们只更新预览，不会直接写入，仍需按 `Enter` 确认。
 - `f` 可以自动更换 GPU；如果当前没有选卡，则按 1 张 GPU 查找。`g` 要求至少选中一张 GPU，并保持这些卡不变。
-- edit 会预载原预约的开始时间、时长、GPU 和模式；校验时自动排除原记录，不会与自己冲突。
+- Edit 会预载原预约的开始时间、时长、GPU 和模式；校验和自动找位时都会排除原记录，不会与自己冲突，按 `r` 可恢复原值。
 - add/edit 进入时锁定时间轴基准，操作期间不会因跨过 5 分钟边界而自动跳格。
 - shared 预览使用青绿色，exclusive 预览使用橙色，冲突预览使用红色。
 - add 预览区间自身会闪烁；原来选中的预约在 add/edit 期间保持静止，避免两处同时闪烁。edit 预览保持常亮，便于和原区间比较。
@@ -253,7 +267,7 @@ GPU 焦点：
 TUI 时间轴：
 
 - 默认每列代表 5 分钟，顶部显示当前窗口范围。
-- 时间刻度分为小时、分钟和连续刻度尺三行；小时显示为 `17h`，分钟显示为 `15` / `30`，整点由小时行表达，不再重复显示 `00`。
+- 时间刻度分为日期、小时、分钟和连续刻度尺四行；左侧始终显示当前窗口的日期与星期，例如 `07-11 Fri`，跨午夜会在准确列标出下一天。小时显示为 `17h`，分钟显示为 `15` / `30`，整点不再重复显示 `00`。
 - 不同预约会用相对柔和的高对比颜色显示；同一个预约在时间轴和表格中颜色一致。
 - `.` 表示空闲，彩色 `█` 表示单条预约区间。
 - 主时间轴始终保持一张 GPU 一行，适合 8 卡以上机器查看全局占用。

@@ -207,6 +207,36 @@ class UsageMonitorTests(unittest.TestCase):
             self.assertEqual(rollup["avg_process_count"], 0)
             self.assertEqual(rollup["avg_sm_percent"], 0)
 
+    def test_monitor_persists_compact_per_gpu_load_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self.write_ledger(data_dir, [])
+            config = Config(data_dir=data_dir, gpu_count=1)
+            ledger_store = LedgerStore(data_dir)
+            audit_store = UsageAuditStore(data_dir)
+            devices = [
+                GpuSnapshot(
+                    0,
+                    "sim",
+                    memory_used_mb=12000,
+                    memory_total_mb=24000,
+                    utilization_percent=75,
+                    source="simulation",
+                )
+            ]
+            monitor = UsageMonitor(config, ledger_store, audit_store, snapshot_provider=lambda _config: devices)
+
+            monitor.collect(self.now)
+            monitor.collect(self.now + timedelta(seconds=2))
+            monitor.close(self.now + timedelta(seconds=3))
+
+            history = audit_store.load_load_history()
+            record = history["gpus"]["0"][0]
+            self.assertEqual(record["known_samples"], 2)
+            self.assertEqual(record["avg_utilization_percent"], 75)
+            self.assertEqual(record["avg_memory_percent"], 50)
+            self.assertEqual(record["busy_fraction"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

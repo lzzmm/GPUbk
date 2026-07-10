@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -173,6 +174,59 @@ class SchedulerModeTests(unittest.TestCase):
         self.assertTrue(preferred.queued)
         self.assertEqual(preferred.reservation["gpus"], [0])
         self.assertEqual(parse_iso(preferred.reservation["start_at"]), parse_iso(first.reservation["end_at"]))
+
+    def test_auto_shared_prefers_gpu_without_existing_shared_load(self):
+        config = Config(data_dir=Path(self.tmp.name), gpu_count=2, max_shared_users=2)
+        store = LedgerStore(config.data_dir)
+        add_booking(store, config, self.request(1001, MODE_SHARED, preferred_gpus=[0]))
+
+        result = add_booking(store, config, self.request(1002, MODE_SHARED))
+
+        self.assertEqual(result.reservation["gpus"], [1])
+
+    def test_shared_memory_budget_blocks_oversubscription(self):
+        capacities = {0: 24 * 1024}
+        add_booking(
+            self.store,
+            self.config,
+            replace(
+                self.request(1001, MODE_SHARED),
+                expected_memory_mb=16 * 1024,
+                gpu_memory_capacity_mb=capacities,
+            ),
+        )
+
+        with self.assertRaisesRegex(BookingError, "shared memory full"):
+            add_booking(
+                self.store,
+                self.config,
+                replace(
+                    self.request(1002, MODE_SHARED),
+                    expected_memory_mb=12 * 1024,
+                    gpu_memory_capacity_mb=capacities,
+                ),
+            )
+
+    def test_undeclared_shared_memory_uses_equal_share_assumption(self):
+        capacities = {0: 24 * 1024}
+        first_request = self.request(1001, MODE_SHARED)
+        add_booking(
+            self.store,
+            self.config,
+            replace(first_request, gpu_memory_capacity_mb=capacities),
+        )
+
+        with self.assertRaisesRegex(BookingError, "shared memory full"):
+            second_request = self.request(1002, MODE_SHARED)
+            add_booking(
+                self.store,
+                self.config,
+                replace(
+                    second_request,
+                    expected_memory_mb=16 * 1024,
+                    gpu_memory_capacity_mb=capacities,
+                ),
+            )
 
     def test_implicit_now_start_is_rounded_up_to_five_minute_grid(self):
         unaligned = self.start + timedelta(minutes=1)

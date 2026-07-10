@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 
 MODE_SHARED = "shared"
@@ -27,8 +27,14 @@ class BookingRequest:
     start_at: datetime
     mode: str = MODE_SHARED
     preferred_gpus: Optional[List[int]] = None
+    gpu_order: Optional[List[int]] = None
+    gpu_scores: Optional[Dict[int, float]] = None
     op_id: Optional[str] = None
     allow_queue: bool = False
+    command_argv: Optional[List[str]] = None
+    working_directory: Optional[str] = None
+    expected_memory_mb: Optional[int] = None
+    gpu_memory_capacity_mb: Optional[Dict[int, int]] = None
 
 
 @dataclass(frozen=True)
@@ -47,8 +53,12 @@ class EditRequest:
     duration_seconds: Optional[int] = None
     mode: Optional[str] = None
     preferred_gpus: Optional[List[int]] = None
+    gpu_order: Optional[List[int]] = None
+    gpu_scores: Optional[Dict[int, float]] = None
     count: Optional[int] = None
     allow_queue: bool = False
+    expected_memory_mb: Optional[int] = None
+    gpu_memory_capacity_mb: Optional[Dict[int, int]] = None
 
 
 class BookingError(RuntimeError):

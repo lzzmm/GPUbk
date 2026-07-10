@@ -83,6 +83,63 @@ class CliTests(unittest.TestCase):
             ledger = json.loads((Path(tmp) / "ledger.json").read_text(encoding="utf-8"))
             self.assertEqual(ledger["reservations"][0]["mode"], "shared")
 
+    def test_compound_duration_memory_and_live_idle_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            simulation = data_dir / "gpu-sim.json"
+            simulation.write_text(
+                json.dumps(
+                    {
+                        "gpus": [
+                            {
+                                "index": 0,
+                                "name": "busy",
+                                "memory_used_mb": 16000,
+                                "memory_total_mb": 24000,
+                                "utilization_percent": 80,
+                                "processes": [
+                                    {
+                                        "pid": 55,
+                                        "uid": os.getuid() + 1,
+                                        "username": "other",
+                                        "command": "python train.py",
+                                    }
+                                ],
+                            },
+                            {
+                                "index": 1,
+                                "name": "idle",
+                                "memory_used_mb": 100,
+                                "memory_total_mb": 24000,
+                                "utilization_percent": 0,
+                                "processes": [],
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = self.run_bk(
+                ["1", "1h30m", "--mem", "4g"],
+                data_dir,
+                {"BK_GPU_COUNT": "2", "BK_GPU_SIM_FILE": str(simulation)},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
+            booking = ledger["reservations"][0]
+            self.assertEqual(booking["gpus"], [1])
+            self.assertEqual(booking["expected_memory_mb"], 4096)
+            self.assertEqual(
+                datetime.fromisoformat(booking["end_at"].replace("Z", "+00:00"))
+                - datetime.fromisoformat(booking["start_at"].replace("Z", "+00:00")),
+                timedelta(minutes=90),
+            )
+            self.assertIn("selection: GPU 1", result.stdout)
+            self.assertIn("avoided currently busy GPU 0", result.stdout)
+            self.assertIn("now-free=", result.stdout)
+
     def test_auto_alias_defaults_to_shared(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_bk(["auto", "1", "30m"], Path(tmp))
@@ -96,6 +153,18 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             ledger = json.loads((Path(tmp) / "ledger.json").read_text(encoding="utf-8"))
             self.assertEqual(ledger["reservations"][0]["mode"], "exclusive")
+
+    def test_single_letter_shared_and_exclusive_aliases(self):
+        with tempfile.TemporaryDirectory() as shared_tmp, tempfile.TemporaryDirectory() as exclusive_tmp:
+            shared = self.run_bk(["s", "1", "30m"], Path(shared_tmp))
+            exclusive = self.run_bk(["x", "1", "30m"], Path(exclusive_tmp))
+
+            self.assertEqual(shared.returncode, 0, shared.stderr)
+            self.assertEqual(exclusive.returncode, 0, exclusive.stderr)
+            shared_ledger = json.loads((Path(shared_tmp) / "ledger.json").read_text(encoding="utf-8"))
+            exclusive_ledger = json.loads((Path(exclusive_tmp) / "ledger.json").read_text(encoding="utf-8"))
+            self.assertEqual(shared_ledger["reservations"][0]["mode"], "shared")
+            self.assertEqual(exclusive_ledger["reservations"][0]["mode"], "exclusive")
 
     def test_implicit_now_shared_request_overlaps_until_record_capacity_then_queues(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -217,6 +286,29 @@ class CliTests(unittest.TestCase):
             self.assertIn("cancelled:", delete.stdout)
             ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
             self.assertEqual(ledger["reservations"][0]["status"], "cancelled")
+
+    def test_short_management_aliases_list_edit_and_delete(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            create = self.run_bk(["1", "30m"], data_dir)
+            listed = self.run_bk(["l"], data_dir)
+            edited = self.run_bk(["e", "1", "--duration", "1h"], data_dir)
+            deleted = self.run_bk(["d", "1"], data_dir)
+
+            self.assertEqual(create.returncode, 0, create.stderr)
+            self.assertEqual(listed.returncode, 0, listed.stderr)
+            self.assertIn("shared", listed.stdout)
+            self.assertEqual(edited.returncode, 0, edited.stderr)
+            self.assertIn("updated:", edited.stdout)
+            self.assertEqual(deleted.returncode, 0, deleted.stderr)
+            self.assertIn("cancelled:", deleted.stdout)
+
+    def test_short_status_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self.run_bk(["st"], Path(tmp))
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("GPU summary", result.stdout)
 
     def test_edit_by_short_id_changes_duration(self):
         with tempfile.TemporaryDirectory() as tmp:
