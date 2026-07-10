@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bk-gpu-booker"
+version = "0.1.0"
+description = "Offline TUI and CLI GPU booking tool for shared lab servers."
+readme = "README.md"
+requires-python = ">=3.9"
+authors = [{ name = "BK maintainers" }]
+dependencies = []
+
+[project.optional-dependencies]
+tui = ["textual>=0.70"]
+gpu = ["nvidia-ml-py>=12"]
+
+[project.scripts]
+bk = "bk.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

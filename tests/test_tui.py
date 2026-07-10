@@ -1,0 +1,674 @@
+import os
+import curses
+import tempfile
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from bk.config import Config
+from bk.gpu import GpuProcessSnapshot, GpuSnapshot
+from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingRequest
+from bk.scheduler import add_booking
+from bk.storage import LedgerStore
+from bk.tui import (
+    AddPreview,
+    BAR_CHAR,
+    COLOR_PREVIEW_EXCLUSIVE,
+    COLOR_PREVIEW_SHARED,
+    FOCUS_GPUS,
+    FOCUS_RESERVATIONS,
+    MIXED_COLOR_PAIRS,
+    SHARED_CHAR,
+    SPLIT_CHAR,
+    TuiState,
+    WEAVE_CHARS,
+    _build_add_preview,
+    _capacity_text,
+    _cell_for_gpu,
+    _gpu_label,
+    _handle_add_key,
+    _handle_key,
+    _hour_label,
+    _load_edit_state,
+    _minute_label,
+    _move_focus_down,
+    _move_focus_up,
+    _own_reservation_index,
+    _preview_cell_for_gpu,
+    _process_table_line,
+    _reservation_color_map,
+    _selected_share_detail,
+    _shared_weave_pair,
+    _start_edit_select,
+    _timeline_selected_id,
+    _time_axis_lines,
+    _toggle_focus,
+    _visible_shared_reservations,
+)
+from bk.timeparse import utc_now
+from bk.usage import ProcessUsage, USAGE_AUTHORIZED, USAGE_UNRESERVED
+
+
+def iso(dt):
+    return dt.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def ceil_5m(value):
+    timestamp = int(value.timestamp())
+    remainder = timestamp % 300
+    if remainder:
+        timestamp += 300 - remainder
+    return datetime.fromtimestamp(timestamp, timezone.utc)
+
+
+def reservation(rid, uid, mode, gpus, start, end):
+    return {
+        "id": rid,
+        "op_id": f"{rid}-op",
+        "uid": uid,
+        "username": f"user{uid}",
+        "gpus": gpus,
+        "mode": mode,
+        "start_at": iso(start),
+        "end_at": iso(end),
+        "status": "active",
+        "created_at": iso(start),
+        "updated_at": iso(start),
+    }
+
+
+class TuiAddPreviewTests(unittest.TestCase):
+    def setUp(self):
+        self.config = Config(data_dir=Path("/tmp/bk-tui-test"), gpu_count=2, max_shared_users=2)
+        self.start = ceil_5m(utc_now() + timedelta(days=1))
+        self.end = self.start + timedelta(minutes=30)
+
+    def state(self, *, mode=MODE_SHARED, gpus=None, duration_steps=6):
+        return TuiState(
+            add_mode=True,
+            add_cursor_gpu=0,
+            add_start_steps=0,
+            add_duration_steps=duration_steps,
+            add_selected_gpus=set([0] if gpus is None else gpus),
+            add_booking_mode=mode,
+        )
+
+    def ledger(self, reservations):
+        return {"version": 1, "reservations": reservations}
+
+    def test_preview_allows_shared_overlap_under_record_limit(self):
+        existing = reservation("one", os.getuid(), MODE_SHARED, [0], self.start, self.end)
+
+        preview = _build_add_preview(self.ledger([existing]), self.config, self.state(), self.start)
+
+        self.assertTrue(preview.valid, preview.reason)
+        self.assertEqual(preview.selected_gpus, (0,))
+        self.assertEqual(preview.start, self.start)
+        self.assertEqual(preview.end, self.end)
+
+    def test_preview_rejects_shared_overlap_over_record_limit(self):
+        existing = [
+            reservation("one", os.getuid(), MODE_SHARED, [0], self.start, self.end),
+            reservation("two", os.getuid(), MODE_SHARED, [0], self.start, self.end),
+        ]
+
+        preview = _build_add_preview(self.ledger(existing), self.config, self.state(), self.start)
+
+        self.assertFalse(preview.valid)
+        self.assertTrue(preview.blink)
+        self.assertIn("shared capacity full", preview.reason)
+
+    def test_preview_rejects_exclusive_overlap_on_any_selected_gpu(self):
+        existing = [reservation("one", os.getuid() + 1, MODE_SHARED, [1], self.start, self.end)]
+
+        preview = _build_add_preview(
+            self.ledger(existing),
+            self.config,
+            self.state(mode=MODE_EXCLUSIVE, gpus={0, 1}),
+            self.start,
+        )
+
+        self.assertFalse(preview.valid)
+        self.assertIn("shared reservations", preview.reason)
+
+    def test_preview_colors_distinguish_modes_and_add_interval_blinks(self):
+        shared = AddPreview(self.start, self.end, (0,), 0, MODE_SHARED, True, blink=True)
+        exclusive = AddPreview(self.start, self.end, (0,), 0, MODE_EXCLUSIVE, True, blink=True)
+        steady_edit = AddPreview(self.start, self.end, (0,), 0, MODE_SHARED, True)
+
+        shared_cell = _preview_cell_for_gpu(0, self.start, self.end, shared)
+        exclusive_cell = _preview_cell_for_gpu(0, self.start, self.end, exclusive)
+        edit_cell = _preview_cell_for_gpu(0, self.start, self.end, steady_edit)
+
+        self.assertIsNotNone(shared_cell)
+        self.assertIsNotNone(exclusive_cell)
+        self.assertEqual(shared_cell[1], COLOR_PREVIEW_SHARED)
+        self.assertEqual(exclusive_cell[1], COLOR_PREVIEW_EXCLUSIVE)
+        self.assertNotEqual(shared_cell[1], exclusive_cell[1])
+        self.assertFalse(shared_cell[2] & curses.A_REVERSE)
+        self.assertTrue(shared_cell[2] & curses.A_BLINK)
+        self.assertFalse(exclusive_cell[2] & curses.A_REVERSE)
+        self.assertTrue(exclusive_cell[2] & curses.A_BLINK)
+        self.assertFalse(edit_cell[2] & curses.A_BLINK)
+
+    def test_editor_modes_suppress_existing_reservation_selection(self):
+        active = [reservation("mine", os.getuid(), MODE_SHARED, [0], self.start, self.end)]
+
+        self.assertEqual(_timeline_selected_id(active, TuiState()), "mine")
+        self.assertIsNone(_timeline_selected_id(active, TuiState(add_mode=True)))
+        self.assertIsNone(_timeline_selected_id(active, TuiState(edit_mode=True)))
+        self.assertIsNone(_timeline_selected_id(active, TuiState(focus=FOCUS_GPUS)))
+
+    def test_gpu_focus_navigation_and_add_uses_focused_gpu(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=2, max_shared_users=2)
+            store = LedgerStore(config.data_dir)
+            actor = Actor(uid=os.getuid(), username="current")
+            add_booking(
+                store,
+                config,
+                BookingRequest(actor, 1, 30 * 60, self.start, MODE_SHARED, [1]),
+            )
+            state = TuiState(selected=0)
+
+            _toggle_focus(config, store, state)
+            self.assertEqual(state.focus, FOCUS_GPUS)
+            self.assertEqual(state.selected_gpu, 1)
+
+            _handle_key(None, ord("a"), config, store, state)
+            self.assertTrue(state.add_mode)
+            self.assertEqual(state.add_cursor_gpu, 1)
+            self.assertEqual(state.add_selected_gpus, {1})
+            preview = _build_add_preview(store.load(), config, state, state.editor_view_start)
+            self.assertTrue(preview.blink)
+
+    def test_add_auto_find_switches_to_an_available_gpu_without_writing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=2, max_shared_users=1)
+            store = LedgerStore(config.data_dir)
+            actor = Actor(uid=os.getuid(), username="current")
+            add_booking(
+                store,
+                config,
+                BookingRequest(actor, 1, 30 * 60, self.start, MODE_EXCLUSIVE, [0]),
+            )
+            state = self.state(mode=MODE_EXCLUSIVE, gpus={0})
+            state.editor_view_start = self.start
+
+            _handle_add_key(ord("f"), config, store, state)
+
+            self.assertEqual(state.add_selected_gpus, {1})
+            self.assertEqual(state.add_cursor_gpu, 1)
+            self.assertEqual(state.add_start_steps, 0)
+            self.assertFalse(state.error)
+            self.assertIn("auto found GPU=1", state.message)
+            self.assertEqual(len(store.load()["reservations"]), 1)
+
+    def test_add_auto_find_preserves_the_selected_gpu_count(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=3, max_shared_users=1)
+            store = LedgerStore(config.data_dir)
+            actor = Actor(uid=os.getuid(), username="current")
+            add_booking(
+                store,
+                config,
+                BookingRequest(actor, 1, 30 * 60, self.start, MODE_EXCLUSIVE, [0]),
+            )
+            state = self.state(mode=MODE_EXCLUSIVE, gpus={0, 1})
+            state.editor_view_start = self.start
+
+            _handle_add_key(ord("f"), config, store, state)
+
+            self.assertEqual(state.add_selected_gpus, {1, 2})
+            self.assertEqual(state.add_start_steps, 0)
+            self.assertIn("auto found GPU=1,2", state.message)
+            self.assertEqual(len(store.load()["reservations"]), 1)
+
+    def test_add_fixed_find_keeps_selected_gpu_and_jumps_to_its_next_slot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=2, max_shared_users=1)
+            store = LedgerStore(config.data_dir)
+            actor = Actor(uid=os.getuid(), username="current")
+            add_booking(
+                store,
+                config,
+                BookingRequest(actor, 1, 45 * 60, self.start, MODE_EXCLUSIVE, [0]),
+            )
+            state = self.state(mode=MODE_EXCLUSIVE, gpus={0}, duration_steps=6)
+            state.editor_view_start = self.start
+
+            _handle_add_key(ord("g"), config, store, state)
+
+            self.assertEqual(state.add_selected_gpus, {0})
+            self.assertEqual(state.editor_view_start, self.start + timedelta(minutes=15))
+            self.assertEqual(state.add_start_steps, 6)
+            preview = _build_add_preview(store.load(), config, state, state.editor_view_start)
+            self.assertEqual(preview.start, self.start + timedelta(minutes=45))
+            self.assertTrue(preview.valid, preview.reason)
+            self.assertIn("fixed found GPU=0", state.message)
+            self.assertEqual(len(store.load()["reservations"]), 1)
+
+    def test_add_fixed_find_requires_a_gpu_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=2, max_shared_users=1)
+            store = LedgerStore(config.data_dir)
+            state = self.state(gpus=set())
+            state.editor_view_start = self.start
+
+            _handle_add_key(ord("g"), config, store, state)
+
+            self.assertTrue(state.error)
+            self.assertIn("select at least one GPU", state.message)
+            self.assertEqual(store.load()["reservations"], [])
+
+    def test_manual_adjustment_clears_auto_find_feedback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=1, max_shared_users=1)
+            store = LedgerStore(config.data_dir)
+            state = self.state()
+            state.editor_view_start = self.start
+            state.message = "auto found"
+
+            _handle_add_key(curses.KEY_RIGHT, config, store, state)
+
+            self.assertEqual(state.message, "")
+            self.assertFalse(state.error)
+
+    def test_arrow_navigation_moves_between_gpu_and_reservation_focus(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=4, max_shared_users=2)
+            store = LedgerStore(config.data_dir)
+            state = TuiState(focus=FOCUS_RESERVATIONS, selected=0)
+
+            _move_focus_up(config, store, state)
+            self.assertEqual(state.focus, FOCUS_GPUS)
+            self.assertEqual(state.selected_gpu, 3)
+
+            _move_focus_down(config, store, state)
+            self.assertEqual(state.focus, FOCUS_RESERVATIONS)
+
+    def test_gpu_focus_detail_lists_only_visible_shared_reservations(self):
+        visible = reservation("visible", os.getuid(), MODE_SHARED, [0], self.start, self.end)
+        other_gpu = reservation("other", os.getuid(), MODE_SHARED, [1], self.start, self.end)
+        exclusive = reservation("exclusive", os.getuid(), MODE_EXCLUSIVE, [0], self.start, self.end)
+        later = reservation(
+            "later",
+            os.getuid(),
+            MODE_SHARED,
+            [0],
+            self.end,
+            self.end + timedelta(minutes=30),
+        )
+
+        detail = _visible_shared_reservations(
+            [visible, other_gpu, exclusive, later],
+            0,
+            self.start,
+            self.end,
+        )
+
+        self.assertEqual([item["id"] for item in detail], ["visible"])
+
+    def test_edit_preview_ignores_the_reservation_being_edited(self):
+        config = Config(data_dir=Path("/tmp/bk-tui-test"), gpu_count=1, max_shared_users=1)
+        existing = reservation("mine", os.getuid(), MODE_SHARED, [0], self.start, self.end)
+        state = TuiState(
+            edit_mode=True,
+            edit_reservation_id="mine",
+            add_cursor_gpu=0,
+            add_start_steps=0,
+            add_duration_steps=6,
+            add_selected_gpus={0},
+            add_booking_mode=MODE_SHARED,
+        )
+
+        preview = _build_add_preview(self.ledger([existing]), config, state, self.start)
+
+        self.assertTrue(preview.valid, preview.reason)
+
+    def test_edit_state_loads_existing_time_gpus_and_mode(self):
+        existing = reservation(
+            "mine",
+            os.getuid(),
+            MODE_EXCLUSIVE,
+            [1],
+            self.start,
+            self.start + timedelta(minutes=45),
+        )
+        state = TuiState(add_mode=True)
+
+        _load_edit_state(self.config, state, existing)
+
+        self.assertFalse(state.add_mode)
+        self.assertTrue(state.edit_mode)
+        self.assertEqual(state.edit_reservation_id, "mine")
+        self.assertEqual(state.editor_view_start, self.start - timedelta(minutes=30))
+        self.assertEqual(state.add_start_steps, 6)
+        self.assertEqual(state.add_duration_steps, 9)
+        self.assertEqual(state.add_selected_gpus, {1})
+        self.assertEqual(state.add_cursor_gpu, 1)
+        self.assertEqual(state.add_booking_mode, MODE_EXCLUSIVE)
+
+    def test_timeline_edit_submits_exact_updated_selection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=2, max_shared_users=2)
+            store = LedgerStore(config.data_dir)
+            actor = Actor(uid=os.getuid(), username="current")
+            created = add_booking(
+                store,
+                config,
+                BookingRequest(
+                    actor=actor,
+                    count=1,
+                    duration_seconds=30 * 60,
+                    start_at=self.start,
+                    mode=MODE_SHARED,
+                    preferred_gpus=[0],
+                ),
+            )
+            state = TuiState(selected=_own_reservation_index(store, created.reservation["id"]))
+            _start_edit_select(config, store, state)
+
+            _handle_add_key(curses.KEY_RIGHT, config, store, state)
+            _handle_add_key(ord("]"), config, store, state)
+            _handle_add_key(ord(" "), config, store, state)
+            _handle_add_key(curses.KEY_DOWN, config, store, state)
+            _handle_add_key(ord(" "), config, store, state)
+            _handle_add_key(ord("x"), config, store, state)
+            _handle_add_key(10, config, store, state)
+
+            updated = next(
+                item
+                for item in store.load()["reservations"]
+                if item["id"] == created.reservation["id"]
+            )
+            self.assertFalse(state.editor_active)
+            self.assertEqual(state.message, f"updated {created.reservation['id'][:8]}")
+            self.assertEqual(updated["mode"], MODE_EXCLUSIVE)
+            self.assertEqual(updated["gpus"], [1])
+            self.assertEqual(updated["start_at"], iso(self.start + timedelta(minutes=5)))
+            self.assertEqual(updated["end_at"], iso(self.start + timedelta(minutes=40)))
+
+    def test_conflicting_timeline_edit_stays_open_and_keeps_original(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=2, max_shared_users=2)
+            store = LedgerStore(config.data_dir)
+            actor = Actor(uid=os.getuid(), username="current")
+            target = add_booking(
+                store,
+                config,
+                BookingRequest(actor, 1, 30 * 60, self.start, MODE_SHARED, [0]),
+            )
+            add_booking(
+                store,
+                config,
+                BookingRequest(actor, 1, 30 * 60, self.start, MODE_EXCLUSIVE, [1]),
+            )
+            state = TuiState(selected=_own_reservation_index(store, target.reservation["id"]))
+            _start_edit_select(config, store, state)
+
+            _handle_add_key(ord(" "), config, store, state)
+            _handle_add_key(curses.KEY_DOWN, config, store, state)
+            _handle_add_key(ord(" "), config, store, state)
+            _handle_add_key(ord("x"), config, store, state)
+            _handle_add_key(10, config, store, state)
+
+            original = next(
+                item
+                for item in store.load()["reservations"]
+                if item["id"] == target.reservation["id"]
+            )
+            self.assertTrue(state.edit_mode)
+            self.assertTrue(state.error)
+            self.assertIn("conflict", state.message)
+            self.assertEqual(original["mode"], MODE_SHARED)
+            self.assertEqual(original["gpus"], [0])
+
+    def test_capacity_text_reports_peak_shared_records(self):
+        active = [
+            reservation("one", os.getuid(), MODE_SHARED, [0], self.start, self.end),
+            reservation("two", os.getuid(), MODE_SHARED, [0], self.start, self.end),
+            reservation("exclusive", os.getuid(), MODE_EXCLUSIVE, [1], self.start, self.end),
+        ]
+
+        self.assertEqual(_capacity_text(active[0], active, 2), "2/2")
+        self.assertEqual(_capacity_text(active[2], active, 2), "-")
+
+    def test_two_shared_reservations_split_gpu_band_into_vertical_lanes(self):
+        active = [
+            reservation("one", os.getuid(), MODE_SHARED, [0], self.start, self.end),
+            reservation("two", os.getuid(), MODE_SHARED, [0], self.start, self.end),
+        ]
+
+        color_map = _reservation_color_map(active)
+        top_lane = _cell_for_gpu(0, color_map, active, self.start, self.start + timedelta(minutes=5), "two", 0, 0, 4)
+        bottom_lane = _cell_for_gpu(0, color_map, active, self.start, self.start + timedelta(minutes=5), "two", 0, 3, 4)
+
+        self.assertEqual(top_lane[0], BAR_CHAR)
+        self.assertEqual(bottom_lane[0], BAR_CHAR)
+        self.assertEqual(top_lane[1], color_map["one"])
+        self.assertEqual(bottom_lane[1], color_map["two"])
+        self.assertFalse(top_lane[2] & curses.A_BLINK)
+        self.assertTrue(bottom_lane[2] & curses.A_BLINK)
+
+    def test_four_shared_reservations_can_use_four_distinct_vertical_lanes(self):
+        active = [
+            reservation("a", os.getuid(), MODE_SHARED, [0], self.start, self.end),
+            reservation("b", os.getuid() + 1, MODE_SHARED, [0], self.start, self.end),
+            reservation("c", os.getuid() + 2, MODE_SHARED, [0], self.start, self.end),
+            reservation("d", os.getuid() + 3, MODE_SHARED, [0], self.start, self.end),
+        ]
+
+        color_map = _reservation_color_map(active)
+        cells = [
+            _cell_for_gpu(0, color_map, active, self.start, self.start + timedelta(minutes=5), "c", 0, lane, 4)
+            for lane in range(4)
+        ]
+
+        self.assertTrue(all(cell[0] == BAR_CHAR for cell in cells))
+        self.assertEqual([cell[1] for cell in cells], [color_map["a"], color_map["b"], color_map["c"], color_map["d"]])
+        self.assertFalse(cells[0][2] & curses.A_BLINK)
+        self.assertTrue(cells[2][2] & curses.A_BLINK)
+
+    def test_compact_row_marks_three_or_more_shared_reservations(self):
+        active = [
+            reservation("a", os.getuid(), MODE_SHARED, [0], self.start, self.end),
+            reservation("b", os.getuid() + 1, MODE_SHARED, [0], self.start, self.end),
+            reservation("c", os.getuid() + 2, MODE_SHARED, [0], self.start, self.end),
+        ]
+
+        cell = _cell_for_gpu(
+            0,
+            _reservation_color_map(active),
+            active,
+            self.start,
+            self.start + timedelta(minutes=5),
+            "b",
+        )
+
+        self.assertEqual(cell[0], SHARED_CHAR)
+        self.assertTrue(cell[2] & curses.A_BLINK)
+
+    def test_compact_row_weaves_three_shared_reservations_with_equal_color_pairs(self):
+        active = [
+            reservation("a", os.getuid(), MODE_SHARED, [0], self.start, self.end),
+            reservation("b", os.getuid() + 1, MODE_SHARED, [0], self.start, self.end),
+            reservation("c", os.getuid() + 2, MODE_SHARED, [0], self.start, self.end),
+        ]
+        color_map = _reservation_color_map(active)
+        old_pairs = dict(MIXED_COLOR_PAIRS)
+        pair_ids = {}
+        for index, (left, right) in enumerate(
+            (_shared_weave_pair(active, col) for col in range(3)),
+            start=90,
+        ):
+            key = tuple(sorted((color_map[left["id"]], color_map[right["id"]])))
+            pair_ids[key] = index
+        MIXED_COLOR_PAIRS.update(pair_ids)
+        try:
+            cells = [
+                _cell_for_gpu(
+                    0,
+                    color_map,
+                    active,
+                    self.start,
+                    self.start + timedelta(minutes=5),
+                    "b",
+                    col=col,
+                )
+                for col in range(3)
+            ]
+        finally:
+            MIXED_COLOR_PAIRS.clear()
+            MIXED_COLOR_PAIRS.update(old_pairs)
+
+        self.assertEqual([cell[0] for cell in cells], [WEAVE_CHARS[0], WEAVE_CHARS[1], WEAVE_CHARS[0]])
+        self.assertTrue(cells[0][2] & curses.A_BLINK)
+        self.assertTrue(cells[1][2] & curses.A_BLINK)
+        self.assertFalse(cells[2][2] & curses.A_BLINK)
+
+    def test_shared_weave_gives_each_reservation_equal_area_per_period(self):
+        for count in (3, 4, 5, 6, 8):
+            items = [{"id": str(index)} for index in range(count)]
+            period = count if count % 2 else count // 2
+            appearances = {item["id"]: 0 for item in items}
+            for col in range(period):
+                top, bottom = _shared_weave_pair(items, col)
+                appearances[top["id"]] += 1
+                appearances[bottom["id"]] += 1
+
+            self.assertEqual(len(set(appearances.values())), 1, (count, appearances))
+
+    def test_two_shared_reservations_use_split_color_cell_when_available(self):
+        active = [
+            reservation("one", os.getuid(), MODE_SHARED, [0], self.start, self.end),
+            reservation("two", os.getuid() + 1, MODE_SHARED, [0], self.start, self.end),
+        ]
+        color_map = _reservation_color_map(active)
+        key = tuple(sorted((color_map["one"], color_map["two"])))
+        old_pairs = dict(MIXED_COLOR_PAIRS)
+        MIXED_COLOR_PAIRS[key] = 99
+        try:
+            cell = _cell_for_gpu(0, color_map, active, self.start, self.start + timedelta(minutes=5), "one")
+        finally:
+            MIXED_COLOR_PAIRS.clear()
+            MIXED_COLOR_PAIRS.update(old_pairs)
+
+        self.assertEqual(cell[0], SPLIT_CHAR)
+        self.assertEqual(cell[1], 99)
+        self.assertTrue(cell[2] & curses.A_BLINK)
+
+    def test_non_overlapping_reservations_rotate_colors(self):
+        active = [
+            reservation(f"r{index}", os.getuid() + index, MODE_SHARED, [0], self.start + timedelta(hours=index), self.end + timedelta(hours=index))
+            for index in range(4)
+        ]
+
+        color_map = _reservation_color_map(active)
+
+        self.assertEqual(len(set(color_map.values())), 4)
+
+    def test_eight_overlapping_reservations_have_distinct_logical_colors(self):
+        active = [
+            reservation(str(index), os.getuid() + index, MODE_SHARED, [0], self.start, self.end)
+            for index in range(8)
+        ]
+
+        color_map = _reservation_color_map(active)
+
+        self.assertEqual(len(set(color_map.values())), 8)
+
+    def test_axis_labels_use_hour_suffix_and_plain_minutes(self):
+        value = self.start.replace(hour=17, minute=15)
+
+        self.assertEqual(_hour_label(value), "17h")
+        self.assertEqual(_minute_label(value), "15")
+
+    def test_axis_draws_quarter_hour_labels_and_ruler(self):
+        local_tz = datetime.now().astimezone().tzinfo
+        start = datetime(2030, 1, 1, 17, 0, tzinfo=local_tz)
+        hours, minutes, ruler = _time_axis_lines(start, start + timedelta(minutes=125), 25)
+
+        self.assertEqual(hours[0:3], "17h")
+        self.assertEqual(hours[12:15], "18h")
+        self.assertEqual(minutes[3:5], "15")
+        self.assertEqual(minutes[6:8], "30")
+        self.assertEqual(minutes[9:11], "45")
+        self.assertEqual(ruler[0], "╋")
+        self.assertEqual(ruler[3], "┬")
+        self.assertEqual(ruler[6], "┿")
+
+    def test_axis_keeps_first_quarter_tick_when_view_starts_near_it(self):
+        local_tz = datetime.now().astimezone().tzinfo
+        start = datetime(2030, 1, 1, 17, 25, tzinfo=local_tz)
+        hours, minutes, ruler = _time_axis_lines(start, start + timedelta(minutes=100), 20)
+
+        self.assertEqual(hours[0:3], "17h")
+        self.assertEqual(minutes[1:3], "30")
+        self.assertNotEqual(minutes[0:2], "25")
+        self.assertEqual(ruler[1], "┿")
+
+    def test_gpu_label_is_compact_and_shows_shared_peak(self):
+        label = _gpu_label(GpuSnapshot(index=0, name="unknown"), 30, peak_shared=4, shared_limit=4)
+        narrow = _gpu_label(GpuSnapshot(index=0, name="unknown"), 20, peak_shared=4, shared_limit=4)
+
+        self.assertIn("GPU0", label)
+        self.assertIn("no telemetry", label)
+        self.assertIn("S4/4", label)
+        self.assertIn("S4/4", narrow)
+        self.assertNotIn("unknown", label)
+
+    def test_gpu_label_shows_live_utilization_processes_and_violations(self):
+        process = GpuProcessSnapshot(123, 1001, "alice", "python train.py")
+        gpu = GpuSnapshot(
+            index=0,
+            name="Sim Pro 6000",
+            memory_used_mb=4096,
+            memory_total_mb=98304,
+            utilization_percent=72,
+            temperature_c=61,
+            processes=(process,),
+            source="simulation",
+        )
+
+        label = _gpu_label(gpu, 32, peak_shared=2, shared_limit=4, violations=1)
+
+        self.assertIn("!1", label)
+        self.assertIn("S2/4", label)
+        self.assertIn("U72%", label)
+        self.assertIn("4.0/96G", label)
+
+    def test_process_table_line_contains_user_utilization_state_and_command(self):
+        process = GpuProcessSnapshot(4321, 1001, "alice", "python train.py", 3072, 68, "C")
+        authorized = ProcessUsage(0, process, USAGE_AUTHORIZED, ("booking-123",))
+        violation = ProcessUsage(0, process, USAGE_UNRESERVED)
+
+        wide = _process_table_line(authorized, 120)
+        compact = _process_table_line(violation, 80)
+
+        self.assertIn("alice", wide)
+        self.assertIn("68%", wide)
+        self.assertIn("bookin", wide)
+        self.assertIn("python train.py", wide)
+        self.assertIn("unreserved", compact)
+
+    def test_share_detail_chooses_gpu_with_most_related_reservations(self):
+        selected = reservation("selected", os.getuid(), MODE_SHARED, [0, 1], self.start, self.end)
+        active = [
+            selected,
+            reservation("gpu0-peer", os.getuid() + 1, MODE_SHARED, [0], self.start, self.end),
+            reservation("gpu1-peer-a", os.getuid() + 2, MODE_SHARED, [1], self.start, self.end),
+            reservation("gpu1-peer-b", os.getuid() + 3, MODE_SHARED, [1], self.start, self.end),
+        ]
+
+        detail = _selected_share_detail(active, selected, self.start, self.end)
+
+        self.assertIsNotNone(detail)
+        gpu, related = detail
+        self.assertEqual(gpu, 1)
+        self.assertEqual(related[0]["id"], "selected")
+        self.assertEqual(len(related), 3)
+
+
+if __name__ == "__main__":
+    unittest.main()
