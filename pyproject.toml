@@ -63,6 +63,12 @@ branch = true
 patch = ["subprocess"]
 source = ["bk"]
 
+[tool.coverage.paths]
+source = [
+  "src/bk",
+  "*/site-packages/bk",
+]
+
 [tool.coverage.report]
 fail_under = 65
 show_missing = true

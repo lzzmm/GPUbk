@@ -16,7 +16,7 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - run: python -m pip install '.[mcp]' coverage ruff pip-audit
+      - run: python -m pip install -e '.[mcp]' coverage ruff pip-audit
       - run: python -m compileall -q src tests benchmarks
       - run: ruff check src tests benchmarks
       - run: PYTHONPATH=src python benchmarks/scheduler_queue.py --days 1

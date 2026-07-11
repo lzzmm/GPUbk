@@ -44,6 +44,16 @@ class ReleaseConfigurationTests(unittest.TestCase):
 
         self.assertEqual(unpinned, [], "mutable GitHub Action refs:\n" + "\n".join(unpinned))
 
+    def test_quality_coverage_uses_one_normalized_source_tree(self):
+        workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+
+        self.assertIn("python -m pip install -e '.[mcp]' coverage ruff pip-audit", workflow)
+        self.assertRegex(
+            pyproject,
+            r'(?s)\[tool\.coverage\.paths\]\s+source = \[\s+"src/bk",\s+"\*/site-packages/bk",\s+\]',
+        )
+
     def test_public_release_metadata_is_complete(self):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
