@@ -432,12 +432,18 @@ class CliTests(unittest.TestCase):
             data_dir = Path(tmp)
             first = self.run_bk(["1", "30m", "--op-id", "agent-request-42"], data_dir)
             second = self.run_bk(["1", "30m", "--op-id", "agent-request-42"], data_dir)
+            mismatch = self.run_bk(
+                ["1", "45m", "--op-id", "agent-request-42", "--json"],
+                data_dir,
+            )
 
             self.assertEqual(first.returncode, 0, first.stderr)
             self.assertEqual(second.returncode, 0, second.stderr)
+            self.assertEqual(mismatch.returncode, 2, mismatch.stderr)
             ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
             self.assertEqual(len(ledger["reservations"]), 1)
             self.assertIn("exists:", second.stdout)
+            self.assertIn("different write", json.loads(mismatch.stdout)["error"]["message"])
 
     def test_agent_context_and_recommendation_are_valid_json(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -454,6 +460,71 @@ class CliTests(unittest.TestCase):
             self.assertTrue(recommendation_payload["available"])
             self.assertEqual(recommendation_payload["recommendation"]["gpus"], [0])
             self.assertFalse(data_dir.exists())
+
+    def test_agent_edit_and_cancel_are_structured_and_retry_safe(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            start = iso(ceil_5m(datetime.now(timezone.utc) + timedelta(days=1)))
+            created = self.run_bk(["1", "30m", "--start", start, "--json"], data_dir)
+            created_payload = json.loads(created.stdout)
+            short_id = created_payload["reservation"]["short_id"]
+
+            edit_args = [
+                "agent",
+                "edit",
+                short_id,
+                "--duration",
+                "45m",
+                "--mem",
+                "8g",
+                "--op-id",
+                "cli-agent-edit-1",
+                "--compact",
+            ]
+            edited = self.run_bk(edit_args, data_dir)
+            retried = self.run_bk(edit_args, data_dir)
+            missing_operation_id = self.run_bk(
+                ["agent", "edit", short_id, "--duration", "50m", "--compact"],
+                data_dir,
+            )
+            mismatched = self.run_bk(
+                [
+                    "agent",
+                    "edit",
+                    short_id,
+                    "--duration",
+                    "50m",
+                    "--op-id",
+                    "cli-agent-edit-1",
+                    "--compact",
+                ],
+                data_dir,
+            )
+            cancelled = self.run_bk(["agent", "cancel", short_id, "--compact"], data_dir)
+            retry_after_cancel = self.run_bk(edit_args, data_dir)
+
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertEqual(edited.returncode, 0, edited.stderr)
+            self.assertEqual(retried.returncode, 0, retried.stderr)
+            self.assertEqual(missing_operation_id.returncode, 2, missing_operation_id.stderr)
+            self.assertEqual(mismatched.returncode, 2, mismatched.stderr)
+            self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
+            self.assertEqual(retry_after_cancel.returncode, 0, retry_after_cancel.stderr)
+            edited_payload = json.loads(edited.stdout)
+            retried_payload = json.loads(retried.stdout)
+            missing_operation_payload = json.loads(missing_operation_id.stdout)
+            mismatch_payload = json.loads(mismatched.stdout)
+            cancelled_payload = json.loads(cancelled.stdout)
+            retry_after_cancel_payload = json.loads(retry_after_cancel.stdout)
+            self.assertEqual(edited_payload["status"], "updated")
+            self.assertEqual(retried_payload["status"], "exists")
+            self.assertIn("operation ID is required", missing_operation_payload["error"]["message"])
+            self.assertEqual(edited_payload["reservation"]["expected_memory_mb_per_gpu"], 8192)
+            self.assertIn("different write", mismatch_payload["error"]["message"])
+            self.assertEqual(cancelled_payload["kind"], "cancellation_result")
+            self.assertEqual(cancelled_payload["reservation"]["status"], "cancelled")
+            self.assertEqual(retry_after_cancel_payload["status"], "exists")
+            self.assertEqual(retry_after_cancel_payload["reservation"]["status"], "cancelled")
 
     def test_booking_and_list_json_outputs_need_no_text_scraping(self):
         with tempfile.TemporaryDirectory() as tmp:

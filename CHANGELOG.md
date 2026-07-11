@@ -35,3 +35,4 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Add package-structure, metadata, and medium/high-severity static security gates to CI.
 - Replace optimization-sensitive production assertions with explicit fail-closed runtime checks.
 - Keep Agent recommendations and telemetry-history reads side-effect free when the data directory does not exist.
+- Add retry-safe structured Agent and MCP edits, structured Agent cancellation, capability discovery, and operation-intent mismatch rejection.

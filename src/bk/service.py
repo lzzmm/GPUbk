@@ -8,18 +8,20 @@ from typing import Dict, List, Optional, Sequence
 from .advisor import GpuAdvice, build_gpu_advice
 from .allocator import AllocatorDecision, apply_external_allocator
 from .config import Config
-from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, BookingResult
+from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, BookingResult, EditRequest
 from .policy import validate_ledger_policy
 from .scheduler import (
     BOOKING_GRANULARITY_SECONDS,
+    MAX_EDIT_OPERATIONS_PER_RESERVATION,
     add_booking,
+    edit_booking,
     find_earliest_slot,
     list_active,
     reservation_pressure_scores,
     shared_memory_headroom_for_reservation,
 )
 from .storage import LedgerStore
-from .timeparse import to_iso, utc_now
+from .timeparse import parse_iso, to_iso, utc_now
 from .worker import delete_job_spec, prepare_job_spec
 
 
@@ -105,6 +107,97 @@ def submit_booking(
     return BookingSubmission(result, gpu_advice, allocator)
 
 
+def submit_edit(
+    config: Config,
+    store: LedgerStore,
+    actor: Actor,
+    reservation_id: str,
+    *,
+    duration_seconds: Optional[int] = None,
+    start_at: Optional[datetime] = None,
+    mode: Optional[str] = None,
+    preferred_gpus: Optional[Sequence[int]] = None,
+    count: Optional[int] = None,
+    expected_memory_mb: Optional[int] = None,
+    update_expected_memory: bool = False,
+    allow_queue: bool = False,
+    operation_id: Optional[str] = None,
+    advice: Optional[GpuAdvice] = None,
+) -> BookingSubmission:
+    ledger = store.load()
+    reservation = next(
+        (item for item in ledger.get("reservations", []) if item.get("id") == reservation_id),
+        None,
+    )
+    if reservation is None:
+        raise BookingError("reservation not found")
+    if int(reservation.get("uid", -1)) != actor.uid:
+        raise BookingError("permission denied: reservation belongs to another UID")
+
+    current_start = _reservation_datetime(reservation, "start_at")
+    current_end = _reservation_datetime(reservation, "end_at")
+    effective_duration = duration_seconds or int((current_end - current_start).total_seconds())
+    effective_start = start_at or current_start
+    effective_mode = mode or str(reservation.get("mode", MODE_SHARED))
+    effective_memory = (
+        expected_memory_mb
+        if update_expected_memory
+        else _optional_int(reservation.get("expected_memory_mb"))
+    )
+    effective_preferred = preferred_gpus
+    if effective_preferred is None and count is None:
+        effective_preferred = [int(gpu) for gpu in reservation.get("gpus", [])]
+    effective_count = count or (
+        len(effective_preferred)
+        if effective_preferred is not None
+        else len(reservation.get("gpus", []))
+    )
+    _validate_recommendation_request(
+        config,
+        effective_count,
+        effective_duration,
+        effective_start,
+        effective_mode,
+        effective_memory,
+        allow_queue,
+    )
+
+    gpu_advice = advice or build_gpu_advice(config)
+    allocator = _allocation_decision(
+        config,
+        store,
+        actor,
+        gpu_advice,
+        effective_count,
+        effective_duration,
+        effective_start,
+        effective_mode,
+        effective_preferred,
+        effective_memory,
+    )
+    result = edit_booking(
+        store,
+        config,
+        EditRequest(
+            actor=actor,
+            reservation_id=reservation_id,
+            op_id=operation_id,
+            start_at=start_at,
+            duration_seconds=duration_seconds,
+            mode=mode,
+            preferred_gpus=list(preferred_gpus) if preferred_gpus is not None else None,
+            gpu_order=allocator.order,
+            gpu_scores=allocator.scores,
+            count=count,
+            allow_queue=allow_queue,
+            expected_memory_mb=expected_memory_mb,
+            update_expected_memory=update_expected_memory,
+            gpu_memory_capacity_mb=gpu_advice.memory_capacities_mb,
+        ),
+    )
+    return BookingSubmission(result, gpu_advice, allocator)
+
+
 def build_agent_context(
     config: Config,
     store: LedgerStore,
@@ -139,6 +232,9 @@ def build_agent_context(
         "capabilities": {
             "read_only_recommendation": True,
             "idempotent_booking": True,
+            "idempotent_edit": True,
+            "idempotent_edit_history_limit": MAX_EDIT_OPERATIONS_PER_RESERVATION,
+            "structured_cancel": True,
             "scheduled_jobs": True,
             "private_job_specs": True,
             "external_allocator_is_advisory": True,
@@ -355,6 +451,47 @@ def public_reservation(reservation: dict, actor: Actor) -> dict:
     return _public_reservation(reservation, actor)
 
 
+def booking_result_payload(
+    status: str,
+    submission: BookingSubmission,
+    actor: Actor,
+    warning: Optional[str] = None,
+) -> dict:
+    reservation = submission.result.reservation
+    selected = []
+    for gpu in reservation.get("gpus", []):
+        index = int(gpu)
+        live = submission.advice.live_states[index]
+        historical = submission.advice.historical_loads[index]
+        selected.append(
+            {
+                "gpu": index,
+                "load_score": submission.allocator.scores[index],
+                "live_status": live.status,
+                "live_reason": live.reason,
+                "recent_predicted_load_percent": round(historical.predicted_percent, 3),
+                "history_sample_count": historical.sample_count,
+            }
+        )
+    warnings = [warning] if warning else []
+    if submission.allocator.warning:
+        warnings.append(submission.allocator.warning)
+    if any(item["live_status"] == "busy" for item in selected):
+        warnings.append("selected GPU is currently busy; live task end time is unknown")
+    return {
+        "schema_version": AGENT_SCHEMA_VERSION,
+        "kind": "booking_result",
+        "status": status,
+        "reservation": public_reservation(reservation, actor),
+        "allocation": {"selected": selected},
+        "allocator": {
+            "source": submission.allocator.source,
+            "reason": submission.allocator.reason,
+        },
+        "warnings": warnings,
+    }
+
+
 def _public_reservation(reservation: dict, actor: Actor) -> dict:
     job = reservation.get("job")
     return {
@@ -408,6 +545,17 @@ def _slot_dict(slot, duration: timedelta) -> Optional[dict]:
         return None
     start, gpus = slot
     return {"gpus": list(gpus), "start_at": to_iso(start), "end_at": to_iso(start + duration)}
+
+
+def _reservation_datetime(reservation: dict, key: str) -> datetime:
+    value = reservation.get(key)
+    if not isinstance(value, str):
+        raise BookingError(f"reservation has invalid {key}")
+    return parse_iso(value)
+
+
+def _optional_int(value: object) -> Optional[int]:
+    return int(value) if value is not None else None
 
 
 def _recommendation_confidence(gpu_details: List[dict], snapshots: Dict[int, object]) -> str:

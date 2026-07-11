@@ -14,6 +14,8 @@ class BundledSkillTests(unittest.TestCase):
         self.assertIn(f"name: {SKILL_NAME}", text)
         self.assertIn("expected VRAM", text)
         self.assertIn("operation ID", text)
+        self.assertIn("edit_my_gpu_booking", text)
+        self.assertIn("bk agent edit", text)
 
     def test_install_is_complete_and_refuses_accidental_overwrite(self):
         with tempfile.TemporaryDirectory() as tmp:

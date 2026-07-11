@@ -44,8 +44,34 @@ class McpBackendTests(unittest.TestCase):
 
         self.assertEqual(first["status"], "created")
         self.assertEqual(second["status"], "exists")
+        self.assertEqual(first["allocation"]["selected"][0]["gpu"], 0)
         self.assertEqual(first["reservation"]["id"], second["reservation"]["id"])
         self.assertEqual(len(self.store.load()["reservations"]), 1)
+
+    def test_edit_requires_operation_id_and_retries_are_idempotent(self):
+        created = self.backend.book(
+            1,
+            "30m",
+            "mcp-create-for-edit",
+            start="2030-01-01T12:00:00Z",
+        )
+        short_id = created["reservation"]["short_id"]
+
+        with self.assertRaisesRegex(BookingError, "operation_id is required"):
+            self.backend.edit(short_id, "", duration="45m")
+        with self.assertRaisesRegex(BookingError, "at least one changed field"):
+            self.backend.edit(short_id, "mcp-empty-edit")
+
+        first = self.backend.edit(short_id, "mcp-edit-1", duration="45m", expected_memory="8g")
+        retried = self.backend.edit(short_id, "mcp-edit-1", duration="45m", expected_memory="8g")
+
+        self.assertEqual(first["status"], "updated")
+        self.assertEqual(retried["status"], "exists")
+        self.assertEqual(first["allocation"]["selected"][0]["gpu"], 0)
+        self.assertEqual(first["reservation"]["end_at"], "2030-01-01T12:45:00Z")
+        self.assertEqual(first["reservation"]["expected_memory_mb_per_gpu"], 8192)
+        with self.assertRaisesRegex(BookingError, "different write"):
+            self.backend.edit(short_id, "mcp-edit-1", duration="50m", expected_memory="8g")
 
     def test_command_arguments_remain_private_when_submitted_through_mcp(self):
         secret = "mcp-secret-token"
@@ -76,6 +102,8 @@ class McpBackendTests(unittest.TestCase):
 
         with self.assertRaisesRegex(BookingError, "not found for current UID"):
             self.backend.cancel(other["id"])
+        with self.assertRaisesRegex(BookingError, "not found for current UID"):
+            self.backend.edit(other["id"], "mcp-other-edit", duration="45m")
 
     def test_job_log_tail_is_unicode_safe_and_bounded(self):
         path = Path(self.tmp.name) / "unicode.log"

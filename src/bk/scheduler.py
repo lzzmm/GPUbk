@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import math
 import re
 import uuid
@@ -30,6 +32,9 @@ from .storage import LedgerStore
 from .timeparse import parse_iso, to_iso, utc_now
 
 
+MAX_EDIT_OPERATIONS_PER_RESERVATION = 256
+
+
 def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> BookingResult:
     if request.mode not in {MODE_SHARED, MODE_EXCLUSIVE}:
         raise BookingError(f"unsupported booking mode: {request.mode}")
@@ -55,17 +60,30 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
         preferred = _normalize_preferred_gpus(request.preferred_gpus)
         gpu_order = _normalize_gpu_order(request.gpu_order, config)
         gpu_scores = _normalize_gpu_scores(request.gpu_scores, config)
-
-        if op_id:
-            for existing in ledger.get("reservations", []):
-                if int(existing.get("uid", -1)) == request.actor.uid and existing.get("op_id") == op_id:
-                    return ledger, BookingResult(existing, False, "operation already applied"), [], changed
-
         if preferred is not None:
             if len(preferred) != request.count:
                 raise BookingError("--gpu count must match requested GPU count")
             for gpu in preferred:
                 _validate_gpu_index(config, gpu)
+
+        operation_signature = _create_operation_signature(
+            request,
+            start,
+            preferred,
+            expected_memory_mb,
+            job_metadata,
+        )
+        if op_id:
+            applied = _find_applied_operation(ledger, request.actor.uid, op_id)
+            if applied is not None:
+                action, existing, existing_signature = applied
+                if action != "create" or (
+                    existing_signature is not None and existing_signature != operation_signature
+                ):
+                    raise BookingError("operation ID was already used for a different write")
+                return ledger, BookingResult(existing, False, "operation already applied"), [], changed
+
+        if preferred is not None:
             if not request.allow_queue:
                 duplicate = _find_exact_duplicate(
                     ledger,
@@ -134,6 +152,8 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
         }
         if expected_memory_mb is not None:
             reservation["expected_memory_mb"] = expected_memory_mb
+        if op_id is not None:
+            reservation["operation_signature"] = operation_signature
         if job_metadata is not None:
             reservation["job"] = {
                 **job_metadata,
@@ -182,10 +202,25 @@ def cancel_booking(store: LedgerStore, reservation_id: str, actor: Actor) -> dic
 
 
 def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> BookingResult:
+    op_id = _normalize_operation_id(request.op_id)
+    operation_signature = _edit_operation_signature(request)
+
     def mutate(ledger: dict):
         now = utc_now()
-        bind_ledger_policy(ledger, config)
-        _maintain_ledger(ledger, now, config.ledger_retention_days)
+        changed = bind_ledger_policy(ledger, config)
+        changed = _maintain_ledger(ledger, now, config.ledger_retention_days) or changed
+        if op_id:
+            applied = _find_applied_operation(ledger, request.actor.uid, op_id)
+            if applied is not None:
+                action, existing, existing_signature = applied
+                if (
+                    action != "edit"
+                    or existing.get("id") != request.reservation_id
+                    or existing_signature != operation_signature
+                ):
+                    raise BookingError("operation ID was already used for a different write")
+                return ledger, BookingResult(existing, False, "operation already applied"), [], changed
+
         reservation = _find_reservation(ledger, request.reservation_id)
         if reservation is None:
             raise BookingError("reservation not found")
@@ -292,8 +327,27 @@ def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> Bo
             reservation.pop("expected_memory_mb", None)
         else:
             reservation["expected_memory_mb"] = expected_memory_mb
+        if op_id:
+            history = reservation.get("edit_operations", [])
+            if not isinstance(history, list):
+                raise BookingError("invalid edit operation history")
+            if len(history) >= MAX_EDIT_OPERATIONS_PER_RESERVATION:
+                raise BookingError(
+                    "reservation reached the idempotent edit limit; recreate it before further Agent edits"
+                )
+            reservation["edit_operations"] = [
+                *history,
+                {"op_id": op_id, "signature": operation_signature},
+            ]
         reservation["updated_at"] = to_iso(now)
-        log = _log_item(request.actor, "edit", reservation, "ok", "queued" if queued else "updated")
+        log = _log_item(
+            request.actor,
+            "edit",
+            reservation,
+            "ok",
+            "queued" if queued else "updated",
+            operation_id=op_id,
+        )
         return ledger, BookingResult(reservation, True, "queued" if queued else "updated", queued), [log], True
 
     return store.transaction(mutate)
@@ -975,6 +1029,83 @@ def _normalize_operation_id(value: Optional[str]) -> Optional[str]:
     return normalized
 
 
+def _create_operation_signature(
+    request: BookingRequest,
+    start: datetime,
+    preferred_gpus: Optional[Sequence[int]],
+    expected_memory_mb: Optional[int],
+    job_metadata: Optional[dict],
+) -> str:
+    return _operation_signature(
+        "create",
+        {
+            "count": request.count,
+            "duration_seconds": request.duration_seconds,
+            "start_at": None if request.allow_queue else to_iso(start),
+            "mode": request.mode,
+            "preferred_gpus": list(preferred_gpus) if preferred_gpus is not None else None,
+            "allow_queue": request.allow_queue,
+            "expected_memory_mb": expected_memory_mb,
+            "job_summary": job_metadata.get("summary") if job_metadata is not None else None,
+        },
+    )
+
+
+def _edit_operation_signature(request: EditRequest) -> str:
+    preferred = _normalize_preferred_gpus(request.preferred_gpus)
+    return _operation_signature(
+        "edit",
+        {
+            "reservation_id": request.reservation_id,
+            "start_at": to_iso(request.start_at) if request.start_at is not None else None,
+            "duration_seconds": request.duration_seconds,
+            "mode": request.mode,
+            "preferred_gpus": preferred,
+            "count": request.count,
+            "allow_queue": request.allow_queue,
+            "expected_memory_mb": request.expected_memory_mb,
+            "update_expected_memory": request.update_expected_memory,
+        },
+    )
+
+
+def _operation_signature(kind: str, payload: dict) -> str:
+    raw = json.dumps(
+        {"kind": kind, **payload},
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _find_applied_operation(
+    ledger: dict,
+    uid: int,
+    operation_id: str,
+) -> Optional[Tuple[str, dict, Optional[str]]]:
+    for reservation in ledger.get("reservations", []):
+        if int(reservation.get("uid", -1)) != uid:
+            continue
+        if reservation.get("op_id") == operation_id:
+            signature = reservation.get("operation_signature")
+            return "create", reservation, str(signature) if signature is not None else None
+        history = reservation.get("edit_operations", [])
+        if not isinstance(history, list):
+            raise BookingError("invalid edit operation history")
+        if len(history) > MAX_EDIT_OPERATIONS_PER_RESERVATION:
+            raise BookingError("edit operation history exceeds the safety limit")
+        for item in history:
+            if not isinstance(item, dict):
+                raise BookingError("invalid edit operation history")
+            if item.get("op_id") == operation_id:
+                signature = item.get("signature")
+                if not isinstance(signature, str):
+                    raise BookingError("invalid edit operation history")
+                return "edit", reservation, signature
+    return None
+
+
 def _reservation_pressure_score_indexed(
     index: ReservationIndex,
     gpu: int,
@@ -1159,14 +1290,22 @@ def _combine_reasons(reasons: Sequence[str]) -> str:
     return "; ".join(seen[:3])
 
 
-def _log_item(actor: Actor, action: str, reservation: dict, result: str, message: str) -> dict:
+def _log_item(
+    actor: Actor,
+    action: str,
+    reservation: dict,
+    result: str,
+    message: str,
+    *,
+    operation_id: Optional[str] = None,
+) -> dict:
     return {
         "ts": to_iso(utc_now()),
         "uid": actor.uid,
         "username": actor.username,
         "action": action,
         "reservation_id": reservation.get("id"),
-        "op_id": reservation.get("op_id"),
+        "op_id": operation_id or reservation.get("op_id"),
         "gpus": reservation.get("gpus", []),
         "mode": reservation.get("mode"),
         "start_at": reservation.get("start_at"),

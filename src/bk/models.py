@@ -61,6 +61,7 @@ class BookingResult:
 class EditRequest:
     actor: Actor
     reservation_id: str
+    op_id: Optional[str] = None
     start_at: Optional[datetime] = None
     duration_seconds: Optional[int] = None
     mode: Optional[str] = None

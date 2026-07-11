@@ -31,6 +31,8 @@ bk m
 bk u
 bk agent context
 bk agent recommend 2 1h30m --mem 12g
+bk agent edit 6e957ef1 --duration 2h --op-id edit-001 --compact
+bk agent cancel 6e957ef1 --compact
 bk reset --yes
 ```
 
@@ -47,6 +49,8 @@ bk reset --yes
 - `bk usage`：查看最近的进程事件；`bk usage --rollups` 查看利用率汇总。
 - `bk agent context`：输出版本化、脱敏的完整资源上下文 JSON。
 - `bk agent recommend 2 1h30m --mem 12g`：只读计算合法卡组和最早时段，不写台账。
+- `bk agent edit ... --op-id ...`：以幂等 JSON 接口修改自己的预约；完全相同的重试不会重复写入。
+- `bk agent cancel ...`：以结构化 JSON 取消自己的预约。
 - `bk edit 1 --duration 8h`：用列表序号修改自己的预约。
 - `bk del 6e957ef1`：用短 ID 取消自己的预约。
 - `bk reset --yes`：清空当前数据目录里的台账、日志、备份。
@@ -115,13 +119,15 @@ Agent 不需要解析彩色 TUI 或人类文本。稳定机器接口使用 `sche
 bk agent context --compact
 bk agent recommend 2 1h30m --mode s --mem 12g --compact
 bk 2 1h30m --mem 12g --op-id agent-run-20260711-001 --json
+bk agent edit 6e957ef1 --duration 2h --op-id agent-edit-20260712-001 --compact
+bk agent cancel 6e957ef1 --compact
 bk l --json
 bk j --json
 ```
 
 `context` 包含当前 UID、调度策略、GPU 型号与温度、每卡实时状态、近期预测负载、显存、预约和能力声明；不包含完整进程参数、私有 job spec 或任意 token。`recommend` 是严格只读的，返回推荐卡组、起止时间、是否排队、置信度、每卡评分、预约压力、显存余量和警告。显式 `--start` 保持 exact 语义，冲突时 `available=false` 并给出 `nearest_available`。
 
-实际写入建议总是传唯一 `--op-id`。相同 UID 重试同一个 operation ID 会返回原结果，不会重复预约。`--json` 成功和业务错误都输出单个 JSON 对象；冲突/参数错误退出码为 `2`，只读推荐无合法精确时段退出码为 `3`。
+create/edit 写入必须为每个不可变意图生成唯一 `--op-id`。完全相同的重试返回 `status=exists`，不会重复写入；同一 ID 搭配不同预约或字段会明确拒绝，避免 Agent 错把旧结果当成新修改。`bk agent edit` 的显式开始时间保持 exact，只有显式 `--queue` 才允许移动。CLI 与 MCP 的 `booking_result` 字段一致，均带隐私安全的预约、选卡解释、allocator 来源和 warning。机器命令成功和业务错误都输出单个 JSON 对象；冲突/参数错误退出码为 `2`，只读推荐无合法精确时段退出码为 `3`。
 
 ### 外部 AI allocator
 
@@ -160,12 +166,13 @@ MCP 服务提供 `bk://context` resource、规划 prompt，以及以下结构化
 - `recommend_gpu_booking`
 - `create_gpu_booking`（强制 `operation_id`）
 - `list_gpu_reservations`
+- `edit_my_gpu_booking`（强制 `operation_id`）
 - `cancel_my_gpu_booking`
 - `read_my_job_log`
 
 服务身份始终来自启动 `bk-mcp` 的系统 UID，tool schema 没有 UID 参数。默认只提供本地 stdio，不开放监听端口；每位用户应启动自己的 MCP 进程。当前 optional extra 固定在官方 Python SDK 稳定 v1 线 `<2`，避免预发布 v2 的破坏性变化。
 
-所有 MCP tools 都带标准风险注解：context/recommend/list/log 标记为 read-only，create 因强制 operation ID 标记为 idempotent write，cancel 标记为 destructive，且全部是本地 closed-world 操作。支持这些注解的 Agent 无需从文案猜测调用风险。
+所有 MCP tools 都带标准风险注解：context/recommend/list/log 标记为 read-only，create/edit 因强制 operation ID 标记为 idempotent write，cancel 标记为 destructive，且全部是本地 closed-world 操作。支持这些注解的 Agent 无需从文案猜测调用风险。
 
 只读 Agent/MCP 调用不会为一个空数据目录创建台账、锁或备份目录，也不会修改已有预约。唯一例外是检测到此前已经持久化但尚未应用完成的 WAL：读取会先完成该已提交事务的恢复，以免向 Agent 返回过期状态。
 

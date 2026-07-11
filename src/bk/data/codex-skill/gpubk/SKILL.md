@@ -14,6 +14,7 @@ Prefer GPUbk MCP tools when available:
 1. Call `get_gpu_context` for policy and live state.
 2. Call `recommend_gpu_booking` before any write.
 3. Call `create_gpu_booking` only when the user requested or approved the reservation.
+4. Use `edit_my_gpu_booking` with a new stable operation ID when the user approves a change.
 
 Otherwise use the JSON CLI:
 
@@ -21,6 +22,8 @@ Otherwise use the JSON CLI:
 bk agent context --compact
 bk agent recommend 2 1h30m --mode shared --mem 12g --compact
 bk 2 1h30m --mem 12g --op-id <stable-id> --json
+bk agent edit <short-id> --duration 2h --op-id <stable-edit-id> --compact
+bk agent cancel <short-id> --compact
 ```
 
 Read [references/protocol.md](references/protocol.md) when implementing an integration or interpreting every field.
@@ -38,7 +41,8 @@ Use shared mode for workloads that can coexist within both record and VRAM limit
 
 ## Create Safely
 
-- Generate one stable operation ID for the user's intended write and reuse it on retries.
+- Generate one stable operation ID for each create or edit intent and reuse it only for exact retries.
+- Never reuse an operation ID for changed fields; GPUbk rejects mismatched reuse instead of silently applying it.
 - Never pass, invent, or override a UID. GPUbk derives identity from the local process.
 - Do not retry a write with a new operation ID after an ambiguous response; inspect reservations first.
 - Do not cancel or edit another user's reservation.
@@ -55,13 +59,14 @@ GPUbk sets `CUDA_VISIBLE_DEVICES`; do not add physical GPU IDs to the training c
 ## Handle Results
 
 - `created`: reservation starts at the returned time.
+- `updated`: the approved edit was applied.
 - `queued`: reservation was moved to the earliest legal future slot because start was implicit.
 - `exists`: the operation ID was already applied; treat this as idempotent success.
 - JSON exit `2`: invalid request or write conflict. Inspect `error.message`.
 - Recommendation exit `3`: no legal exact slot; present `nearest_available` without booking it.
 - `uncertain` job: it may already be running. Check processes and logs before using duplicate-risk retry.
 
-Keep `bk worker` running for scheduled commands. Use `list_gpu_reservations`, `bk j --json`, or the bounded job-log tool to inspect state.
+For edits, an explicit `start` is exact and does not move unless `allow_queue=true` was explicitly requested. Keep `bk worker` running for scheduled commands. Use `list_gpu_reservations`, `bk j --json`, or the bounded job-log tool to inspect state.
 
 ## Respect Safety Boundaries
 

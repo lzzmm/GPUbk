@@ -8,7 +8,7 @@ from bk.config import Config
 from bk.gpu import GpuProcessSnapshot, GpuSnapshot
 from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingRequest
 from bk.scheduler import add_booking
-from bk.service import AGENT_SCHEMA_VERSION, build_agent_context, recommend_booking
+from bk.service import AGENT_SCHEMA_VERSION, build_agent_context, recommend_booking, submit_edit
 from bk.storage import LedgerStore
 
 
@@ -59,6 +59,9 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(context["gpu_advice"]["order"], [1, 0])
         self.assertEqual(context["gpu_advice"]["gpus"][1]["name"], "idle")
         self.assertEqual(context["gpu_advice"]["gpus"][1]["temperature_c"], 47)
+        self.assertTrue(context["capabilities"]["idempotent_edit"])
+        self.assertEqual(context["capabilities"]["idempotent_edit_history_limit"], 256)
+        self.assertTrue(context["capabilities"]["structured_cancel"])
         self.assertNotIn("secret", str(context))
 
     def test_recommendation_is_read_only_and_prefers_live_idle_gpu(self):
@@ -108,6 +111,44 @@ class AgentServiceTests(unittest.TestCase):
 
         self.assertFalse(recommendation["available"])
         self.assertEqual(recommendation["nearest_available"]["start_at"], "2030-01-01T12:30:00Z")
+        self.assertEqual(len(self.store.load()["reservations"]), 1)
+
+    def test_structured_edit_uses_advice_and_is_idempotent(self):
+        created = add_booking(
+            self.store,
+            self.config,
+            BookingRequest(
+                actor=self.actor,
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=self.start,
+                mode=MODE_SHARED,
+            ),
+        )
+
+        first = submit_edit(
+            self.config,
+            self.store,
+            self.actor,
+            created.reservation["id"],
+            duration_seconds=45 * 60,
+            operation_id="service-edit-1",
+            advice=self.advice,
+        )
+        retried = submit_edit(
+            self.config,
+            self.store,
+            self.actor,
+            created.reservation["id"],
+            duration_seconds=45 * 60,
+            operation_id="service-edit-1",
+            advice=self.advice,
+        )
+
+        self.assertTrue(first.result.created)
+        self.assertFalse(retried.result.created)
+        self.assertEqual(first.result.reservation["end_at"], "2030-01-01T12:45:00Z")
+        self.assertEqual(first.allocator.source, "fixed-gpu")
         self.assertEqual(len(self.store.load()["reservations"]), 1)
 
 

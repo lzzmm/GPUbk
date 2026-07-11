@@ -11,7 +11,6 @@ from typing import List, Optional
 
 from . import __version__
 from .advisor import GpuAdvice, build_gpu_advice
-from .allocator import AllocatorDecision
 from .config import Config, load_config
 from .fileio import open_existing_regular
 from .gpu import snapshot
@@ -27,10 +26,12 @@ from .scheduler import (
 )
 from .service import (
     AGENT_SCHEMA_VERSION,
+    booking_result_payload,
     build_agent_context,
     public_reservation,
     recommend_booking,
     submit_booking,
+    submit_edit,
 )
 from .storage import LedgerStore
 from .timeparse import (
@@ -301,7 +302,7 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
     if args.json:
         print(
             json.dumps(
-                _booking_result_payload(status, reservation, actor, advice, allocator, store.last_warning),
+                booking_result_payload(status, submission, actor, store.last_warning),
                 ensure_ascii=False,
                 sort_keys=True,
             )
@@ -477,6 +478,20 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     recommend_parser.add_argument("--gpu", help="fixed comma-separated GPU indexes")
     recommend_parser.add_argument("--mem", help="expected memory per GPU, e.g. 12g")
     recommend_parser.add_argument("--compact", action="store_true")
+    edit_parser = subparsers.add_parser("edit", aliases=["e"], help="idempotently edit this UID's reservation")
+    edit_parser.add_argument("reservation_id", help="reservation number or unique ID prefix")
+    edit_parser.add_argument("--op-id", help="stable retry-safe operation ID (required)")
+    edit_parser.add_argument("--duration")
+    edit_parser.add_argument("--start", help="exact ISO start unless --queue is provided")
+    edit_parser.add_argument("--gpu", help="fixed comma-separated GPU indexes")
+    edit_parser.add_argument("--count", type=int, help="new GPU count with automatic selection")
+    edit_parser.add_argument("--mode", choices=["s", "shared", "x", "exclusive"])
+    edit_parser.add_argument("--mem", help="new expected memory per GPU; use - to clear")
+    edit_parser.add_argument("--queue", action="store_true", help="allow moving to the next legal slot")
+    edit_parser.add_argument("--compact", action="store_true")
+    cancel_parser = subparsers.add_parser("cancel", aliases=["del"], help="cancel this UID's reservation")
+    cancel_parser.add_argument("reservation_id", help="reservation number or unique ID prefix")
+    cancel_parser.add_argument("--compact", action="store_true")
     args = parser.parse_args(argv)
     actor = _current_actor()
     try:
@@ -484,7 +499,7 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             payload = build_agent_context(config, store, actor)
             compact = args.compact
             exit_code = 0
-        else:
+        elif args.action in {"recommend", "rec"}:
             mode = MODE_EXCLUSIVE if args.mode in {"x", "exclusive"} else MODE_SHARED
             payload = recommend_booking(
                 config,
@@ -500,6 +515,55 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             )
             compact = args.compact
             exit_code = 0 if payload["available"] else 3
+        elif args.action in {"edit", "e"}:
+            if not args.op_id:
+                raise BookingError("operation ID is required for retry-safe Agent edits")
+            if not any([args.duration, args.start, args.gpu, args.count, args.mode, args.mem]):
+                raise BookingError("edit requires at least one changed field")
+            reservation_id = _resolve_own_retained_reservation_id(store, args.reservation_id, actor)
+            edit_mode = None
+            if args.mode in {"x", "exclusive"}:
+                edit_mode = MODE_EXCLUSIVE
+            elif args.mode in {"s", "shared"}:
+                edit_mode = MODE_SHARED
+            expected_memory_mb = None
+            if args.mem not in {None, "-"}:
+                expected_memory_mb = parse_memory_mb(args.mem)
+            submission = submit_edit(
+                config,
+                store,
+                actor,
+                reservation_id,
+                duration_seconds=parse_duration_seconds(args.duration) if args.duration else None,
+                start_at=parse_start(args.start) if args.start else None,
+                mode=edit_mode,
+                preferred_gpus=_parse_gpu_list(args.gpu) if args.gpu else None,
+                count=args.count,
+                expected_memory_mb=expected_memory_mb,
+                update_expected_memory=args.mem is not None,
+                allow_queue=args.queue,
+                operation_id=args.op_id,
+            )
+            result = submission.result
+            status = "exists" if not result.created else ("queued" if result.queued else "updated")
+            payload = booking_result_payload(
+                status,
+                submission,
+                actor,
+                store.last_warning,
+            )
+            compact = args.compact
+            exit_code = 0
+        else:
+            reservation_id = _resolve_own_reservation_id(store, args.reservation_id, actor)
+            reservation = cancel_booking(store, reservation_id, actor)
+            payload = {
+                "schema_version": AGENT_SCHEMA_VERSION,
+                "kind": "cancellation_result",
+                "reservation": public_reservation(reservation, actor),
+            }
+            compact = args.compact
+            exit_code = 0
     except (BookingError, ValueError, OSError) as exc:
         payload = {
             "schema_version": AGENT_SCHEMA_VERSION,
@@ -941,47 +1005,6 @@ def _print_booking_advice(
             )
 
 
-def _booking_result_payload(
-    status: str,
-    reservation: dict,
-    actor: Actor,
-    advice: GpuAdvice,
-    allocator: AllocatorDecision,
-    warning: Optional[str],
-) -> dict:
-    selected = []
-    for gpu in reservation.get("gpus", []):
-        live = advice.live_states[int(gpu)]
-        historical = advice.historical_loads[int(gpu)]
-        selected.append(
-            {
-                "gpu": int(gpu),
-                "load_score": allocator.scores[int(gpu)],
-                "live_status": live.status,
-                "live_reason": live.reason,
-                "recent_predicted_load_percent": round(historical.predicted_percent, 3),
-                "history_sample_count": historical.sample_count,
-            }
-        )
-    warnings = [warning] if warning else []
-    if allocator.warning:
-        warnings.append(allocator.warning)
-    if any(item["live_status"] == "busy" for item in selected):
-        warnings.append("selected GPU is currently busy; live task end time is unknown")
-    return {
-        "schema_version": AGENT_SCHEMA_VERSION,
-        "kind": "booking_result",
-        "status": status,
-        "reservation": public_reservation(reservation, actor),
-        "allocation": {"selected": selected},
-        "allocator": {
-            "source": allocator.source,
-            "reason": allocator.reason,
-        },
-        "warnings": warnings,
-    }
-
-
 def _format_memory_mb(value: Optional[int]) -> str:
     if value is None:
         return "unknown"
@@ -1058,6 +1081,21 @@ def _resolve_own_reservation_id(store: LedgerStore, token: str, actor: Actor) ->
     return matches[0]["id"]
 
 
+def _resolve_own_retained_reservation_id(store: LedgerStore, token: str, actor: Actor) -> str:
+    mine = [
+        item
+        for item in store.load().get("reservations", [])
+        if int(item.get("uid", -1)) == actor.uid
+    ]
+    matches = [item for item in mine if str(item.get("id", "")).startswith(token)]
+    if not matches:
+        raise BookingError(f"reservation not found for current user: {token}")
+    if len(matches) > 1:
+        choices = ", ".join(_short_id(item) for item in matches)
+        raise BookingError(f"ambiguous reservation id {token}; matches: {choices}")
+    return str(matches[0]["id"])
+
+
 def _get_reservation(store: LedgerStore, reservation_id: str) -> dict:
     for reservation in list_active(store.load()):
         if reservation.get("id") == reservation_id:
@@ -1083,6 +1121,8 @@ def _print_help(file=None) -> None:
   bk jr <number_or_short_id>    retry a failed job
   bk agent context              machine-readable resource context
   bk agent recommend 2 1h30m   read-only placement recommendation
+  bk agent edit ID --duration 2h --op-id KEY
+  bk agent cancel ID            structured cancellation
   bk mcp                        run optional local stdio MCP server
   bk skill install              install bundled Codex skill
   bk service install worker     install, but do not enable, a user unit
@@ -1097,7 +1137,7 @@ def _print_help(file=None) -> None:
 
 duration examples: 30m, 1h30m, 1d
 shared memory: --mem 12g (expected memory per GPU)
-agent writes: add --op-id <unique-key> --json
+agent writes: create/edit require a stable --op-id
 default mode: shared
 omitted --start: queue to the earliest available slot
 explicit --start: exact time, no automatic move
@@ -1128,6 +1168,8 @@ def _print_shell_help() -> None:
   jr <number|short_id>      retry a failed job
   agent context             emit stable allocation context JSON
   agent recommend 2 1h30m  compute a read-only legal placement
+  agent edit ID --duration 2h --op-id KEY
+  agent cancel ID           cancel with structured JSON output
   reset --yes               clear ledger, logs, and backups in this data dir
   t | tui                   open full-screen TUI
   quit                      exit

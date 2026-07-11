@@ -62,6 +62,22 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
                         "operation_id": "mcp-protocol-test-1",
                     },
                 )
+                edited = await session.call_tool(
+                    "edit_my_gpu_booking",
+                    {
+                        "reservation_id": created.structuredContent["reservation"]["short_id"],
+                        "duration": "35m",
+                        "operation_id": "mcp-protocol-edit-1",
+                    },
+                )
+                edit_retried = await session.call_tool(
+                    "edit_my_gpu_booking",
+                    {
+                        "reservation_id": created.structuredContent["reservation"]["short_id"],
+                        "duration": "35m",
+                        "operation_id": "mcp-protocol-edit-1",
+                    },
+                )
                 cancelled = await session.call_tool(
                     "cancel_my_gpu_booking",
                     {"reservation_id": created.structuredContent["reservation"]["short_id"]},
@@ -74,6 +90,7 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     "recommend_gpu_booking",
                     "create_gpu_booking",
                     "list_gpu_reservations",
+                    "edit_my_gpu_booking",
                     "cancel_my_gpu_booking",
                     "read_my_job_log",
                 },
@@ -85,6 +102,8 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(by_name["read_my_job_log"].annotations.readOnlyHint)
             self.assertTrue(by_name["create_gpu_booking"].annotations.idempotentHint)
             self.assertFalse(by_name["create_gpu_booking"].annotations.destructiveHint)
+            self.assertTrue(by_name["edit_my_gpu_booking"].annotations.idempotentHint)
+            self.assertFalse(by_name["edit_my_gpu_booking"].annotations.destructiveHint)
             self.assertTrue(by_name["cancel_my_gpu_booking"].annotations.destructiveHint)
             self.assertFalse(by_name["cancel_my_gpu_booking"].annotations.idempotentHint)
             self.assertTrue(all(tool.annotations.openWorldHint is False for tool in by_name.values()))
@@ -94,11 +113,14 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(recommendation.structuredContent["available"])
             self.assertEqual(recommendation.structuredContent["schema_version"], "bk.agent.v1")
             self.assertEqual(created.structuredContent["status"], "created")
+            self.assertEqual(created.structuredContent["allocation"]["selected"][0]["gpu"], 0)
             self.assertEqual(retried.structuredContent["status"], "exists")
             self.assertEqual(
                 created.structuredContent["reservation"]["id"],
                 retried.structuredContent["reservation"]["id"],
             )
+            self.assertEqual(edited.structuredContent["status"], "updated")
+            self.assertEqual(edit_retried.structuredContent["status"], "exists")
             self.assertEqual(cancelled.structuredContent["reservation"]["status"], "cancelled")
 
 

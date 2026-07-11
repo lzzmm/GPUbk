@@ -10,7 +10,14 @@ from .fileio import open_existing_regular
 from .identity import current_actor
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError
 from .scheduler import cancel_booking, list_active
-from .service import build_agent_context, public_reservation, recommend_booking, submit_booking
+from .service import (
+    booking_result_payload,
+    build_agent_context,
+    public_reservation,
+    recommend_booking,
+    submit_booking,
+    submit_edit,
+)
 from .storage import LedgerStore
 from .timeparse import parse_duration_seconds, parse_memory_mb, parse_start
 from .worker import job_log_path
@@ -91,18 +98,7 @@ class BkMcpBackend:
         )
         result = submission.result
         status = "exists" if not result.created else ("queued" if result.queued else "created")
-        warnings = [submission.allocator.warning] if submission.allocator.warning else []
-        return {
-            "schema_version": "bk.agent.v1",
-            "kind": "booking_result",
-            "status": status,
-            "reservation": public_reservation(result.reservation, self.actor),
-            "allocator": {
-                "source": submission.allocator.source,
-                "reason": submission.allocator.reason,
-            },
-            "warnings": warnings,
-        }
+        return booking_result_payload(status, submission, self.actor, self.store.last_warning)
 
     def list_reservations(self, mine_only: bool = False) -> dict:
         active = list_active(self.store.load())
@@ -113,6 +109,47 @@ class BkMcpBackend:
             "kind": "reservations",
             "reservations": [public_reservation(item, self.actor) for item in active],
         }
+
+    def edit(
+        self,
+        reservation_id: str,
+        operation_id: str,
+        duration: Optional[str] = None,
+        mode: Optional[str] = None,
+        start: Optional[str] = None,
+        gpus: Optional[List[int]] = None,
+        count: Optional[int] = None,
+        expected_memory: Optional[str] = None,
+        allow_queue: bool = False,
+    ) -> dict:
+        if not operation_id:
+            raise BookingError("operation_id is required for retry-safe MCP writes")
+        if all(value is None for value in (duration, mode, start, gpus, count, expected_memory)):
+            raise BookingError("edit requires at least one changed field")
+        reservation = self._resolve_own_reservation(reservation_id)
+        normalized_mode = _normalize_mode(mode) if mode is not None else None
+        update_memory = expected_memory is not None
+        memory_mb = None
+        if expected_memory not in {None, "-"}:
+            memory_mb = parse_memory_mb(expected_memory)
+        submission = submit_edit(
+            self.config,
+            self.store,
+            self.actor,
+            str(reservation["id"]),
+            duration_seconds=parse_duration_seconds(duration) if duration is not None else None,
+            start_at=parse_start(start) if start is not None else None,
+            mode=normalized_mode,
+            preferred_gpus=gpus,
+            count=count,
+            expected_memory_mb=memory_mb,
+            update_expected_memory=update_memory,
+            allow_queue=allow_queue,
+            operation_id=operation_id,
+        )
+        result = submission.result
+        status = "exists" if not result.created else ("queued" if result.queued else "updated")
+        return booking_result_payload(status, submission, self.actor, self.store.last_warning)
 
     def cancel(self, reservation_id: str) -> dict:
         reservation = self._resolve_own_active(reservation_id)
@@ -144,6 +181,14 @@ class BkMcpBackend:
         mine = [item for item in list_active(self.store.load()) if int(item.get("uid", -1)) == self.actor.uid]
         return _resolve_token(mine, token)
 
+    def _resolve_own_reservation(self, token: str) -> dict:
+        mine = [
+            item
+            for item in self.store.load().get("reservations", [])
+            if int(item.get("uid", -1)) == self.actor.uid
+        ]
+        return _resolve_token(mine, token)
+
     def _resolve_own_job(self, token: str) -> dict:
         mine = [
             item
@@ -166,7 +211,8 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
         json_response=True,
         instructions=(
             "Inspect context or call recommend before booking. "
-            "All writes require a stable operation_id. Never invent a UID; identity is the MCP process UID."
+            "Create and edit writes require a stable operation_id. "
+            "Never invent a UID; identity is the MCP process UID."
         ),
     )
 
@@ -235,6 +281,31 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
     def list_gpu_reservations(mine_only: bool = False) -> dict[str, object]:
         """List active reservations using the stable privacy-safe schema."""
         return api.list_reservations(mine_only)
+
+    @mcp.tool(annotations=idempotent_write, structured_output=True)
+    def edit_my_gpu_booking(
+        reservation_id: str,
+        operation_id: str,
+        duration: Optional[str] = None,
+        mode: Optional[str] = None,
+        start: Optional[str] = None,
+        gpus: Optional[List[int]] = None,
+        count: Optional[int] = None,
+        expected_memory: Optional[str] = None,
+        allow_queue: bool = False,
+    ) -> dict[str, object]:
+        """Idempotently edit this UID's booking; exact starts never move unless allow_queue is true."""
+        return api.edit(
+            reservation_id,
+            operation_id,
+            duration,
+            mode,
+            start,
+            gpus,
+            count,
+            expected_memory,
+            allow_queue,
+        )
 
     @mcp.tool(annotations=destructive_write, structured_output=True)
     def cancel_my_gpu_booking(reservation_id: str) -> dict[str, object]:

@@ -8,7 +8,7 @@ from unittest import mock
 
 from bk.config import Config
 from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, EditRequest
-from bk.scheduler import add_booking, edit_booking, find_available_gpus
+from bk.scheduler import MAX_EDIT_OPERATIONS_PER_RESERVATION, add_booking, edit_booking, find_available_gpus
 from bk.storage import LedgerStore
 from bk.timeparse import parse_iso, utc_now
 
@@ -31,7 +31,18 @@ class SchedulerModeTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def request(self, uid, mode, *, start=None, count=1, duration_seconds=3600, preferred_gpus=None, allow_queue=False):
+    def request(
+        self,
+        uid,
+        mode,
+        *,
+        start=None,
+        count=1,
+        duration_seconds=3600,
+        preferred_gpus=None,
+        allow_queue=False,
+        op_id=None,
+    ):
         return BookingRequest(
             actor=Actor(uid=uid, username=f"user{uid}"),
             count=count,
@@ -40,6 +51,7 @@ class SchedulerModeTests(unittest.TestCase):
             mode=mode,
             preferred_gpus=preferred_gpus,
             allow_queue=allow_queue,
+            op_id=op_id,
         )
 
     def test_shared_allows_configured_number_of_users(self):
@@ -81,6 +93,95 @@ class SchedulerModeTests(unittest.TestCase):
         self.assertTrue(first.created)
         self.assertFalse(second.created)
         self.assertEqual(first.reservation["id"], second.reservation["id"])
+
+    def test_create_operation_id_rejects_a_different_request(self):
+        first = add_booking(
+            self.store,
+            self.config,
+            self.request(1001, MODE_SHARED, op_id="agent-create-1"),
+        )
+
+        retried = add_booking(
+            self.store,
+            self.config,
+            self.request(1001, MODE_SHARED, op_id="agent-create-1"),
+        )
+        with self.assertRaisesRegex(BookingError, "different write"):
+            add_booking(
+                self.store,
+                self.config,
+                self.request(
+                    1001,
+                    MODE_SHARED,
+                    duration_seconds=30 * 60,
+                    op_id="agent-create-1",
+                ),
+            )
+
+        self.assertFalse(retried.created)
+        self.assertEqual(retried.reservation["id"], first.reservation["id"])
+        self.assertEqual(len(self.store.load()["reservations"]), 1)
+
+    def test_edit_operation_id_is_idempotent_and_cannot_be_reused(self):
+        actor = Actor(uid=1001, username="user1001")
+        created = add_booking(self.store, self.config, self.request(actor.uid, MODE_SHARED))
+        request = EditRequest(
+            actor=actor,
+            reservation_id=created.reservation["id"],
+            op_id="agent-edit-1",
+            duration_seconds=30 * 60,
+        )
+
+        first = edit_booking(self.store, self.config, request)
+        retried = edit_booking(self.store, self.config, request)
+        with self.assertRaisesRegex(BookingError, "different write"):
+            edit_booking(
+                self.store,
+                self.config,
+                EditRequest(
+                    actor=actor,
+                    reservation_id=created.reservation["id"],
+                    op_id="agent-edit-1",
+                    duration_seconds=45 * 60,
+                ),
+            )
+        with self.assertRaisesRegex(BookingError, "different write"):
+            add_booking(
+                self.store,
+                self.config,
+                self.request(actor.uid, MODE_SHARED, op_id="agent-edit-1"),
+            )
+
+        self.assertTrue(first.created)
+        self.assertFalse(retried.created)
+        self.assertEqual(first.reservation["end_at"], retried.reservation["end_at"])
+        self.assertEqual(len(first.reservation["edit_operations"]), 1)
+        self.assertEqual(len(self.store.log_path.read_text(encoding="utf-8").splitlines()), 2)
+
+    def test_idempotent_edit_history_is_bounded(self):
+        actor = Actor(uid=1001, username="user1001")
+        created = add_booking(self.store, self.config, self.request(actor.uid, MODE_SHARED))
+
+        def fill_history(ledger):
+            ledger["reservations"][0]["edit_operations"] = [
+                {"op_id": f"old-{index}", "signature": "0" * 64}
+                for index in range(MAX_EDIT_OPERATIONS_PER_RESERVATION)
+            ]
+            return ledger, None, [], True
+
+        self.store.transaction(fill_history)
+
+        with self.assertRaisesRegex(BookingError, "idempotent edit limit"):
+            edit_booking(
+                self.store,
+                self.config,
+                EditRequest(
+                    actor=actor,
+                    reservation_id=created.reservation["id"],
+                    op_id="one-too-many",
+                    duration_seconds=30 * 60,
+                ),
+            )
 
     def test_same_uid_shared_records_overlap_until_capacity_is_full(self):
         first = add_booking(self.store, self.config, self.request(1001, MODE_SHARED, allow_queue=True))

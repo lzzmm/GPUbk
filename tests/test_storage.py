@@ -7,8 +7,8 @@ from pathlib import Path
 from unittest import mock
 
 from bk.config import Config
-from bk.models import Actor, BookingError, BookingRequest
-from bk.scheduler import add_booking
+from bk.models import Actor, BookingError, BookingRequest, EditRequest
+from bk.scheduler import add_booking, edit_booking
 from bk.storage import FileLock, LedgerStore
 from bk.timeparse import parse_iso
 
@@ -31,6 +31,25 @@ def _concurrent_booking(data_dir, start_at, uid, result_queue):
         result_queue.put("ok")
     except BookingError:
         result_queue.put("conflict")
+
+
+def _concurrent_idempotent_edit(data_dir, reservation_id, result_queue):
+    config = Config(data_dir=Path(data_dir), gpu_count=1, max_shared_users=2)
+    store = LedgerStore(config.data_dir)
+    try:
+        result = edit_booking(
+            store,
+            config,
+            EditRequest(
+                actor=Actor(1001, "alice"),
+                reservation_id=reservation_id,
+                op_id="concurrent-agent-edit",
+                duration_seconds=45 * 60,
+            ),
+        )
+        result_queue.put("updated" if result.created else "exists")
+    except BookingError as exc:
+        result_queue.put(f"error:{exc}")
 
 
 class LedgerStorageTests(unittest.TestCase):
@@ -274,6 +293,45 @@ class LedgerStorageTests(unittest.TestCase):
             events = [json.loads(line) for line in store.log_path.read_text(encoding="utf-8").splitlines()]
             self.assertEqual(len(events), 2)
             self.assertEqual(len({item["event_id"] for item in events}), 2)
+
+    def test_cross_process_agent_edit_is_applied_exactly_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            config = Config(data_dir=data_dir, gpu_count=1, max_shared_users=2)
+            store = LedgerStore(data_dir)
+            created = add_booking(
+                store,
+                config,
+                BookingRequest(
+                    actor=Actor(1001, "alice"),
+                    count=1,
+                    duration_seconds=30 * 60,
+                    start_at=parse_iso("2030-01-01T00:00:00Z"),
+                ),
+            )
+            context = multiprocessing.get_context("spawn")
+            results = context.Queue()
+            processes = [
+                context.Process(
+                    target=_concurrent_idempotent_edit,
+                    args=(str(data_dir), created.reservation["id"], results),
+                )
+                for _index in range(8)
+            ]
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join(timeout=10)
+                self.assertEqual(process.exitcode, 0)
+
+            outcomes = [results.get(timeout=1) for _process in processes]
+            self.assertEqual(outcomes.count("updated"), 1)
+            self.assertEqual(outcomes.count("exists"), 7)
+            self.assertFalse(any(item.startswith("error:") for item in outcomes))
+            ledger = store.load()
+            self.assertEqual(len(ledger["reservations"][0]["edit_operations"]), 1)
+            events = [json.loads(line) for line in store.log_path.read_text(encoding="utf-8").splitlines()]
+            self.assertEqual([item["action"] for item in events], ["add", "edit"])
 
 
 if __name__ == "__main__":
