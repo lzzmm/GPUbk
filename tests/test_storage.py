@@ -34,6 +34,14 @@ def _concurrent_booking(data_dir, start_at, uid, result_queue):
 
 
 class LedgerStorageTests(unittest.TestCase):
+    def test_empty_load_is_side_effect_free(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "not-created"
+            store = LedgerStore(data_dir)
+
+            self.assertEqual(store.load(), {"version": 1, "reservations": []})
+            self.assertFalse(data_dir.exists())
+
     def test_atomic_files_keep_configured_shared_modes(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "shared"

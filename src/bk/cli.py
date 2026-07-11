@@ -713,7 +713,6 @@ def _print_edit_result(reservation: dict, result) -> None:
 
 def _log_command(config: Config, store: LedgerStore) -> int:
     uid = _current_actor().uid
-    store.ensure()
     if not store.log_path.exists():
         return 0
     with store.log_path.open("r", encoding="utf-8") as fh:

@@ -20,3 +20,4 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Fail closed on an unreadable ledger without a valid backup, while still allowing durable journal recovery.
 - Add machine-readable MCP risk annotations for read-only, idempotent, destructive, and closed-world tools.
 - Bind shared ledgers to one scheduling and storage policy so per-user environment overrides cannot silently change capacity rules.
+- Keep ordinary read-only CLI, Agent, and MCP calls free of empty-directory initialization side effects while preserving durable WAL recovery.

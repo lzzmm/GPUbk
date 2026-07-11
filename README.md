@@ -165,6 +165,8 @@ MCP 服务提供 `bk://context` resource、规划 prompt，以及以下结构化
 
 所有 MCP tools 都带标准风险注解：context/recommend/list/log 标记为 read-only，create 因强制 operation ID 标记为 idempotent write，cancel 标记为 destructive，且全部是本地 closed-world 操作。支持这些注解的 Agent 无需从文案猜测调用风险。
 
+只读 Agent/MCP 调用不会为一个空数据目录创建台账、锁或备份目录，也不会修改已有预约。唯一例外是检测到此前已经持久化但尚未应用完成的 WAL：读取会先完成该已提交事务的恢复，以免向 Agent 返回过期状态。
+
 wheel 内置 Skill：
 
 ```bash

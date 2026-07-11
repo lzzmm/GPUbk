@@ -453,6 +453,7 @@ class CliTests(unittest.TestCase):
             recommendation_payload = json.loads(recommendation.stdout)
             self.assertTrue(recommendation_payload["available"])
             self.assertEqual(recommendation_payload["recommendation"]["gpus"], [0])
+            self.assertEqual(list(data_dir.iterdir()), [])
 
     def test_booking_and_list_json_outputs_need_no_text_scraping(self):
         with tempfile.TemporaryDirectory() as tmp:

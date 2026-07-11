@@ -100,7 +100,6 @@ class LedgerStore:
         _ensure_directory(self.backup_dir, self.dir_mode)
 
     def load(self) -> dict:
-        self.ensure()
         if self.journal_path.exists():
             with self._lock():
                 self._recover_journal_unlocked()
@@ -161,7 +160,6 @@ class LedgerStore:
             }
 
     def health_issues(self) -> List[dict]:
-        self.ensure()
         issues = []
         if self.journal_path.exists():
             issues.append(
@@ -172,6 +170,8 @@ class LedgerStore:
                 }
             )
         for path in (self.data_dir, self.backup_dir):
+            if not path.exists():
+                continue
             actual = path.stat().st_mode & 0o7777
             if actual != self.dir_mode:
                 issues.append(
