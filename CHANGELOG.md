@@ -15,3 +15,4 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Expose GPU model and temperature in privacy-safe Agent and MCP context.
 - Auto-detect visible GPUs when no administrator count is configured, while preserving explicit limits.
 - Keep TUI headers and keyboard hints complete on terminals as narrow as 72 columns.
+- Pin all third-party GitHub Actions to immutable commits and test that release invariant.
