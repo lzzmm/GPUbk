@@ -1,0 +1,4 @@
+interface:
+  display_name: "BK GPU Scheduler"
+  short_description: "Plan and manage safe GPU reservations"
+  default_prompt: "Use $bk-gpu-scheduler to inspect GPU availability and recommend a safe reservation for my experiment."

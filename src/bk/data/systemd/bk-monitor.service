@@ -1,15 +1,15 @@
 [Unit]
-Description=BK per-user scheduled job worker
+Description=BK GPU usage monitor
 After=default.target
 
 [Service]
 Type=simple
 EnvironmentFile=-%h/.config/bk/bk.env
-ExecStart=%h/.local/bin/bk worker
+ExecStart=@PYTHON_EXECUTABLE@ -m bk monitor --interval 2 --rollup 60
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=15
-KillMode=control-group
+Nice=10
+IOSchedulingClass=idle
 NoNewPrivileges=true
 
 [Install]

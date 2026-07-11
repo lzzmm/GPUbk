@@ -1,24 +1,109 @@
 from __future__ import annotations
 
+import os
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Sequence
 
 from .advisor import GpuAdvice, build_gpu_advice
 from .allocator import AllocatorDecision, apply_external_allocator
 from .config import Config
-from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError
+from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, BookingResult
 from .scheduler import (
     BOOKING_GRANULARITY_SECONDS,
+    add_booking,
     find_earliest_slot,
     list_active,
     reservation_pressure_score,
     shared_memory_headroom_for_reservation,
 )
 from .storage import LedgerStore
-from .timeparse import parse_iso, to_iso, utc_now
+from .timeparse import to_iso, utc_now
+from .worker import delete_job_spec, prepare_job_spec
 
 
 AGENT_SCHEMA_VERSION = "bk.agent.v1"
+
+
+@dataclass(frozen=True)
+class BookingSubmission:
+    result: BookingResult
+    advice: GpuAdvice
+    allocator: AllocatorDecision
+
+
+def submit_booking(
+    config: Config,
+    store: LedgerStore,
+    actor: Actor,
+    *,
+    count: int,
+    duration_seconds: int,
+    start_at: datetime,
+    mode: str = MODE_SHARED,
+    preferred_gpus: Optional[Sequence[int]] = None,
+    expected_memory_mb: Optional[int] = None,
+    allow_queue: bool = True,
+    operation_id: Optional[str] = None,
+    command_argv: Optional[List[str]] = None,
+    working_directory: Optional[str] = None,
+    advice: Optional[GpuAdvice] = None,
+) -> BookingSubmission:
+    _validate_recommendation_request(config, count, duration_seconds, start_at, mode, expected_memory_mb, allow_queue)
+    gpu_advice = advice or build_gpu_advice(config)
+    allocator = (
+        apply_external_allocator(
+            config,
+            store,
+            actor,
+            gpu_advice,
+            count=count,
+            duration_seconds=duration_seconds,
+            start_at=start_at,
+            mode=mode,
+            expected_memory_mb=expected_memory_mb,
+        )
+        if preferred_gpus is None
+        else AllocatorDecision(list(gpu_advice.order), dict(gpu_advice.scores), "fixed-gpu")
+    )
+    if command_argv is not None and working_directory is None:
+        working_directory = os.getcwd()
+    job_spec = (
+        prepare_job_spec(config, actor, command_argv, str(working_directory))
+        if command_argv is not None
+        else None
+    )
+    try:
+        result = add_booking(
+            store,
+            config,
+            BookingRequest(
+                actor=actor,
+                count=count,
+                duration_seconds=duration_seconds,
+                start_at=start_at,
+                mode=mode,
+                preferred_gpus=list(preferred_gpus) if preferred_gpus is not None else None,
+                gpu_order=allocator.order,
+                gpu_scores=allocator.scores,
+                op_id=operation_id,
+                allow_queue=allow_queue,
+                job_spec_id=job_spec.spec_id if job_spec else None,
+                job_digest=job_spec.digest if job_spec else None,
+                job_summary=job_spec.summary if job_spec else None,
+                expected_memory_mb=expected_memory_mb,
+                gpu_memory_capacity_mb=gpu_advice.memory_capacities_mb,
+            ),
+        )
+    except Exception:
+        if job_spec is not None:
+            delete_job_spec(config, job_spec.spec_id)
+        raise
+    if job_spec is not None and (
+        not result.created or result.reservation.get("job", {}).get("spec_id") != job_spec.spec_id
+    ):
+        delete_job_spec(config, job_spec.spec_id)
+    return BookingSubmission(result, gpu_advice, allocator)
 
 
 def build_agent_context(

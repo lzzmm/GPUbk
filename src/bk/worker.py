@@ -5,7 +5,6 @@ import hashlib
 import hmac
 import json
 import os
-import shlex
 import signal
 import socket
 import stat

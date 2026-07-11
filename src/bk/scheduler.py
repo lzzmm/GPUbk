@@ -157,7 +157,7 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
 def cancel_booking(store: LedgerStore, reservation_id: str, actor: Actor) -> dict:
     def mutate(ledger: dict):
         now = utc_now()
-        changed = _expire_old_reservations(ledger, now)
+        _expire_old_reservations(ledger, now)
         for reservation in ledger["reservations"]:
             if reservation.get("id") != reservation_id:
                 continue
@@ -184,7 +184,7 @@ def cancel_booking(store: LedgerStore, reservation_id: str, actor: Actor) -> dic
 def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> BookingResult:
     def mutate(ledger: dict):
         now = utc_now()
-        changed = _expire_old_reservations(ledger, now)
+        _expire_old_reservations(ledger, now)
         reservation = _find_reservation(ledger, request.reservation_id)
         if reservation is None:
             raise BookingError("reservation not found")

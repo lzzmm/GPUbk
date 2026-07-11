@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import curses
-import getpass
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Sequence, Tuple
@@ -11,6 +9,7 @@ from .advisor import build_gpu_advice
 from .allocator import AllocatorDecision, apply_external_allocator
 from .config import Config
 from .gpu import GpuSnapshot, snapshot
+from .identity import current_actor
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, EditRequest
 from .scheduler import (
     add_booking,
@@ -1734,7 +1733,7 @@ def _timeline_selected_id(active: Sequence[dict], state: TuiState) -> Optional[s
 
 
 def _current_actor() -> Actor:
-    return Actor(uid=os.getuid(), username=getpass.getuser())
+    return current_actor()
 
 
 def _addstr(stdscr, row: int, col: int, text: str, width: int, color: int = 0, attr: int = 0) -> None:

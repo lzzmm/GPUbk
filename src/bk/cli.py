@@ -1,29 +1,36 @@
 from __future__ import annotations
 
 import argparse
-import getpass
 import json
 import os
 import shlex
 import sys
 from datetime import timedelta
+from pathlib import Path
 from typing import List, Optional
 
+from . import __version__
 from .advisor import GpuAdvice, build_gpu_advice
-from .allocator import AllocatorDecision, apply_external_allocator
+from .allocator import AllocatorDecision
 from .config import Config, load_config
 from .gpu import snapshot
+from .identity import current_actor
 from .monitor import UsageAuditStore, run_monitor
-from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, EditRequest
+from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, EditRequest
 from .scheduler import (
-    add_booking,
     cancel_booking,
     edit_booking,
     find_policy_violations,
     list_active,
     shared_memory_headroom_for_reservation,
 )
-from .service import AGENT_SCHEMA_VERSION, build_agent_context, public_reservation, recommend_booking
+from .service import (
+    AGENT_SCHEMA_VERSION,
+    build_agent_context,
+    public_reservation,
+    recommend_booking,
+    submit_booking,
+)
 from .storage import LedgerStore
 from .timeparse import (
     format_local,
@@ -36,7 +43,7 @@ from .timeparse import (
 )
 from .tui import run_tui
 from .usage import classify_process_usage, summarize_process_command
-from .worker import delete_job_spec, job_log_path, prepare_job_spec, retry_job, run_worker
+from .worker import job_log_path, retry_job, run_worker
 
 try:
     import readline  # noqa: F401
@@ -84,6 +91,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             return 0
         if head in {"agent", "ai"}:
             return _agent_command(argv[1:], config, store)
+        if head == "mcp":
+            from .mcp_server import main as mcp_main
+
+            mcp_main()
+            return 0
+        if head == "skill":
+            return _skill_command(argv[1:])
+        if head == "service":
+            return _service_command(argv[1:])
         if head in {"add", "a"}:
             return _add_interactive(config, store)
         if head in {"edit", "e"}:
@@ -100,6 +116,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _list_command(argv[1:], store)
         if head in {"-h", "--help", "help"}:
             _print_help()
+            return 0
+        if head in {"-V", "--version", "version"}:
+            print(f"bk {__version__}")
             return 0
         print(f"未知命令: {head}", file=sys.stderr)
         _print_help(file=sys.stderr)
@@ -252,56 +271,26 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
     expected_memory_mb = parse_memory_mb(args.mem) if args.mem else None
     duration_seconds = parse_duration_seconds(args.duration)
     start_at = parse_start(start_raw)
-    advice = build_gpu_advice(config)
     actor = _current_actor()
-    allocator = (
-        apply_external_allocator(
-            config,
-            store,
-            actor,
-            advice,
-            count=args.count,
-            duration_seconds=duration_seconds,
-            start_at=start_at,
-            mode=mode,
-            expected_memory_mb=expected_memory_mb,
-        )
-        if preferred is None
-        else AllocatorDecision(list(advice.order), dict(advice.scores), "fixed-gpu")
-    )
-    job_spec = (
-        prepare_job_spec(config, actor, command_argv, os.getcwd())
-        if command_argv is not None
-        else None
-    )
-    request = BookingRequest(
-        actor=actor,
+    submission = submit_booking(
+        config,
+        store,
+        actor,
         count=args.count,
         duration_seconds=duration_seconds,
         start_at=start_at,
         mode=mode,
         preferred_gpus=preferred,
-        gpu_order=allocator.order,
-        gpu_scores=allocator.scores,
         allow_queue=args.start is None,
-        op_id=args.op_id,
-        job_spec_id=job_spec.spec_id if job_spec is not None else None,
-        job_digest=job_spec.digest if job_spec is not None else None,
-        job_summary=job_spec.summary if job_spec is not None else None,
+        operation_id=args.op_id,
+        command_argv=command_argv,
+        working_directory=os.getcwd() if command_argv is not None else None,
         expected_memory_mb=expected_memory_mb,
-        gpu_memory_capacity_mb=advice.memory_capacities_mb,
     )
-    try:
-        result = add_booking(store, config, request)
-    except Exception:
-        if job_spec is not None:
-            delete_job_spec(config, job_spec.spec_id)
-        raise
+    result = submission.result
+    advice = submission.advice
+    allocator = submission.allocator
     reservation = result.reservation
-    if job_spec is not None and (
-        not result.created or reservation.get("job", {}).get("spec_id") != job_spec.spec_id
-    ):
-        delete_job_spec(config, job_spec.spec_id)
     if not result.created:
         status = "exists"
     elif result.queued:
@@ -527,6 +516,49 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     return exit_code
 
 
+def _skill_command(argv: List[str]) -> int:
+    from .skill import default_skill_path, install_skill, skill_text
+
+    parser = argparse.ArgumentParser(prog="bk skill")
+    subparsers = parser.add_subparsers(dest="action", required=True)
+    install_parser = subparsers.add_parser("install")
+    install_parser.add_argument("--target", type=Path, help="exact destination skill directory")
+    install_parser.add_argument("--force", action="store_true")
+    subparsers.add_parser("show")
+    subparsers.add_parser("path")
+    args = parser.parse_args(argv)
+    if args.action == "show":
+        print(skill_text(), end="")
+        return 0
+    if args.action == "path":
+        print(default_skill_path())
+        return 0
+    installed = install_skill(args.target, force=args.force)
+    print(f"installed skill: {installed}")
+    return 0
+
+
+def _service_command(argv: List[str]) -> int:
+    from .systemd import install_user_unit, unit_text
+
+    parser = argparse.ArgumentParser(prog="bk service")
+    subparsers = parser.add_subparsers(dest="action", required=True)
+    install_parser = subparsers.add_parser("install")
+    install_parser.add_argument("kind", choices=["monitor", "worker"])
+    install_parser.add_argument("--target-dir", type=Path)
+    install_parser.add_argument("--force", action="store_true")
+    show_parser = subparsers.add_parser("show")
+    show_parser.add_argument("kind", choices=["monitor", "worker"])
+    args = parser.parse_args(argv)
+    if args.action == "show":
+        print(unit_text(args.kind), end="")
+        return 0
+    path = install_user_unit(args.kind, args.target_dir, force=args.force)
+    print(f"installed unit: {path}")
+    print("not enabled or started; review it, then run systemctl --user daemon-reload")
+    return 0
+
+
 def _add_interactive(config: Config, store: LedgerStore) -> int:
     actor = _current_actor()
     mode_raw = input("mode [s/x] (shared): ").strip() or MODE_SHARED
@@ -545,42 +577,23 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
     expected_memory_mb = parse_memory_mb(memory_raw) if memory_raw else None
     command_raw = input("command optional, for example python train.py: ").strip()
     command_argv = shlex.split(command_raw) if command_raw else None
-    advice = build_gpu_advice(config)
-    job_spec = (
-        prepare_job_spec(config, actor, command_argv, os.getcwd())
-        if command_argv is not None
-        else None
+    submission = submit_booking(
+        config,
+        store,
+        actor,
+        count=count,
+        duration_seconds=duration,
+        start_at=start,
+        mode=mode_raw,
+        preferred_gpus=preferred,
+        expected_memory_mb=expected_memory_mb,
+        allow_queue=allow_queue,
+        command_argv=command_argv,
+        working_directory=os.getcwd() if command_argv is not None else None,
     )
-    try:
-        result = add_booking(
-            store,
-            config,
-            BookingRequest(
-                actor=actor,
-                count=count,
-                duration_seconds=duration,
-                start_at=start,
-                mode=mode_raw,
-                preferred_gpus=preferred,
-                gpu_order=advice.order,
-                gpu_scores=advice.scores,
-                allow_queue=allow_queue,
-                job_spec_id=job_spec.spec_id if job_spec is not None else None,
-                job_digest=job_spec.digest if job_spec is not None else None,
-                job_summary=job_spec.summary if job_spec is not None else None,
-                expected_memory_mb=expected_memory_mb,
-                gpu_memory_capacity_mb=advice.memory_capacities_mb,
-            ),
-        )
-    except Exception:
-        if job_spec is not None:
-            delete_job_spec(config, job_spec.spec_id)
-        raise
+    result = submission.result
+    advice = submission.advice
     reservation = result.reservation
-    if job_spec is not None and (
-        not result.created or reservation.get("job", {}).get("spec_id") != job_spec.spec_id
-    ):
-        delete_job_spec(config, job_spec.spec_id)
     print(f"{'queued' if result.queued else 'created'}: {_short_id(reservation)} {format_local_range(reservation['start_at'], reservation['end_at'])}")
     _print_booking_advice(config, store, reservation, advice, expected_memory_mb)
     if isinstance(reservation.get("job"), dict):
@@ -975,7 +988,7 @@ def _format_memory_mb(value: Optional[int]) -> str:
 
 
 def _current_actor() -> Actor:
-    return Actor(uid=os.getuid(), username=getpass.getuser())
+    return current_actor()
 
 
 def _short_id(reservation: dict) -> str:
@@ -1067,6 +1080,9 @@ def _print_help(file=None) -> None:
   bk jr <number_or_short_id>    retry a failed job
   bk agent context              machine-readable resource context
   bk agent recommend 2 1h30m   read-only placement recommendation
+  bk mcp                        run optional local stdio MCP server
+  bk skill install              install bundled Codex skill
+  bk service install worker     install, but do not enable, a user unit
   bk a                          guided add
   bk e [number_or_short_id]     edit
   bk d <number_or_short_id>     delete
