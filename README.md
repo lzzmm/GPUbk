@@ -1,4 +1,15 @@
-# bk GPU 预约系统
+# bk GPU Scheduler
+
+`bk` is an offline, zero-core-dependency GPU booking CLI and curses TUI for shared lab servers. It provides 5-minute shared/exclusive scheduling, VRAM admission, live and historical load-aware placement, per-user scheduled jobs, atomic file transactions, stable JSON, optional MCP, and a bundled Codex Skill.
+
+```bash
+python3 -m pip install bk-gpu-booker          # zero runtime dependencies
+python3 -m pip install 'bk-gpu-booker[gpu]'  # low-overhead NVML telemetry
+bk 2 1h30m --mem 12g
+bk t
+```
+
+The detailed guide below is currently in Chinese.
 
 `bk` 是一个离线、文件存储、面向实验室 GPU 共享服务器的预约工具。
 
@@ -124,6 +135,35 @@ export BK_ALLOCATOR_WEIGHT=5
 
 `gpu_order` 必须是所有 GPU 索引的完整排列。外部顺序只以有界权重参与本地评分，最终方案仍强制经过 exclusive/shared 冲突、5 分钟粒度、显存预算和文件事务校验，Agent 无法绕过安全约束。超时、崩溃、非法 JSON、重复或越界卡号会回退内置算法并在 JSON 中给出 warning。该命令是明确的信任边界：默认关闭；启用后它以配置者当前 UID 运行，可自行访问网络或本地文件，因此只应配置受信任程序。
 
+### MCP 与 Codex Skill
+
+核心包保持零依赖。需要 MCP 时安装可选 extra：
+
+```bash
+python3 -m pip install 'bk-gpu-booker[mcp]'
+bk-mcp                 # 或 bk mcp；本地 stdio transport
+```
+
+MCP 服务提供 `bk://context` resource、规划 prompt，以及以下结构化 tools：
+
+- `get_gpu_context`
+- `recommend_gpu_booking`
+- `create_gpu_booking`（强制 `operation_id`）
+- `list_gpu_reservations`
+- `cancel_my_gpu_booking`
+- `read_my_job_log`
+
+服务身份始终来自启动 `bk-mcp` 的系统 UID，tool schema 没有 UID 参数。默认只提供本地 stdio，不开放监听端口；每位用户应启动自己的 MCP 进程。当前 optional extra 固定在官方 Python SDK 稳定 v1 线 `<2`，避免预发布 v2 的破坏性变化。
+
+wheel 内置 Skill：
+
+```bash
+bk skill install
+bk skill show
+```
+
+默认安装到 `${CODEX_HOME:-~/.codex}/skills/bk-gpu-scheduler`；已有目录时拒绝覆盖，更新需显式 `--force`。Skill 会指导 Agent 先读 context、再 recommend、获得写入授权后使用稳定 operation ID 提交，并正确处理 shared VRAM、exact start、queued、uncertain job 和外部 allocator 的安全边界。
+
 私有默认权限为目录 `0700`、文件 `0600`。共享部署必须同时配置 `file_mode=0660`、`dir_mode=2770`，并让共享目录具有正确组所有权和 setgid 位；程序不会擅自 `chown` 或修改已存在目录的权限。原子替换产生的新台账、journal、备份和日志都会保持配置的文件模式。
 
 预约写入使用 write-ahead journal：先持久化完整事务，再原子替换台账，最后以事件 ID 幂等追加审计日志。进程在任一步崩溃后，下次访问会完成恢复，不会把“台账已写、CLI 报失败”变成重复预约。`transaction.json` 正常提交后立即删除；若长期存在，说明有待恢复的事务，应先运行 `bk doctor`，不要手工删除。
@@ -168,11 +208,11 @@ bk w --once              # 只执行当前已到点任务，结束后退出
 bk jr 1 --accept-duplicate-risk
 ```
 
-生产环境建议每位需要自动运行实验的用户自行启用 [deploy/bk-worker.service](deploy/bk-worker.service)，而不是部署共享 root worker：
+生产环境建议每位需要自动运行实验的用户自行安装并启用 wheel 内置的用户级 worker unit，而不是部署共享 root worker：
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp deploy/bk-worker.service ~/.config/systemd/user/
+bk service show worker
+bk service install worker
 systemctl --user daemon-reload
 systemctl --user enable --now bk-worker.service
 ```
@@ -226,7 +266,7 @@ bk usage --rollups --limit 20
 
 预约存在但没有对应进程时仍会生成 `status=ok`、`avg_process_count=0` 的汇总，用来识别预约空置。`bk reset --yes` 会在监测器未运行时一起清理这些审计文件；监测器正在运行时 reset 会因 `usage.lock` 超时而拒绝执行。
 
-仓库提供 [deploy/bk-monitor.service](deploy/bk-monitor.service) 用户级 systemd 模板。正式启用前创建 `~/.config/bk/bk.env`：
+wheel 内置 `bk-monitor.service` 用户级 systemd 模板。正式启用前创建 `~/.config/bk/bk.env`：
 
 ```bash
 BK_DATA_DIR=/data2/shared/bk
@@ -237,8 +277,8 @@ BK_MAX_SHARED_USERS=2
 然后安装和启动：
 
 ```bash
-mkdir -p ~/.config/systemd/user
-cp deploy/bk-monitor.service ~/.config/systemd/user/
+bk service show monitor
+bk service install monitor
 systemctl --user daemon-reload
 systemctl --user enable --now bk-monitor.service
 ```
