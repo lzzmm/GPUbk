@@ -66,6 +66,30 @@ class ConfigTests(unittest.TestCase):
             self.assertTrue(config.require_shared_memory)
             self.assertEqual(config.ledger_retention_days, 45)
 
+    def test_config_file_must_not_be_group_writable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            path = data_dir / "config.json"
+            path.write_text("{}", encoding="utf-8")
+            path.chmod(0o664)
+
+            with mock.patch.dict("os.environ", {"BK_DATA_DIR": str(data_dir)}, clear=True):
+                with self.assertRaisesRegex(PermissionError, "must not be writable"):
+                    load_config()
+
+    def test_config_file_symbolic_link_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir()
+            target = root / "config-target.json"
+            target.write_text("{}", encoding="utf-8")
+            (data_dir / "config.json").symlink_to(target)
+
+            with mock.patch.dict("os.environ", {"BK_DATA_DIR": str(data_dir)}, clear=True):
+                with self.assertRaises(OSError):
+                    load_config()
+
     def test_zero_retention_disables_hot_ledger_pruning(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict(

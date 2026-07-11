@@ -52,6 +52,20 @@ class UsageMonitorTests(unittest.TestCase):
         self.assertEqual([item["index"] for item in recent], [5000, 5001, 5002])
         self.assertLessEqual(loads.call_count, 4)
 
+    def test_event_append_rejects_symbolic_link_without_touching_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            store = UsageAuditStore(data_dir)
+            store.ensure()
+            target = Path(tmp) / "victim"
+            target.write_text("keep", encoding="utf-8")
+            store.events_path.symlink_to(target)
+
+            with self.assertRaises(OSError):
+                store.append_events([{"event": "unsafe"}])
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "keep")
+
     @staticmethod
     def write_ledger(path, reservations):
         path.mkdir(parents=True, exist_ok=True)

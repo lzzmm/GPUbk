@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .config import Config
+from .fileio import ensure_directory, open_existing_regular, open_or_create_regular
 from .models import (
     JOB_CANCELLED,
     JOB_CLAIMED,
@@ -85,6 +86,7 @@ def prepare_job_spec(
     }
     digest = _job_spec_digest(payload)
     payload["digest"] = digest
+    _ensure_job_log_dir(config, actor)
     path = job_spec_path(config, spec_id)
     _ensure_private_directory(path.parent, actor)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -461,10 +463,7 @@ def _validate_submission_payload(raw_argv, cwd) -> Tuple[List[str], str]:
 
 def _read_job_spec(config: Config, actor: Actor, spec_id: str) -> dict:
     path = job_spec_path(config, spec_id)
-    flags = os.O_RDONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(str(path), flags)
+    fd = open_existing_regular(path)
     try:
         metadata = os.fstat(fd)
         if not stat.S_ISREG(metadata.st_mode):
@@ -475,9 +474,10 @@ def _read_job_spec(config: Config, actor: Actor, spec_id: str) -> dict:
             raise BookingError("job spec must not be accessible by group or other users")
         if metadata.st_size > 128 * 1024:
             raise BookingError("job spec is too large")
-        with os.fdopen(fd, "r", encoding="utf-8") as fh:
+        fh = os.fdopen(fd, "r", encoding="utf-8")
+        fd = -1
+        with fh:
             payload = json.load(fh)
-            fd = -1
     finally:
         if fd >= 0:
             os.close(fd)
@@ -695,18 +695,15 @@ def _ensure_job_log_dir(config: Config, actor: Actor) -> Path:
 
 
 def _ensure_private_directory(path: Path, actor: Actor) -> None:
-    path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    metadata = path.stat()
+    ensure_directory(path, 0o700)
+    metadata = path.lstat()
     if metadata.st_uid != actor.uid:
         raise BookingError(f"private job directory is not owned by UID {actor.uid}: {path}")
     path.chmod(0o700)
 
 
 def _open_secure_log(path: Path):
-    flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(str(path), flags, 0o600)
+    fd = open_or_create_regular(path, os.O_WRONLY | os.O_APPEND, 0o600)
     os.fchmod(fd, 0o600)
     return os.fdopen(fd, "ab", buffering=0)
 

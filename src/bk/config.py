@@ -3,13 +3,17 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
+from .fileio import open_existing_regular
+
 
 DEFAULT_PRIVATE_FILE_MODE = 0o600
 DEFAULT_PRIVATE_DIR_MODE = 0o700
+MAX_CONFIG_FILE_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -36,10 +40,24 @@ class Config:
 
 def _read_config_file(data_dir: Path) -> Dict[str, Any]:
     path = data_dir / "config.json"
-    if not path.exists():
+    if not os.path.lexists(path):
         return {}
-    with path.open("r", encoding="utf-8") as fh:
-        raw = json.load(fh)
+    fd = open_existing_regular(path)
+    try:
+        metadata = os.fstat(fd)
+        if metadata.st_uid not in {0, os.getuid()}:
+            raise PermissionError(f"{path} must be owned by root or UID {os.getuid()}")
+        if stat.S_IMODE(metadata.st_mode) & 0o022:
+            raise PermissionError(f"{path} must not be writable by group or other users")
+        if metadata.st_size > MAX_CONFIG_FILE_BYTES:
+            raise ValueError(f"{path} exceeds the 1 MiB configuration limit")
+        fh = os.fdopen(fd, "r", encoding="utf-8")
+        fd = -1
+        with fh:
+            raw = json.load(fh)
+    finally:
+        if fd >= 0:
+            os.close(fd)
     if not isinstance(raw, dict):
         raise ValueError(f"{path} must contain a JSON object")
     return raw

@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple, TypeVar
 
+from .fileio import ensure_directory, open_existing_regular, open_or_create_regular
 from .models import BookingError
 from .policy import ledger_storage_modes
 
@@ -42,8 +43,8 @@ class FileLock:
         self._fh = None
 
     def __enter__(self):
-        _ensure_directory(self.path.parent, self.dir_mode)
-        fd = _open_or_create(self.path, os.O_RDWR, self.file_mode)
+        ensure_directory(self.path.parent, self.dir_mode)
+        fd = open_or_create_regular(self.path, os.O_RDWR, self.file_mode)
         self._fh = os.fdopen(fd, "r+", encoding="utf-8")
         deadline = time.monotonic() + self.timeout_seconds
         while True:
@@ -96,8 +97,8 @@ class LedgerStore:
         self.last_warning: Optional[str] = None
 
     def ensure(self) -> None:
-        _ensure_directory(self.data_dir, self.dir_mode)
-        _ensure_directory(self.backup_dir, self.dir_mode)
+        ensure_directory(self.data_dir, self.dir_mode)
+        ensure_directory(self.backup_dir, self.dir_mode)
 
     def load(self) -> dict:
         if self.journal_path.exists():
@@ -110,6 +111,7 @@ class LedgerStore:
         self.last_warning = None
         with self._lock():
             self._recover_journal_unlocked()
+            self._validate_existing_log_unlocked()
             ledger = self._load_unlocked()
             new_ledger, result, logs, changed = mutator(ledger)
             log_items = list(logs)
@@ -209,7 +211,8 @@ class LedgerStore:
         if not self.ledger_path.exists():
             return _empty_ledger()
         try:
-            with self.ledger_path.open("r", encoding="utf-8") as fh:
+            fd = open_existing_regular(self.ledger_path)
+            with os.fdopen(fd, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
             self._validate_ledger(data)
         except (json.JSONDecodeError, OSError, ValueError) as exc:
@@ -246,7 +249,8 @@ class LedgerStore:
         backups = sorted(self.backup_dir.glob("ledger-*.json"), reverse=True)
         for path in backups:
             try:
-                with path.open("r", encoding="utf-8") as fh:
+                fd = open_existing_regular(path)
+                with os.fdopen(fd, "r", encoding="utf-8") as fh:
                     data = json.load(fh)
                 self._validate_ledger(data)
                 return data
@@ -276,7 +280,8 @@ class LedgerStore:
         if not self.journal_path.exists():
             return
         try:
-            with self.journal_path.open("r", encoding="utf-8") as fh:
+            fd = open_existing_regular(self.journal_path)
+            with os.fdopen(fd, "r", encoding="utf-8") as fh:
                 journal = json.load(fh)
             self._validate_journal(journal)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -351,7 +356,7 @@ class LedgerStore:
         missing = [item for item in logs if str(item["event_id"]) not in existing]
         if not missing:
             return
-        fd = _open_or_create(self.log_path, os.O_WRONLY | os.O_APPEND, self.file_mode)
+        fd = open_or_create_regular(self.log_path, os.O_WRONLY | os.O_APPEND, self.file_mode)
         with os.fdopen(fd, "a", encoding="utf-8") as fh:
             for item in missing:
                 fh.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
@@ -362,7 +367,8 @@ class LedgerStore:
         if not wanted or not self.log_path.exists():
             return set()
         found = set()
-        with self.log_path.open("rb") as fh:
+        fd = open_existing_regular(self.log_path)
+        with os.fdopen(fd, "rb") as fh:
             size = fh.seek(0, os.SEEK_END)
             start = max(0, size - tail_bytes)
             fh.seek(start)
@@ -379,6 +385,12 @@ class LedgerStore:
                     if found == wanted:
                         break
         return found
+
+    def _validate_existing_log_unlocked(self) -> None:
+        if not os.path.lexists(self.log_path):
+            return
+        fd = open_existing_regular(self.log_path, os.O_WRONLY | os.O_APPEND)
+        os.close(fd)
 
     def _clear_journal_best_effort(self) -> None:
         try:
@@ -425,28 +437,11 @@ def _atomic_write_json(
         tmp_path.unlink(missing_ok=True)
 
 
-def _ensure_directory(path: Path, mode: int) -> None:
-    try:
-        path.mkdir(parents=True, mode=mode)
-        path.chmod(mode)
-    except FileExistsError:
-        if not path.is_dir():
-            raise NotADirectoryError(path)
-
-
-def _open_or_create(path: Path, flags: int, mode: int) -> int:
-    try:
-        fd = os.open(str(path), flags | os.O_CREAT | os.O_EXCL, mode)
-        os.fchmod(fd, mode)
-        return fd
-    except FileExistsError:
-        return os.open(str(path), flags)
-
-
 def _line_count(path: Path) -> int:
     if not path.exists():
         return 0
-    with path.open("r", encoding="utf-8") as fh:
+    fd = open_existing_regular(path)
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
         return sum(1 for _line in fh)
 
 

@@ -13,6 +13,7 @@ from . import __version__
 from .advisor import GpuAdvice, build_gpu_advice
 from .allocator import AllocatorDecision
 from .config import Config, load_config
+from .fileio import open_existing_regular
 from .gpu import snapshot
 from .identity import current_actor
 from .monitor import UsageAuditStore, run_monitor
@@ -435,8 +436,10 @@ def _job_log_command(argv: List[str], config: Config, store: LedgerStore) -> int
     if not path.exists():
         print(f"job log not created yet: {path}")
         return 0
-    with path.open("r", encoding="utf-8", errors="replace") as fh:
-        sys.stdout.write(fh.read())
+    fd = open_existing_regular(path)
+    with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as fh:
+        while chunk := fh.read(64 * 1024):
+            sys.stdout.write(chunk)
     return 0
 
 
@@ -715,7 +718,8 @@ def _log_command(config: Config, store: LedgerStore) -> int:
     uid = _current_actor().uid
     if not store.log_path.exists():
         return 0
-    with store.log_path.open("r", encoding="utf-8") as fh:
+    fd = open_existing_regular(store.log_path)
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
         for line in fh:
             item = json.loads(line)
             if int(item.get("uid")) != uid:

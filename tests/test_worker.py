@@ -179,6 +179,21 @@ class ScheduledJobTests(unittest.TestCase):
                 "relative/path",
             )
 
+    def test_job_spec_rejects_symbolic_link_log_directory(self):
+        target = Path(self.tmp.name) / "log-target"
+        target.mkdir()
+        self.log_dir.symlink_to(target, target_is_directory=True)
+
+        with self.assertRaises(NotADirectoryError):
+            prepare_job_spec(
+                self.config,
+                self.actor,
+                [sys.executable, "-c", "print('safe')"],
+                str(self.work_dir),
+            )
+
+        self.assertEqual(list(target.iterdir()), [])
+
     def test_shared_ledger_contains_no_command_arguments_and_private_spec_is_locked_down(self):
         secret = "api-token-should-stay-private"
         reservation = self.booking(command=[sys.executable, "-c", f"print({secret!r})"])

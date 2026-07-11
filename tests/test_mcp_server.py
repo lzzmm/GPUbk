@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bk.config import Config
-from bk.mcp_server import BkMcpBackend
+from bk.mcp_server import BkMcpBackend, _read_tail
 from bk.models import Actor, BookingError, BookingRequest
 from bk.scheduler import add_booking
 from bk.storage import LedgerStore
@@ -76,6 +76,24 @@ class McpBackendTests(unittest.TestCase):
 
         with self.assertRaisesRegex(BookingError, "not found for current UID"):
             self.backend.cancel(other["id"])
+
+    def test_job_log_tail_is_unicode_safe_and_bounded(self):
+        path = Path(self.tmp.name) / "unicode.log"
+        path.write_text("prefix-" + "测" * 100 + "-end", encoding="utf-8")
+
+        result = _read_tail(path, 12)
+
+        self.assertEqual(result, "测" * 8 + "-end")
+        self.assertEqual(len(result), 12)
+
+    def test_job_log_tail_rejects_symbolic_link(self):
+        target = Path(self.tmp.name) / "target.log"
+        link = Path(self.tmp.name) / "link.log"
+        target.write_text("private", encoding="utf-8")
+        link.symlink_to(target)
+
+        with self.assertRaises(OSError):
+            _read_tail(link, 32)
 
 
 if __name__ == "__main__":

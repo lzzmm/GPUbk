@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
 
 from .config import Config
+from .fileio import ensure_directory, open_existing_regular, open_or_create_regular
 from .gpu import GpuSnapshot, snapshot
 from .scheduler import list_active
 from .storage import FileLock, LedgerStore
@@ -58,7 +59,7 @@ class UsageAuditStore:
         self.load_path = data_dir / "usage-load.json"
 
     def ensure(self) -> None:
-        _ensure_directory(self.data_dir, self.dir_mode)
+        ensure_directory(self.data_dir, self.dir_mode)
 
     def lock(self) -> FileLock:
         self.ensure()
@@ -69,7 +70,9 @@ class UsageAuditStore:
         if not self.state_path.exists():
             return {}
         try:
-            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+            fd = open_existing_regular(self.state_path)
+            with os.fdopen(fd, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
             if payload.get("version") != 1 or not isinstance(payload.get("processes"), dict):
                 return {}
             return payload["processes"]
@@ -114,7 +117,9 @@ class UsageAuditStore:
         if not self.load_path.exists():
             return {"version": 1, "updated_at": None, "gpus": {}}
         try:
-            payload = json.loads(self.load_path.read_text(encoding="utf-8"))
+            fd = open_existing_regular(self.load_path)
+            with os.fdopen(fd, "r", encoding="utf-8") as fh:
+                payload = json.load(fh)
             if payload.get("version") != 1 or not isinstance(payload.get("gpus"), dict):
                 raise ValueError("invalid load history")
             return payload
@@ -155,7 +160,7 @@ class UsageAuditStore:
         if not items:
             return 0
         self.ensure()
-        fd = _open_or_create_append(path, self.file_mode)
+        fd = open_or_create_regular(path, os.O_WRONLY | os.O_APPEND, self.file_mode)
         with os.fdopen(fd, "a", encoding="utf-8") as fh:
             for item in items:
                 fh.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
@@ -630,13 +635,15 @@ def _fsync_dir(path: Path) -> None:
 def _line_count(path: Path) -> int:
     if not path.exists():
         return 0
-    with path.open("r", encoding="utf-8") as fh:
+    fd = open_existing_regular(path)
+    with os.fdopen(fd, "r", encoding="utf-8") as fh:
         return sum(1 for _line in fh)
 
 
 def _reverse_lines(path: Path, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
     """Yield non-empty binary lines newest-first without scanning the whole file."""
-    with path.open("rb") as fh:
+    fd = open_existing_regular(path)
+    with os.fdopen(fd, "rb") as fh:
         position = fh.seek(0, os.SEEK_END)
         remainder = b""
         while position > 0:
@@ -651,22 +658,3 @@ def _reverse_lines(path: Path, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
             for line in reversed(parts):
                 if line:
                     yield line
-
-
-def _ensure_directory(path: Path, mode: int) -> None:
-    try:
-        path.mkdir(parents=True, mode=mode)
-        path.chmod(mode)
-    except FileExistsError:
-        if not path.is_dir():
-            raise NotADirectoryError(path)
-
-
-def _open_or_create_append(path: Path, mode: int) -> int:
-    flags = os.O_WRONLY | os.O_APPEND
-    try:
-        fd = os.open(str(path), flags | os.O_CREAT | os.O_EXCL, mode)
-        os.fchmod(fd, mode)
-        return fd
-    except FileExistsError:
-        return os.open(str(path), flags)

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from .config import Config, load_config
+from .fileio import open_existing_regular
 from .identity import current_actor
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError
 from .scheduler import cancel_booking, list_active
@@ -285,11 +286,12 @@ def _resolve_token(reservations: List[dict], token: str) -> dict:
 
 
 def _read_tail(path: Path, max_chars: int) -> str:
-    with path.open("r", encoding="utf-8", errors="replace") as fh:
+    fd = open_existing_regular(path)
+    with os.fdopen(fd, "rb") as fh:
         fh.seek(0, os.SEEK_END)
         size = fh.tell()
         fh.seek(max(0, size - max_chars * 4))
-        text = fh.read()
+        text = fh.read().decode("utf-8", errors="replace")
     return text[-max_chars:]
 
 

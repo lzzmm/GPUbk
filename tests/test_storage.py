@@ -42,6 +42,53 @@ class LedgerStorageTests(unittest.TestCase):
             self.assertEqual(store.load(), {"version": 1, "reservations": []})
             self.assertFalse(data_dir.exists())
 
+    def test_symbolic_link_lock_is_rejected_before_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            store = LedgerStore(data_dir)
+            store.ensure()
+            target = Path(tmp) / "victim"
+            target.write_text("keep", encoding="utf-8")
+            store.lock_path.symlink_to(target)
+            mutator = mock.Mock()
+
+            with self.assertRaises(OSError):
+                store.transaction(mutator)
+
+            mutator.assert_not_called()
+            self.assertEqual(target.read_text(encoding="utf-8"), "keep")
+
+    def test_symbolic_link_log_is_rejected_before_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            store = LedgerStore(data_dir)
+            store.ensure()
+            target = Path(tmp) / "victim"
+            target.write_text("keep", encoding="utf-8")
+            store.log_path.symlink_to(target)
+            mutator = mock.Mock()
+
+            with self.assertRaises(OSError):
+                store.transaction(mutator)
+
+            mutator.assert_not_called()
+            self.assertFalse(store.ledger_path.exists())
+            self.assertEqual(target.read_text(encoding="utf-8"), "keep")
+
+    def test_symbolic_link_backup_directory_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            data_dir.mkdir()
+            target = Path(tmp) / "outside"
+            target.mkdir()
+            (data_dir / "backups").symlink_to(target, target_is_directory=True)
+            store = LedgerStore(data_dir)
+
+            with self.assertRaises(NotADirectoryError):
+                store.transaction(lambda ledger: (ledger, None, [], False))
+
+            self.assertEqual(list(target.iterdir()), [])
+
     def test_atomic_files_keep_configured_shared_modes(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "shared"

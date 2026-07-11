@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import selectors
+import signal
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -16,6 +20,8 @@ from .timeparse import to_iso
 
 ALLOCATOR_SCHEMA_VERSION = "bk.allocator.v1"
 MAX_ALLOCATOR_OUTPUT_BYTES = 64 * 1024
+MAX_ALLOCATOR_STDERR_BYTES = 8 * 1024
+ALLOCATOR_IO_CHUNK_BYTES = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -53,24 +59,17 @@ def apply_external_allocator(
         expected_memory_mb=expected_memory_mb,
     )
     try:
-        completed = subprocess.run(
+        returncode, stdout, stderr = _run_allocator_process(
             list(config.allocator_command),
-            input=json.dumps(payload, ensure_ascii=True, sort_keys=True),
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            timeout=config.allocator_timeout_seconds,
-            check=False,
-            shell=False,
+            json.dumps(payload, ensure_ascii=True, sort_keys=True),
+            config.allocator_timeout_seconds,
         )
-        if completed.returncode != 0:
-            detail = completed.stderr.strip().splitlines()[-1][:200] if completed.stderr.strip() else "no stderr"
-            raise ValueError(f"allocator exited {completed.returncode}: {detail}")
-        if len(completed.stdout.encode("utf-8")) > MAX_ALLOCATOR_OUTPUT_BYTES:
-            raise ValueError("allocator output exceeded 64 KiB")
-        response = json.loads(completed.stdout)
+        if returncode != 0:
+            detail = stderr.strip().splitlines()[-1][:200] if stderr.strip() else "no stderr"
+            raise ValueError(f"allocator exited {returncode}: {detail}")
+        response = json.loads(stdout)
         order, reason = _validate_allocator_response(response, config.gpu_count)
-    except (OSError, ValueError, TypeError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
+    except (OSError, UnicodeError, ValueError, TypeError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
         return AllocatorDecision(
             list(advice.order),
             dict(advice.scores),
@@ -82,6 +81,119 @@ def apply_external_allocator(
     for rank, gpu in enumerate(order):
         adjusted_scores[gpu] = round(adjusted_scores[gpu] + rank * config.allocator_weight, 3)
     return AllocatorDecision(order, adjusted_scores, "external", reason=reason)
+
+
+def _run_allocator_process(argv: List[str], payload: str, timeout_seconds: float) -> tuple[int, str, str]:
+    process = subprocess.Popen(
+        argv,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        shell=False,
+        start_new_session=True,
+        close_fds=True,
+    )
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    streams = (process.stdin, process.stdout, process.stderr)
+    selector = selectors.DefaultSelector()
+    payload_bytes = payload.encode("utf-8")
+    payload_offset = 0
+    stdout = bytearray()
+    stderr = bytearray()
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        for stream in streams:
+            os.set_blocking(stream.fileno(), False)
+        selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(argv, timeout_seconds)
+            for key, _events in selector.select(min(remaining, 0.1)):
+                stream = key.fileobj
+                if key.data == "stdin":
+                    try:
+                        written = os.write(
+                            stream.fileno(),
+                            payload_bytes[payload_offset : payload_offset + ALLOCATOR_IO_CHUNK_BYTES],
+                        )
+                    except BrokenPipeError:
+                        _close_selector_stream(selector, stream)
+                        continue
+                    payload_offset += written
+                    if payload_offset >= len(payload_bytes):
+                        _close_selector_stream(selector, stream)
+                    continue
+
+                try:
+                    chunk = os.read(stream.fileno(), ALLOCATOR_IO_CHUNK_BYTES)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    _close_selector_stream(selector, stream)
+                elif key.data == "stdout":
+                    keep = MAX_ALLOCATOR_OUTPUT_BYTES + 1 - len(stdout)
+                    if keep > 0:
+                        stdout.extend(chunk[:keep])
+                    if len(stdout) > MAX_ALLOCATOR_OUTPUT_BYTES:
+                        raise ValueError("allocator output exceeded 64 KiB")
+                else:
+                    _append_bounded_tail(stderr, chunk, MAX_ALLOCATOR_STDERR_BYTES)
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(argv, timeout_seconds)
+        returncode = process.wait(timeout=remaining)
+        _kill_allocator_process_group(process)
+        return returncode, stdout.decode("utf-8"), stderr.decode("utf-8", errors="replace")
+    except Exception:
+        _kill_allocator_process_group(process)
+        raise
+    finally:
+        for stream in streams:
+            _close_selector_stream(selector, stream)
+        selector.close()
+
+
+def _append_bounded_tail(buffer: bytearray, chunk: bytes, limit: int) -> None:
+    if len(chunk) >= limit:
+        buffer[:] = chunk[-limit:]
+        return
+    overflow = len(buffer) + len(chunk) - limit
+    if overflow > 0:
+        del buffer[:overflow]
+    buffer.extend(chunk)
+
+
+def _close_selector_stream(selector: selectors.BaseSelector, stream) -> None:
+    try:
+        selector.unregister(stream)
+    except (KeyError, ValueError):
+        pass
+    try:
+        stream.close()
+    except OSError:
+        pass
+
+
+def _kill_allocator_process_group(process: subprocess.Popen) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (OSError, ProcessLookupError):
+        if process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        pass
 
 
 def _allocator_payload(

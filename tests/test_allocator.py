@@ -1,5 +1,6 @@
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -114,6 +115,97 @@ class ExternalAllocatorTests(unittest.TestCase):
 
         self.assertEqual(decision.source, "builtin-fallback")
         self.assertIn("timed out", decision.warning)
+
+    def test_oversized_external_output_is_bounded_and_falls_back(self):
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            allocator_command=(sys.executable, "-c", "print('x' * 70000)"),
+        )
+        advice = build_gpu_advice(config, snapshots=self.snapshots, history={}, at=self.start)
+
+        decision = apply_external_allocator(
+            config,
+            self.store,
+            self.actor,
+            advice,
+            count=1,
+            duration_seconds=1800,
+            start_at=self.start,
+            mode=MODE_SHARED,
+            expected_memory_mb=None,
+        )
+
+        self.assertEqual(decision.source, "builtin-fallback")
+        self.assertIn("exceeded 64 KiB", decision.warning)
+
+    def test_timeout_kills_allocator_descendants(self):
+        marker = self.data_dir / "escaped-child"
+        child = f"import time; time.sleep(.4); open({str(marker)!r}, 'w').write('bad')"
+        parent = (
+            "import subprocess,sys; "
+            f"subprocess.Popen([sys.executable, '-c', {child!r}])"
+        )
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            allocator_command=(sys.executable, "-c", parent),
+            allocator_timeout_seconds=0.05,
+        )
+        advice = build_gpu_advice(config, snapshots=self.snapshots, history={}, at=self.start)
+
+        decision = apply_external_allocator(
+            config,
+            self.store,
+            self.actor,
+            advice,
+            count=1,
+            duration_seconds=1800,
+            start_at=self.start,
+            mode=MODE_SHARED,
+            expected_memory_mb=None,
+        )
+        time.sleep(0.5)
+
+        self.assertEqual(decision.source, "builtin-fallback")
+        self.assertIn("timed out", decision.warning)
+        self.assertFalse(marker.exists())
+
+    def test_successful_allocator_cleans_up_background_descendants(self):
+        marker = self.data_dir / "background-child"
+        child = f"import time; time.sleep(.4); open({str(marker)!r}, 'w').write('bad')"
+        response = {
+            "schema_version": ALLOCATOR_SCHEMA_VERSION,
+            "gpu_order": [0, 1],
+        }
+        parent = (
+            "import json,subprocess,sys; "
+            f"subprocess.Popen([sys.executable, '-c', {child!r}], "
+            "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL); "
+            f"print(json.dumps({response!r}))"
+        )
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            allocator_command=(sys.executable, "-c", parent),
+        )
+        advice = build_gpu_advice(config, snapshots=self.snapshots, history={}, at=self.start)
+
+        decision = apply_external_allocator(
+            config,
+            self.store,
+            self.actor,
+            advice,
+            count=1,
+            duration_seconds=1800,
+            start_at=self.start,
+            mode=MODE_SHARED,
+            expected_memory_mb=None,
+        )
+        time.sleep(0.5)
+
+        self.assertEqual(decision.source, "external")
+        self.assertFalse(marker.exists())
 
     def test_external_preference_cannot_bypass_hard_conflict(self):
         config = Config(
