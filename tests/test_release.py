@@ -115,6 +115,14 @@ class ReleaseConfigurationTests(unittest.TestCase):
         license_digest = hashlib.sha256((ROOT / "LICENSE").read_bytes()).hexdigest()
         self.assertEqual(license_digest, APACHE_2_NORMALIZED_SHA256)
 
+    def test_release_docs_use_a_draft_first_immutable_github_release(self):
+        guide = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
+
+        self.assertIn("Enable GitHub release immutability", guide)
+        self.assertIn("create a draft GitHub Release", guide)
+        self.assertIn("attach the wheel and sdist, then publish the draft", guide)
+        self.assertIn("verify its hashes against PyPI", guide)
+
 
 if __name__ == "__main__":
     unittest.main()

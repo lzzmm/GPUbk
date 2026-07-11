@@ -2,6 +2,10 @@
 
 All notable changes are documented here. The project follows Semantic Versioning once a public release is published.
 
+## Unreleased
+
+- Document the draft-first workflow required by GitHub immutable releases.
+
 ## 0.1.0 - 2026-07-12
 
 - Use a concise English README by default and ship a matching Simplified Chinese guide in source distributions.
