@@ -2,9 +2,8 @@
 
 All notable changes are documented here. The project follows Semantic Versioning once a public release is published.
 
-## 0.1.0 - Unreleased
+## 0.1.0 - 2026-07-12
 
-- Publish `0.1.0rc1` to TestPyPI as the first public release candidate.
 - Use a concise English README by default and ship a matching Simplified Chinese guide in source distributions.
 - Adopt GPUbk as the public project brand and `gpubk` as the PyPI distribution while retaining the `bk` command and protocol namespace.
 - Add 5-minute shared/exclusive scheduling with atomic queueing and VRAM admission.
