@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import curses
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Sequence, Tuple
@@ -10,7 +11,16 @@ from .allocator import AllocatorDecision, apply_external_allocator
 from .config import Config
 from .gpu import GpuSnapshot, snapshot
 from .identity import current_actor
-from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, EditRequest
+from .models import (
+    MODE_EXCLUSIVE,
+    MODE_SHARED,
+    STATUS_ACTIVE,
+    STATUS_EXPIRED,
+    Actor,
+    BookingError,
+    BookingRequest,
+    EditRequest,
+)
 from .schedule_index import ReservationIndex
 from .scheduler import (
     add_booking,
@@ -44,6 +54,8 @@ SHARED_CHAR = "▓"
 SPLIT_CHAR = "▀"
 WEAVE_CHARS = ("▚", "▞")
 FREE_CHAR = "."
+NOW_CHAR = "│"
+NOW_CONTEXT_COLUMNS = 6
 ZOOM_LEVELS = [5, 10, 15, 30, 60]
 DEFAULT_ZOOM_INDEX = 0
 FOCUS_RESERVATIONS = "reservations"
@@ -59,7 +71,78 @@ RESERVATION_COLORS = [
     curses.COLOR_RED,
     curses.COLOR_CYAN,
 ]
+DARK_RESERVATION_COLORS_256 = [75, 173, 78, 176, 80, 186, 167, 117]
+LIGHT_RESERVATION_COLORS_256 = [25, 130, 28, 90, 31, 94, 124, 23]
 MIXED_COLOR_PAIRS: dict[Tuple[int, int], int] = {}
+ACTIVE_TUI_THEME = "dark"
+
+HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
+    (
+        "Navigate",
+        (
+            ("", "TIMELINE"),
+            ("Left / Right", "Pan one hour into history or the future"),
+            ("n", "Jump back to the live NOW window"),
+            ("+ / -", "Zoom the timeline from 5 to 60 minutes per column"),
+            ("r", "Refresh now; auto-refresh already runs every second"),
+            ("c", "Toggle the dark or light color theme"),
+            ("", "FOCUS AND ACTIONS"),
+            ("Up / Down", "Move through reservations or GPU rows"),
+            ("Tab", "Switch between reservation and GPU focus"),
+            ("a / e / d", "Add, edit, or delete a reservation"),
+            ("?", "Open this help"),
+            ("q / Esc", "Quit GPUbk"),
+        ),
+    ),
+    (
+        "Add / Edit",
+        (
+            ("1-9", "Set GPU count; find earliest legal slot on best GPUs"),
+            ("f", "Find earliest slot on any GPUs; keep selected count"),
+            ("g", "Find earliest slot on exactly the selected GPUs"),
+            ("Left / Right", "Move start time by 5 minutes"),
+            ("Up / Down", "Move the GPU cursor"),
+            ("Space", "Select or clear the current GPU"),
+            ("+ / -  [ / ]", "Shorten or extend duration by 5 minutes"),
+            ("s / x", "Choose shared or exclusive mode"),
+            ("m", "Set expected VRAM per GPU, such as 12g"),
+            ("r", "Reset Add defaults or restore original Edit values"),
+            ("Enter / Esc", "Submit the exact preview or cancel"),
+            ("", "EDIT IS LIMITED TO RESERVATIONS THAT HAVE NOT STARTED"),
+        ),
+    ),
+    (
+        "Timeline",
+        (
+            ("NOW", "Bright marker shows the current wall-clock time"),
+            ("History", "Dimmed cells left of NOW show reservation history"),
+            ("Date", "Date and weekday are repeated at every midnight"),
+            ("Colors", "Each booking keeps one timeline and table color"),
+            ("Shared", "Split or woven cells divide space among sharers"),
+            ("GPU focus", "Tab to expand share lanes and live processes"),
+            ("Reservation", "Select a row to blink its exact interval"),
+            ("Util history", "Run: bk usage --rollups"),
+            ("Live context", "Run: bk agent context --compact"),
+            ("Theme", "Auto-detect; set BK_TUI_THEME=dark or light"),
+            ("", "PAST RESERVATIONS ARE READ-ONLY"),
+        ),
+    ),
+    (
+        "Quick Tour",
+        (
+            ("bk 2 1h", "Book two shared GPUs at best available time"),
+            ("bk 1 30m --mem 12g", "Book shared capacity with expected VRAM"),
+            ("bk x 1 30m", "Book one GPU exclusively; x means exclusive"),
+            ("bk tui", "Open this timeline"),
+            ("a then 2", "Preview earliest two-GPU slot; Enter confirms"),
+            ("Tab", "Inspect a GPU's sharers and processes"),
+            ("e", "Edit a selected future reservation on timeline"),
+            ("bk usage --rollups", "Inspect historical utilization summaries"),
+            ("bk agent context", "Give an Agent privacy-safe allocation context"),
+            ("bk doctor", "Read-only policy and ledger diagnostics"),
+        ),
+    ),
+)
 
 
 @dataclass
@@ -132,36 +215,76 @@ def _init_curses(stdscr) -> None:
     curses.curs_set(0)
     stdscr.timeout(1000)
     stdscr.keypad(True)
-    MIXED_COLOR_PAIRS.clear()
     if curses.has_colors():
         curses.start_color()
         curses.use_default_colors()
-        if getattr(curses, "COLORS", 0) >= 256:
-            curses.init_pair(COLOR_HEADER, 117, 235)
-            curses.init_pair(COLOR_FREE, 239, -1)
-            curses.init_pair(COLOR_SHARED, 67, -1)
-            curses.init_pair(COLOR_MINE, 108, -1)
-            curses.init_pair(COLOR_EXCLUSIVE, 167, -1)
-            curses.init_pair(COLOR_SELECTED, 117, -1)
-            curses.init_pair(COLOR_ERROR, 167, -1)
-            curses.init_pair(COLOR_MUTED, 248, -1)
-            curses.init_pair(COLOR_PREVIEW_SHARED, 80, -1)
-            curses.init_pair(COLOR_PREVIEW_EXCLUSIVE, 172, -1)
+    _apply_tui_theme(_resolve_tui_theme())
+
+
+def _resolve_tui_theme(theme: Optional[str] = None, colorfgbg: Optional[str] = None) -> str:
+    configured = (theme if theme is not None else os.environ.get("BK_TUI_THEME", "auto")).strip().lower()
+    if configured in {"dark", "light"}:
+        return configured
+    terminal_colors = colorfgbg if colorfgbg is not None else os.environ.get("COLORFGBG", "")
+    try:
+        background = int(terminal_colors.split(";")[-1])
+    except (TypeError, ValueError):
+        return "dark"
+    return "light" if background in {7, 15} or background >= 250 else "dark"
+
+
+def _apply_tui_theme(theme: str) -> None:
+    global ACTIVE_TUI_THEME
+    ACTIVE_TUI_THEME = "light" if theme == "light" else "dark"
+    MIXED_COLOR_PAIRS.clear()
+    try:
+        has_colors = curses.has_colors()
+    except curses.error:
+        return
+    if not has_colors:
+        return
+
+    extended = getattr(curses, "COLORS", 0) >= 256
+    for pair_id, foreground, background in _theme_color_pairs(ACTIVE_TUI_THEME, extended):
+        curses.init_pair(pair_id, foreground, background)
+    palette = _reservation_palette(ACTIVE_TUI_THEME)
+    for offset, color in enumerate(palette):
+        curses.init_pair(COLOR_RES_BASE + offset, color, -1)
+    _init_mixed_color_pairs(palette)
+
+
+def _theme_color_pairs(theme: str, extended: bool) -> Tuple[Tuple[int, int, int], ...]:
+    if extended:
+        if theme == "light":
+            colors = (24, 28, 124, 25, 124, 30, 130)
         else:
-            curses.init_pair(COLOR_HEADER, curses.COLOR_BLACK, curses.COLOR_CYAN)
-            curses.init_pair(COLOR_FREE, curses.COLOR_BLACK, -1)
-            curses.init_pair(COLOR_SHARED, curses.COLOR_BLUE, -1)
-            curses.init_pair(COLOR_MINE, curses.COLOR_GREEN, -1)
-            curses.init_pair(COLOR_EXCLUSIVE, curses.COLOR_RED, -1)
-            curses.init_pair(COLOR_SELECTED, curses.COLOR_BLACK, curses.COLOR_WHITE)
-            curses.init_pair(COLOR_ERROR, curses.COLOR_RED, -1)
-            curses.init_pair(COLOR_MUTED, curses.COLOR_WHITE, -1)
-            curses.init_pair(COLOR_PREVIEW_SHARED, curses.COLOR_CYAN, -1)
-            curses.init_pair(COLOR_PREVIEW_EXCLUSIVE, curses.COLOR_MAGENTA, -1)
-        palette = _reservation_palette()
-        for offset, color in enumerate(palette):
-            curses.init_pair(COLOR_RES_BASE + offset, color, -1)
-        _init_mixed_color_pairs(palette)
+            colors = (73, 108, 167, 117, 203, 80, 172)
+        shared, mine, exclusive, selected, error, preview_shared, preview_exclusive = colors
+        return (
+            (COLOR_HEADER, 255, 24),
+            (COLOR_FREE, -1, -1),
+            (COLOR_SHARED, shared, -1),
+            (COLOR_MINE, mine, -1),
+            (COLOR_EXCLUSIVE, exclusive, -1),
+            (COLOR_SELECTED, selected, -1),
+            (COLOR_ERROR, error, -1),
+            (COLOR_MUTED, -1, -1),
+            (COLOR_PREVIEW_SHARED, preview_shared, -1),
+            (COLOR_PREVIEW_EXCLUSIVE, preview_exclusive, -1),
+        )
+    selected = curses.COLOR_BLUE if theme == "light" else curses.COLOR_CYAN
+    return (
+        (COLOR_HEADER, curses.COLOR_WHITE, curses.COLOR_BLUE),
+        (COLOR_FREE, -1, -1),
+        (COLOR_SHARED, curses.COLOR_CYAN, -1),
+        (COLOR_MINE, curses.COLOR_GREEN, -1),
+        (COLOR_EXCLUSIVE, curses.COLOR_RED, -1),
+        (COLOR_SELECTED, selected, -1),
+        (COLOR_ERROR, curses.COLOR_RED, -1),
+        (COLOR_MUTED, -1, -1),
+        (COLOR_PREVIEW_SHARED, curses.COLOR_CYAN, -1),
+        (COLOR_PREVIEW_EXCLUSIVE, curses.COLOR_MAGENTA, -1),
+    )
 
 
 def _handle_key(stdscr, key: int, config: Config, store: LedgerStore, state: TuiState) -> None:
@@ -169,22 +292,33 @@ def _handle_key(stdscr, key: int, config: Config, store: LedgerStore, state: Tui
         _handle_add_key(key, config, store, state, stdscr=stdscr)
         return
     if key in (ord("r"), ord("R")):
-        state.message = "refreshed"
+        state.message = "refreshed now (automatic refresh: 1s)"
+        state.error = False
+        return
+    if key in (ord("c"), ord("C")):
+        next_theme = "light" if ACTIVE_TUI_THEME == "dark" else "dark"
+        _apply_tui_theme(next_theme)
+        state.message = f"theme: {ACTIVE_TUI_THEME} (set BK_TUI_THEME to make it persistent)"
         state.error = False
         return
     if key in (curses.KEY_RIGHT, ord("l"), ord("L")):
-        state.offset_slots += max(1, 60 // state.slot_minutes)
+        _pan_timeline(config, state, 1)
         return
     if key in (curses.KEY_LEFT, ord("h"), ord("H")):
-        state.offset_slots = max(0, state.offset_slots - max(1, 60 // state.slot_minutes))
+        _pan_timeline(config, state, -1)
+        return
+    if key in (ord("n"), ord("N"), curses.KEY_HOME):
+        state.offset_slots = 0
+        state.message = "live NOW window"
+        state.error = False
         return
     if key in (ord("+"), ord("=")):
-        state.zoom_index = max(0, state.zoom_index - 1)
+        _change_zoom(state, -1)
         state.message = f"zoom {state.slot_minutes}m/col"
         state.error = False
         return
     if key in (ord("-"), ord("_")):
-        state.zoom_index = min(len(ZOOM_LEVELS) - 1, state.zoom_index + 1)
+        _change_zoom(state, 1)
         state.message = f"zoom {state.slot_minutes}m/col"
         state.error = False
         return
@@ -217,25 +351,34 @@ def _handle_key(stdscr, key: int, config: Config, store: LedgerStore, state: Tui
         _delete_selected(stdscr, store, state)
         return
     if key in (ord("?"), ord("p"), ord("P")):
-        _message_dialog(
-            stdscr,
-            "Keys",
-            [
-                "q quit   r refresh   left/right shift timeline   Tab change focus",
-                "+/- zoom timeline, default 5 minutes per column",
-                "up/down or k/j navigate reservations and GPU rows",
-                "GPU focus shows that GPU's shared reservations and live processes",
-                "TUI refreshes telemetry every second without a key press",
-                "a add   e edit selected   d delete selected",
-                "Add/Edit: arrows move time/GPU, space toggles GPU, +/- duration",
-                "Add/Edit: m sets expected memory per GPU; - clears it",
-                "Add/Edit: 1-9 set GPU count + auto-find, f any GPUs, g fixed GPUs",
-                "Add/Edit: s shared, x exclusive, r reset, Enter submit, Esc cancel",
-                "Timeline: . free, solid = one booking, split = two shared bookings",
-                "Three or more shared bookings use an equal-area woven color pattern",
-                "Select a shared booking to show its exact colored reservation lanes",
-            ],
-        )
+        if stdscr is None:
+            state.message = "help: navigation, add/edit, timeline, and quick tour"
+            state.error = False
+        else:
+            _help_dialog(stdscr)
+
+
+def _pan_timeline(config: Config, state: TuiState, direction: int) -> None:
+    step_slots = max(1, 60 // state.slot_minutes)
+    retention_slots = max(0, config.ledger_retention_days * 24 * 60 // state.slot_minutes)
+    earliest_offset = -max(0, retention_slots - NOW_CONTEXT_COLUMNS)
+    latest_offset = max(0, config.queue_search_hours * 60 // state.slot_minutes)
+    requested = state.offset_slots + (step_slots if direction > 0 else -step_slots)
+    state.offset_slots = min(latest_offset, max(earliest_offset, requested))
+    if state.offset_slots == earliest_offset and requested < earliest_offset:
+        state.message = f"history limit: {config.ledger_retention_days}d"
+    elif state.offset_slots == latest_offset and requested > latest_offset:
+        state.message = f"future search limit: {config.queue_search_hours}h"
+    else:
+        direction_label = "future" if direction > 0 else "history"
+        state.message = f"timeline: {direction_label}; n returns to NOW"
+    state.error = False
+
+
+def _change_zoom(state: TuiState, direction: int) -> None:
+    offset_minutes = state.offset_slots * state.slot_minutes
+    state.zoom_index = min(len(ZOOM_LEVELS) - 1, max(0, state.zoom_index + direction))
+    state.offset_slots = int(round(offset_minutes / state.slot_minutes))
 
 
 def _toggle_focus(config: Config, store: LedgerStore, state: TuiState) -> None:
@@ -294,8 +437,8 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
 
     now = utc_now()
     ledger = store.load()
-    reservation_index = ReservationIndex.from_ledger(ledger, now)
-    active = reservation_index.records()
+    active_index = ReservationIndex.from_ledger(ledger, now)
+    active = active_index.records()
     state.selected_gpu = min(max(state.selected_gpu, 0), config.gpu_count - 1)
     focused_gpu = state.selected_gpu if state.focus == FOCUS_GPUS and not state.editor_active else None
     selected_id = _timeline_selected_id(active, state)
@@ -312,17 +455,23 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
     gpu_by_index = {gpu.index: gpu for gpu in gpu_snapshots}
 
     timeline_top = 3
-    label_width = min(32, max(20, width // 4))
+    label_width = min(40, max(30, width // 3))
     timeline_width = max(24, width - label_width - 2)
-    default_view_start = _ceil_to_add_step(now) + timedelta(minutes=state.offset_slots * state.slot_minutes)
+    default_view_start = _timeline_view_start(now, state)
     view_start = state.editor_view_start if state.editor_active and state.editor_view_start else default_view_start
     view_end = view_start + timedelta(minutes=timeline_width * state.slot_minutes)
+    timeline_index = ReservationIndex.from_ledger(
+        ledger,
+        min(now, view_start),
+        statuses=(STATUS_ACTIVE, STATUS_EXPIRED),
+    )
+    timeline_records = timeline_index.records()
     preview = _build_add_preview(ledger, config, state, view_start) if state.editor_active else None
-    color_map = _reservation_color_map(active, reservation_index)
+    color_map = _reservation_color_map(timeline_records, timeline_index)
 
     _draw_header(stdscr, config, now, view_start, view_end, width, state)
     _draw_editor_banner(stdscr, 2, width, state, preview)
-    _draw_time_axis(stdscr, timeline_top, label_width, timeline_width, view_start, view_end, width)
+    _draw_time_axis(stdscr, timeline_top, label_width, timeline_width, view_start, view_end, width, now)
     row = timeline_top + 4
     for gpu in gpu_snapshots:
         if row + 1 > height - 8:
@@ -334,7 +483,7 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
             timeline_width,
             gpu,
             color_map,
-            active,
+            timeline_records,
             view_start,
             state.slot_minutes,
             selected_id,
@@ -344,7 +493,8 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
             config.max_shared_users,
             focused_gpu == gpu.index,
             usage_by_gpu.get(gpu.index, []),
-            reservation_index,
+            timeline_index,
+            now,
         )
         row += 1
 
@@ -353,7 +503,7 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
         row,
         label_width,
         timeline_width,
-        active,
+        timeline_records,
         view_start,
         state.slot_minutes,
         selected_id,
@@ -362,7 +512,8 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
         config.max_shared_users,
         height,
         focused_gpu,
-        reservation_index,
+        timeline_index,
+        now,
     )
 
     if focused_gpu is not None:
@@ -411,31 +562,46 @@ def _header_lines(
     local_now = now.astimezone()
     local_start = view_start.astimezone()
     local_end = view_end.astimezone()
+    if view_end <= now:
+        window_mode = "HISTORY"
+    elif view_start > now:
+        window_mode = "FUTURE"
+    else:
+        window_mode = "LIVE"
     wide_title = (
-        f" GPUbk | now {local_now:%Y-%m-%d %H:%M:%S %z} "
+        f" GPUbk | {window_mode} | now {local_now:%Y-%m-%d %H:%M:%S %z} "
         f"| window {local_start:%m-%d %H:%M} -> {local_end:%m-%d %H:%M} "
         f"| {state.slot_minutes}m/col "
     )
     wide_details = (
         f" data={config.data_dir} | shared_limit={config.max_shared_users} "
-        "| refresh=1s | q quit | ? help"
+        "| refresh=1s | n NOW | q quit | ? help"
     )
     if width >= 100 and len(wide_title) < width and len(wide_details) < width:
         title = wide_title
         details = wide_details
     else:
         title = (
-            f" GPUbk | {_weekday_label(local_now)} {local_now:%m-%d %H:%M:%S} "
+            f" GPUbk {window_mode} | {_weekday_label(local_now)} {local_now:%m-%d %H:%M:%S} "
             f"| {local_start:%m-%d %H:%M}->{local_end:%m-%d %H:%M} | {state.slot_minutes}m"
         )
-        suffix = f" | share={config.max_shared_users} | 1s refresh | q quit | ? help"
+        suffix = f" | share={config.max_shared_users} | 1s refresh | n NOW | ? help"
         path_budget = max(1, width - len(" data=") - len(suffix) - 1)
         details = f" data={_truncate(config.data_dir.name or str(config.data_dir), path_budget)}{suffix}"
     limit = max(0, width - 1)
     return title[:limit], details[:limit]
 
 
-def _draw_time_axis(stdscr, row: int, label_width: int, timeline_width: int, start: datetime, end: datetime, width: int) -> None:
+def _draw_time_axis(
+    stdscr,
+    row: int,
+    label_width: int,
+    timeline_width: int,
+    start: datetime,
+    end: datetime,
+    width: int,
+    now: Optional[datetime] = None,
+) -> None:
     dates, hours, minutes, ruler = _time_axis_lines(start, end, timeline_width)
     local_start = start.astimezone()
     _addstr(stdscr, row, 0, f"Date {_date_label(local_start)}".ljust(label_width), width, COLOR_MUTED)
@@ -446,6 +612,11 @@ def _draw_time_axis(stdscr, row: int, label_width: int, timeline_width: int, sta
     _addstr(stdscr, row + 1, label_width, hours, width, COLOR_MUTED)
     _addstr(stdscr, row + 2, label_width, minutes, width, COLOR_MUTED)
     _addstr(stdscr, row + 3, label_width, ruler, width, COLOR_MUTED)
+    now_col = _timeline_now_col(now, start, end, timeline_width)
+    if now_col is not None:
+        label_col = min(max(0, now_col - 1), max(0, timeline_width - 3))
+        _addstr(stdscr, row + 2, label_width + label_col, "NOW", width, COLOR_SELECTED, curses.A_BOLD)
+        _addstr(stdscr, row + 3, label_width + now_col, NOW_CHAR, width, COLOR_SELECTED, curses.A_BOLD)
 
 
 def _draw_editor_banner(
@@ -496,6 +667,7 @@ def _draw_gpu_row(
     focused: bool = False,
     process_usage: Sequence[ProcessUsage] = (),
     reservation_index: Optional[ReservationIndex] = None,
+    now: Optional[datetime] = None,
 ) -> None:
     view_end = start + timedelta(minutes=slot_minutes * timeline_width)
     peak_shared = _peak_shared_count_for_gpu(active, gpu.index, start, view_end, reservation_index)
@@ -533,6 +705,7 @@ def _draw_gpu_row(
                     band_rows,
                     reservation_index,
                 )
+            char, color, attr = _decorate_timeline_cell(char, color, attr, left, right, now)
             _addstr(stdscr, row + lane, label_width + col, char, width, color, attr)
 
 
@@ -551,6 +724,7 @@ def _draw_selected_gpu_lanes(
     height: int,
     focused_gpu: Optional[int] = None,
     reservation_index: Optional[ReservationIndex] = None,
+    now: Optional[datetime] = None,
 ) -> int:
     view_end = start + timedelta(minutes=slot_minutes * timeline_width)
     if focused_gpu is not None:
@@ -589,8 +763,26 @@ def _draw_selected_gpu_lanes(
                 attr = _selected_bar_attr() if reservation.get("id") == selected_id else curses.A_BOLD
             else:
                 char, color, attr = FREE_CHAR, COLOR_FREE, 0
+            char, color, attr = _decorate_timeline_cell(char, color, attr, left, right, now)
             _addstr(stdscr, row + lane, label_width + col, char, width, color, attr)
     return row + lanes
+
+
+def _decorate_timeline_cell(
+    char: str,
+    color: int,
+    attr: int,
+    start: datetime,
+    end: datetime,
+    now: Optional[datetime],
+) -> Tuple[str, int, int]:
+    if now is None:
+        return char, color, attr
+    if start <= now < end:
+        return NOW_CHAR, COLOR_SELECTED, attr | curses.A_BOLD
+    if end <= now:
+        return char, color, attr | curses.A_DIM
+    return char, color, attr
 
 
 def _draw_process_panel(
@@ -796,39 +988,46 @@ def _draw_footer(stdscr, height: int, width: int, state: TuiState, preview: Opti
 def _footer_label(state: TuiState, preview: Optional[AddPreview], width: int) -> str:
     if state.editor_active and preview is not None:
         operation = "ADD" if state.add_mode else "EDIT"
-        short = f" {operation} | arrows | Space | 1-9 | +/- dur | m mem | s/x | f/g | Enter/Esc "
+        short = f" {operation} | 1-9 auto | f any | g selected | r reset | Enter/Esc | ? help "
         long = (
-            f" {operation} | arrows | Space | 1-9 GPUs | +/- dur | m memory "
-            "| s/x | f/g | r | Enter/Esc "
+            f" {operation} | arrows move | Space GPU | +/- duration | m memory | s/x mode "
+            "| 1-9 auto | f any GPUs | g selected GPUs | r reset | Enter/Esc | ? help "
         )
     elif state.focus == FOCUS_GPUS:
-        short = " GPU | up/down | Tab RSV | a add | +/- zoom | left/right pan | q quit "
+        short = " GPU | up/down | Tab RSV | a add | <-/-> pan | n NOW | ? help | q quit "
         long = (
             " GPU FOCUS | up/down select GPU | Tab reservations | a add here "
-            "| +/- zoom | <-/-> pan | q quit "
+            "| +/- zoom | <-/-> history/future | n NOW | r refresh | ? help | q quit "
         )
     else:
-        short = " RSV | up/down | Tab GPU | a add | e edit | d del | +/- zoom | q quit "
+        short = " RSV | up/down | Tab GPU | a/e/d | <-/-> pan | n NOW | ? help | q quit "
         long = (
             " RESERVATIONS | up/down select | Tab GPUs | a add | e edit | d delete "
-            f"| +/- zoom {state.slot_minutes}m/col | q quit "
+            f"| +/- zoom {state.slot_minutes}m/col | <-/-> history/future | n NOW "
+            "| r refresh | ? help | q quit "
         )
     footer = long if len(long) < width else short
     return footer[: max(0, width - 1)]
 
 
 def _start_add_select(config: Config, state: TuiState) -> None:
+    now = utc_now()
+    view_start = _default_timeline_view_start(now, state.slot_minutes)
+    booking_start = _ceil_to_add_step(now)
     state.add_mode = True
     state.edit_mode = False
     state.edit_reservation_id = None
-    state.editor_view_start = _ceil_to_add_step(utc_now()) + timedelta(minutes=state.offset_slots * state.slot_minutes)
+    state.editor_view_start = view_start
     state.add_cursor_gpu = min(max(state.add_cursor_gpu, 0), max(0, config.gpu_count - 1))
-    state.add_start_steps = 0
+    state.add_start_steps = max(
+        0,
+        int((booking_start - view_start).total_seconds() // (ADD_STEP_MINUTES * 60)),
+    )
     state.add_duration_steps = max(1, state.add_duration_steps)
     state.add_selected_gpus = {state.add_cursor_gpu} if config.gpu_count else set()
     state.add_booking_mode = MODE_SHARED
     state.add_expected_memory_mb = None
-    state.message = ""
+    state.message = "Add: press 1-9 or f to auto-find; arrows and Space adjust"
     state.error = False
 
 
@@ -839,7 +1038,12 @@ def _start_edit_select(config: Config, store: LedgerStore, state: TuiState) -> N
         state.error = True
         return
     state.selected = min(max(0, state.selected), len(mine) - 1)
-    _load_edit_state(config, state, mine[state.selected])
+    reservation = mine[state.selected]
+    if parse_iso(reservation["start_at"]) <= utc_now():
+        state.message = "cannot edit a reservation after it has started"
+        state.error = True
+        return
+    _load_edit_state(config, state, reservation)
 
 
 def _load_edit_state(config: Config, state: TuiState, reservation: dict) -> None:
@@ -874,6 +1078,13 @@ def _handle_add_key(
     stdscr=None,
 ) -> None:
     operation = "edit" if state.edit_mode else "add"
+    if key in (ord("?"), ord("p"), ord("P")):
+        if stdscr is None:
+            state.message = "help: f any GPUs, g selected GPUs, r reset, Enter submit"
+            state.error = False
+        else:
+            _help_dialog(stdscr, initial_page=1)
+        return
     if key in (27, ord("q"), ord("Q")):
         _close_editor(state)
         state.message = f"{operation} cancelled"
@@ -1027,7 +1238,8 @@ def _find_add_slot(
         state.error = True
         return
     view_start = _editor_view_start(state)
-    earliest_start = view_start + timedelta(minutes=state.add_start_steps * ADD_STEP_MINUTES)
+    selected_start = view_start + timedelta(minutes=state.add_start_steps * ADD_STEP_MINUTES)
+    earliest_start = max(selected_start, _ceil_to_add_step(utc_now()))
     duration = timedelta(minutes=max(1, state.add_duration_steps) * ADD_STEP_MINUTES)
     mode = state.add_booking_mode if state.add_booking_mode in {MODE_SHARED, MODE_EXCLUSIVE} else MODE_SHARED
     ledger = _availability_ledger(store.load(), state)
@@ -1138,7 +1350,7 @@ def _close_editor(state: TuiState) -> None:
 def _editor_view_start(state: TuiState) -> datetime:
     if state.editor_view_start is not None:
         return state.editor_view_start
-    return _ceil_to_add_step(utc_now()) + timedelta(minutes=state.offset_slots * state.slot_minutes)
+    return _default_timeline_view_start(utc_now(), state.slot_minutes)
 
 
 def _own_reservation_index(store: LedgerStore, reservation_id: str) -> int:
@@ -1201,6 +1413,52 @@ def _prompt_line(stdscr, prompt: str, default: str = "") -> str:
     return values[0]
 
 
+def _help_dialog(stdscr, initial_page: int = 0) -> None:
+    height, width = stdscr.getmaxyx()
+    page = min(max(0, initial_page), len(HELP_PAGES) - 1)
+    max_rows = max(len(entries) for _title, entries in HELP_PAGES)
+    win_height = min(height - 2, max(16, max_rows + 4))
+    win_width = min(width - 2, 96)
+    top = max(1, (height - win_height) // 2)
+    left = max(1, (width - win_width) // 2)
+    win = curses.newwin(win_height, win_width, top, left)
+    win.keypad(True)
+
+    while True:
+        win.erase()
+        win.box()
+        title, entries = HELP_PAGES[page]
+        key_width = min(
+            max(14, max((len(key) for key, _description in entries), default=0) + 2),
+            max(14, win_width // 3),
+        )
+        heading = f" GPUbk Help {page + 1}/{len(HELP_PAGES)}  {title} "
+        _win_addstr(win, 0, 2, heading, COLOR_HEADER, curses.A_BOLD)
+        for offset, (key_label, description) in enumerate(entries):
+            row = offset + 2
+            if row >= win_height - 2:
+                break
+            if not key_label:
+                _win_addstr(win, row, 2, description, COLOR_SELECTED, curses.A_BOLD)
+                continue
+            _win_addstr(win, row, 3, key_label, COLOR_PREVIEW_SHARED, curses.A_BOLD)
+            _win_addstr(win, row, 3 + key_width, description, COLOR_MUTED)
+        footer = " Left/Right page   1-4 jump   q/Esc/? close "
+        _win_addstr(win, win_height - 2, 2, footer, COLOR_HEADER, curses.A_BOLD)
+        win.refresh()
+        key = win.getch()
+        if key in (27, ord("q"), ord("Q"), ord("?"), curses.KEY_ENTER, 10, 13):
+            return
+        if key in (curses.KEY_RIGHT, ord("l"), ord("L"), 9):
+            page = (page + 1) % len(HELP_PAGES)
+            continue
+        if key in (curses.KEY_LEFT, ord("h"), ord("H"), curses.KEY_BTAB):
+            page = (page - 1) % len(HELP_PAGES)
+            continue
+        if ord("1") <= key < ord("1") + len(HELP_PAGES):
+            page = key - ord("1")
+
+
 def _message_dialog(stdscr, title: str, lines: Sequence[str]) -> None:
     height, width = stdscr.getmaxyx()
     win_height = min(height - 4, len(lines) + 4)
@@ -1240,6 +1498,19 @@ def _build_add_preview(ledger: dict, config: Config, state: TuiState, view_start
     start = view_start + timedelta(minutes=state.add_start_steps * ADD_STEP_MINUTES)
     end = start + timedelta(minutes=max(1, state.add_duration_steps) * ADD_STEP_MINUTES)
     mode = state.add_booking_mode if state.add_booking_mode in {MODE_SHARED, MODE_EXCLUSIVE} else MODE_SHARED
+    earliest = _ceil_to_add_step(utc_now())
+    if start < earliest:
+        local_earliest = earliest.astimezone()
+        return AddPreview(
+            start,
+            end,
+            selected,
+            cursor_gpu,
+            mode,
+            False,
+            f"start must be at or after {local_earliest:%m-%d %H:%M}",
+            blink=state.add_mode,
+        )
     if not selected:
         return AddPreview(
             start,
@@ -1395,10 +1666,12 @@ def _pick_palette_color(palette: Sequence[int], preferred_index: int, blocked: s
     return palette[preferred_index % len(palette)]
 
 
-def _reservation_palette() -> List[int]:
+def _reservation_palette(theme: Optional[str] = None) -> List[int]:
     try:
         if curses.COLORS >= 256:
-            return [67, 173, 108, 139, 73, 179, 167, 103]
+            if (theme or ACTIVE_TUI_THEME) == "light":
+                return list(LIGHT_RESERVATION_COLORS_256)
+            return list(DARK_RESERVATION_COLORS_256)
     except curses.error:
         pass
     return list(RESERVATION_COLORS)
@@ -1590,29 +1863,25 @@ def _gpu_label(
     shared_limit: int = 1,
     violations: int = 0,
 ) -> str:
-    prefix = f"GPU{gpu.index}"
-    badges = []
-    if violations:
-        badges.append(f"!{violations}")
-    if peak_shared > 1:
-        badges.append(f"S{peak_shared}/{shared_limit}")
+    gpu_field = _truncate(f"GPU{gpu.index}", 5).ljust(5)
+    capacity_field = _truncate(f"S{peak_shared}/{shared_limit}", 6).ljust(6)
+    extras = [f"!{violations}"] if violations else []
     if not gpu.memory_total_mb and gpu.utilization_percent is None:
-        detail = " ".join(["no telemetry"] + badges)
-        if len(prefix) + len(detail) + 1 > width:
-            detail = " ".join(["n/a"] + badges)
-        return f"{prefix} {detail}"[:width].ljust(width)
+        core = f"{gpu_field} {capacity_field} no telemetry"
+        return " ".join([core] + extras)[:width].ljust(width)
 
     util = f"U{gpu.utilization_percent}%" if gpu.utilization_percent is not None else "U-"
-    metrics = [prefix] + badges + [util]
+    memory = "-"
     if gpu.memory_total_mb:
         used_gib = gpu.memory_used_mb / 1024
         total_gib = gpu.memory_total_mb / 1024
-        metrics.append(f"{used_gib:.1f}/{total_gib:.0f}G")
-    if gpu.temperature_c is not None and width >= 28:
-        metrics.append(f"{gpu.temperature_c}C")
-    if gpu.processes and width >= 24:
-        metrics.append(f"P{len(gpu.processes)}")
-    return " ".join(metrics)[:width].ljust(width)
+        memory = f"{used_gib:.1f}/{total_gib:.0f}G"
+    core = f"{gpu_field} {capacity_field} {util:<5} {_truncate(memory, 9):<9}"
+    if gpu.temperature_c is not None:
+        extras.append(f"{gpu.temperature_c}C")
+    if gpu.processes:
+        extras.append(f"P{len(gpu.processes)}")
+    return " ".join([core] + extras)[:width].ljust(width)
 
 
 def _shared_lane_item(
@@ -1727,6 +1996,28 @@ def _time_axis_lines(start: datetime, end: datetime, timeline_width: int) -> Tup
     return "".join(dates), "".join(hours), "".join(minutes), "".join(ruler)
 
 
+def _timeline_now_col(
+    now: Optional[datetime],
+    start: datetime,
+    end: datetime,
+    timeline_width: int,
+) -> Optional[int]:
+    if now is None or timeline_width <= 0 or not (start <= now < end):
+        return None
+    return _time_col(now, start, max(1.0, (end - start).total_seconds()), timeline_width)
+
+
+def _default_timeline_view_start(now: datetime, slot_minutes: int) -> datetime:
+    anchor = _floor_to_add_step(now)
+    return anchor - timedelta(minutes=NOW_CONTEXT_COLUMNS * max(1, slot_minutes))
+
+
+def _timeline_view_start(now: datetime, state: TuiState) -> datetime:
+    return _default_timeline_view_start(now, state.slot_minutes) + timedelta(
+        minutes=state.offset_slots * state.slot_minutes
+    )
+
+
 def _axis_tick_minutes(slot_minutes: int) -> Tuple[int, int]:
     if slot_minutes <= 5:
         return 15, 30
@@ -1824,6 +2115,13 @@ def _ceil_to_add_step(value: datetime) -> datetime:
     return datetime.fromtimestamp(timestamp, timezone.utc)
 
 
+def _floor_to_add_step(value: datetime) -> datetime:
+    value = value.astimezone(timezone.utc).replace(second=0, microsecond=0)
+    timestamp = int(value.timestamp())
+    step = ADD_STEP_MINUTES * 60
+    return datetime.fromtimestamp(timestamp - (timestamp % step), timezone.utc)
+
+
 def _own_reservations(store: LedgerStore) -> List[dict]:
     actor = _current_actor()
     return [item for item in list_active(store.load()) if int(item.get("uid")) == actor.uid]
@@ -1852,6 +2150,8 @@ def _current_actor() -> Actor:
 def _addstr(stdscr, row: int, col: int, text: str, width: int, color: int = 0, attr: int = 0) -> None:
     if row < 0 or col >= width:
         return
+    if color in {COLOR_FREE, COLOR_MUTED}:
+        attr |= curses.A_DIM
     render_attr = (curses.color_pair(color) if color else 0) | attr
     try:
         stdscr.addstr(row, col, text[: max(0, width - col - 1)], render_attr)
@@ -1859,11 +2159,14 @@ def _addstr(stdscr, row: int, col: int, text: str, width: int, color: int = 0, a
         pass
 
 
-def _win_addstr(win, row: int, col: int, text: str) -> None:
+def _win_addstr(win, row: int, col: int, text: str, color: int = 0, attr: int = 0) -> None:
     try:
         height, width = win.getmaxyx()
         if 0 <= row < height and 0 <= col < width:
-            win.addstr(row, col, text[: max(0, width - col - 1)])
+            if color in {COLOR_FREE, COLOR_MUTED}:
+                attr |= curses.A_DIM
+            render_attr = (curses.color_pair(color) if color else 0) | attr
+            win.addstr(row, col, text[: max(0, width - col - 1)], render_attr)
     except curses.error:
         pass
 

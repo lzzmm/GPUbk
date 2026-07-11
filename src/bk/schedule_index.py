@@ -3,7 +3,7 @@ from __future__ import annotations
 from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .models import STATUS_ACTIVE
 from .timeparse import parse_iso
@@ -36,10 +36,16 @@ class ReservationIndex:
         }
 
     @classmethod
-    def from_ledger(cls, ledger: dict, active_after: datetime) -> "ReservationIndex":
+    def from_ledger(
+        cls,
+        ledger: dict,
+        active_after: datetime,
+        statuses: Optional[Sequence[str]] = None,
+    ) -> "ReservationIndex":
+        allowed_statuses = frozenset((STATUS_ACTIVE,) if statuses is None else statuses)
         spans = []
         for record in ledger.get("reservations", []):
-            if record.get("status") != STATUS_ACTIVE:
+            if record.get("status") not in allowed_statuses:
                 continue
             end = parse_iso(record["end_at"])
             if end <= active_after:

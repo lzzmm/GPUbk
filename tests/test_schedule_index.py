@@ -61,6 +61,23 @@ class ReservationIndexTests(unittest.TestCase):
 
         self.assertEqual(parser.call_count, len(records) * 2)
 
+    def test_history_index_can_include_expired_records_without_changing_default(self):
+        expired = record("expired", 0, NOW - timedelta(hours=2), NOW - timedelta(hours=1), "expired")
+        active = record("active", 0, NOW + timedelta(hours=1), NOW + timedelta(hours=2))
+        ledger = {"version": 1, "reservations": [expired, active]}
+
+        default = ReservationIndex.from_ledger(ledger, NOW - timedelta(hours=3))
+        history = ReservationIndex.from_ledger(
+            ledger,
+            NOW - timedelta(hours=3),
+            statuses=("active", "expired"),
+        )
+        empty = ReservationIndex.from_ledger(ledger, NOW - timedelta(hours=3), statuses=())
+
+        self.assertEqual([item["id"] for item in default.records()], ["active"])
+        self.assertEqual([item["id"] for item in history.records()], ["expired", "active"])
+        self.assertEqual(empty.records(), [])
+
     def test_week_queue_search_parses_each_active_record_only_once(self):
         reservations = []
         for slot in range(48):

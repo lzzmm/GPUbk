@@ -211,12 +211,20 @@ def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> Bo
 
         current_start = parse_iso(reservation["start_at"])
         current_end = parse_iso(reservation["end_at"])
+        if current_start <= now:
+            raise BookingError("cannot edit a reservation after it has started")
         start = (request.start_at or current_start).astimezone(timezone.utc).replace(microsecond=0)
         duration_seconds = request.duration_seconds or int((current_end - current_start).total_seconds())
         if duration_seconds <= 0:
             raise BookingError("duration must be positive")
         _validate_duration_granularity(duration_seconds)
         start = _normalize_start(start, request.allow_queue)
+        earliest_start = _ceil_to_granularity(now)
+        if start < earliest_start:
+            if request.allow_queue:
+                start = earliest_start
+            else:
+                raise BookingError("edit start must not be in the past")
         duration = timedelta(seconds=duration_seconds)
         end = start + duration
 

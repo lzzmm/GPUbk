@@ -19,7 +19,9 @@ from bk.tui import (
     COLOR_PREVIEW_SHARED,
     FOCUS_GPUS,
     FOCUS_RESERVATIONS,
+    HELP_PAGES,
     MIXED_COLOR_PAIRS,
+    NOW_CHAR,
     SHARED_CHAR,
     SPLIT_CHAR,
     TuiState,
@@ -28,6 +30,8 @@ from bk.tui import (
     _capacity_text,
     _cell_for_gpu,
     _date_label,
+    _decorate_timeline_cell,
+    _default_timeline_view_start,
     _editor_banner_text,
     _footer_label,
     _gpu_label,
@@ -40,14 +44,19 @@ from bk.tui import (
     _move_focus_down,
     _move_focus_up,
     _own_reservation_index,
+    _pan_timeline,
     _preview_cell_for_gpu,
     _process_table_line,
+    _reservation_palette,
     _reservation_color_map,
+    _resolve_tui_theme,
     _selected_share_detail,
     _shared_weave_pair,
     _start_edit_select,
+    _timeline_now_col,
     _timeline_selected_id,
     _time_axis_lines,
+    _theme_color_pairs,
     _toggle_focus,
     _visible_shared_reservations,
     _weekday_label,
@@ -119,15 +128,89 @@ class TuiAddPreviewTests(unittest.TestCase):
 
         preview = AddPreview(self.start, self.end, (0,), 0, MODE_SHARED, True, blink=True)
         variants = [
-            (_footer_label(TuiState(), None, width), "+/- zoom", "q quit"),
-            (_footer_label(TuiState(focus=FOCUS_GPUS), None, width), "left/right pan", "q quit"),
-            (_footer_label(TuiState(add_mode=True), preview, width), "f/g", "Enter/Esc"),
-            (_footer_label(TuiState(edit_mode=True), preview, width), "f/g", "Enter/Esc"),
+            (_footer_label(TuiState(), None, width), "n NOW", "q quit"),
+            (_footer_label(TuiState(focus=FOCUS_GPUS), None, width), "n NOW", "q quit"),
+            (_footer_label(TuiState(add_mode=True), preview, width), "f any", "? help"),
+            (_footer_label(TuiState(edit_mode=True), preview, width), "g selected", "? help"),
         ]
         for footer, control, ending in variants:
             self.assertLessEqual(len(footer), width - 1)
             self.assertIn(control, footer)
             self.assertTrue(footer.rstrip().endswith(ending), footer)
+
+    def test_help_pages_explain_ambiguous_keys_and_offer_a_quick_tour(self):
+        pages = {title: dict(entries) for title, entries in HELP_PAGES}
+
+        self.assertIn("Quick Tour", pages)
+        self.assertIn("auto-refresh", pages["Navigate"]["r"])
+        self.assertIn("live NOW", pages["Navigate"]["n"])
+        self.assertIn("any GPUs", pages["Add / Edit"]["f"])
+        self.assertIn("exactly the selected GPUs", pages["Add / Edit"]["g"])
+        self.assertIn("restore", pages["Add / Edit"]["r"])
+        self.assertIn("bk usage --rollups", pages["Quick Tour"])
+
+        minimum_window_width = 70
+        for _title, entries in HELP_PAGES:
+            key_width = min(
+                max(14, max((len(key) for key, _description in entries), default=0) + 2),
+                max(14, minimum_window_width // 3),
+            )
+            description_width = minimum_window_width - (3 + key_width) - 1
+            for key, description in entries:
+                if key:
+                    self.assertLessEqual(len(key), key_width - 2)
+                    self.assertLessEqual(len(description), description_width, (key, description))
+
+    def test_theme_auto_detection_supports_dark_light_and_explicit_override(self):
+        self.assertEqual(_resolve_tui_theme("auto", "15;0"), "dark")
+        self.assertEqual(_resolve_tui_theme("auto", "0;15"), "light")
+        self.assertEqual(_resolve_tui_theme("light", "15;0"), "light")
+        self.assertEqual(_resolve_tui_theme("dark", "0;15"), "dark")
+        self.assertEqual(_resolve_tui_theme("invalid", "unknown"), "dark")
+
+    def test_dark_and_light_themes_use_distinct_readable_reservation_palettes(self):
+        with mock.patch.object(curses, "COLORS", 256, create=True):
+            dark_palette = _reservation_palette("dark")
+            light_palette = _reservation_palette("light")
+
+        self.assertEqual(len(set(dark_palette)), 8)
+        self.assertEqual(len(set(light_palette)), 8)
+        self.assertTrue(set(dark_palette).isdisjoint(light_palette))
+        self.assertNotEqual(_theme_color_pairs("dark", True), _theme_color_pairs("light", True))
+
+    def test_timeline_defaults_to_six_context_columns_before_now(self):
+        now = datetime(2030, 1, 1, 17, 17, 42, tzinfo=timezone.utc)
+
+        start = _default_timeline_view_start(now, 5)
+
+        self.assertEqual(start, datetime(2030, 1, 1, 16, 45, tzinfo=timezone.utc))
+        self.assertEqual(_timeline_now_col(now, start, start + timedelta(hours=1), 12), 6)
+
+    def test_now_marker_and_history_cells_have_distinct_rendering(self):
+        start = self.start
+        now = start + timedelta(minutes=7)
+
+        current = _decorate_timeline_cell(BAR_CHAR, 12, 0, start + timedelta(minutes=5), start + timedelta(minutes=10), now)
+        past = _decorate_timeline_cell(BAR_CHAR, 12, 0, start, start + timedelta(minutes=5), now)
+        future = _decorate_timeline_cell(BAR_CHAR, 12, 0, start + timedelta(minutes=10), start + timedelta(minutes=15), now)
+
+        self.assertEqual(current[0], NOW_CHAR)
+        self.assertTrue(current[2] & curses.A_BOLD)
+        self.assertTrue(past[2] & curses.A_DIM)
+        self.assertFalse(future[2] & curses.A_DIM)
+
+    def test_timeline_can_pan_into_history_and_n_returns_to_now(self):
+        state = TuiState()
+        config = Config(data_dir=Path("/tmp/bk-tui-test"), gpu_count=2, ledger_retention_days=2)
+
+        _pan_timeline(config, state, -1)
+        self.assertLess(state.offset_slots, 0)
+        self.assertIn("history", state.message)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _handle_key(None, ord("n"), config, LedgerStore(Path(tmp)), state)
+        self.assertEqual(state.offset_slots, 0)
+        self.assertIn("NOW", state.message)
 
     def test_indexed_timeline_cells_do_not_reparse_reservation_times(self):
         active = []
@@ -175,6 +258,17 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertFalse(preview.valid)
         self.assertTrue(preview.blink)
         self.assertIn("shared capacity full", preview.reason)
+
+    def test_preview_rejects_a_start_before_the_next_five_minute_boundary(self):
+        now = datetime(2030, 1, 1, 17, 2, tzinfo=timezone.utc)
+        state = self.state()
+
+        with mock.patch("bk.tui.utc_now", return_value=now):
+            preview = _build_add_preview(self.ledger([]), self.config, state, now.replace(minute=0))
+
+        self.assertFalse(preview.valid)
+        expected = (now + timedelta(minutes=3)).astimezone().strftime("%m-%d %H:%M")
+        self.assertIn(f"at or after {expected}", preview.reason)
 
     def test_preview_rejects_shared_memory_oversubscription(self):
         existing = reservation("one", os.getuid(), MODE_SHARED, [0], self.start, self.end)
@@ -463,6 +557,25 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertEqual(state.add_selected_gpus, {1})
         self.assertEqual(state.add_cursor_gpu, 1)
         self.assertEqual(state.add_booking_mode, MODE_EXCLUSIVE)
+
+    def test_started_reservation_cannot_enter_timeline_edit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp), gpu_count=1)
+            store = LedgerStore(config.data_dir)
+            actor = Actor(uid=os.getuid(), username="current")
+            created = add_booking(
+                store,
+                config,
+                BookingRequest(actor, 1, 30 * 60, self.start, MODE_SHARED, [0]),
+            )
+            state = TuiState(selected=_own_reservation_index(store, created.reservation["id"]))
+
+            with mock.patch("bk.tui.utc_now", return_value=self.start + timedelta(minutes=1)):
+                _start_edit_select(config, store, state)
+
+        self.assertFalse(state.editor_active)
+        self.assertTrue(state.error)
+        self.assertIn("after it has started", state.message)
 
     def test_edit_auto_find_excludes_original_reservation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -809,6 +922,25 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertIn("S4/4", label)
         self.assertIn("S4/4", narrow)
         self.assertNotIn("unknown", label)
+
+    def test_gpu_metric_columns_do_not_move_when_shared_capacity_changes(self):
+        gpu = GpuSnapshot(
+            index=0,
+            name="Sim Pro 6000",
+            memory_used_mb=4096,
+            memory_total_mb=98304,
+            utilization_percent=72,
+            source="simulation",
+        )
+
+        idle = _gpu_label(gpu, 32, peak_shared=0, shared_limit=2)
+        shared = _gpu_label(gpu, 32, peak_shared=2, shared_limit=2)
+
+        self.assertIn("S0/2", idle)
+        self.assertIn("S2/2", shared)
+        self.assertEqual(idle.index("S"), shared.index("S"))
+        self.assertEqual(idle.index("U"), shared.index("U"))
+        self.assertEqual(idle.index("4.0/96G"), shared.index("4.0/96G"))
 
     def test_gpu_label_shows_live_utilization_processes_and_violations(self):
         process = GpuProcessSnapshot(123, 1001, "alice", "python train.py")

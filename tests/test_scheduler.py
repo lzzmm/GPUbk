@@ -4,10 +4,11 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 from bk.config import Config
-from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest
-from bk.scheduler import add_booking, find_available_gpus
+from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, EditRequest
+from bk.scheduler import add_booking, edit_booking, find_available_gpus
 from bk.storage import LedgerStore
 from bk.timeparse import parse_iso, utc_now
 
@@ -147,6 +148,41 @@ class SchedulerModeTests(unittest.TestCase):
 
         ledger = self.store.load()
         self.assertEqual(len(ledger["reservations"]), 1)
+
+    def test_edit_rejects_a_reservation_that_has_already_started(self):
+        actor = Actor(uid=1001, username="user1001")
+        created = add_booking(self.store, self.config, self.request(actor.uid, MODE_SHARED))
+        before = self.store.load()
+
+        with mock.patch("bk.scheduler.utc_now", return_value=self.start + timedelta(minutes=5)):
+            with self.assertRaisesRegex(BookingError, "after it has started"):
+                edit_booking(
+                    self.store,
+                    self.config,
+                    EditRequest(actor=actor, reservation_id=created.reservation["id"], duration_seconds=30 * 60),
+                )
+
+        self.assertEqual(self.store.load(), before)
+
+    def test_exact_edit_rejects_a_new_start_in_the_past(self):
+        actor = Actor(uid=1001, username="user1001")
+        created = add_booking(self.store, self.config, self.request(actor.uid, MODE_SHARED))
+        now = self.start - timedelta(minutes=30)
+        before = self.store.load()
+
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            with self.assertRaisesRegex(BookingError, "must not be in the past"):
+                edit_booking(
+                    self.store,
+                    self.config,
+                    EditRequest(
+                        actor=actor,
+                        reservation_id=created.reservation["id"],
+                        start_at=now - timedelta(minutes=5),
+                    ),
+                )
+
+        self.assertEqual(self.store.load(), before)
 
     def test_preferred_gpu_queues_on_that_gpu_while_auto_can_choose_another(self):
         config = Config(data_dir=Path(self.tmp.name), gpu_count=2, max_shared_users=2)

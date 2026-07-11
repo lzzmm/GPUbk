@@ -24,3 +24,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Reject untrusted shared configuration, symbolic-link and special-file redirection across ledger, audit, and private job paths.
 - Bound external allocator output and terminate its whole process group on timeout or protocol overflow.
 - Adopt Apache-2.0 and publish maintainer and GitHub project metadata for the `gpubk` distribution.
+- Add a paged colorized TUI help center, explicit `f`/`g`/`r` guidance, and an embedded Quick Tour.
+- Center the live timeline around a visible NOW marker, permit read-only reservation history browsing, and keep GPU capacity/utilization/memory columns aligned.
+- Reject edits after a reservation starts or when an exact replacement start is in the past across both TUI and scheduler APIs.
+- Add auto-detected dark/light TUI themes, a live theme toggle, and terminal-default neutral text for readable black and white backgrounds.
