@@ -119,6 +119,62 @@ class LedgerStorageTests(unittest.TestCase):
 
             self.assertTrue(store.journal_path.exists())
 
+    def test_invalid_ledger_without_backup_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+            store.ensure()
+            store.ledger_path.write_text("not-json", encoding="utf-8")
+            original = store.ledger_path.read_bytes()
+            mutator = mock.Mock()
+
+            with self.assertRaisesRegex(OSError, "no valid backup exists"):
+                store.load()
+            with self.assertRaisesRegex(OSError, "no valid backup exists"):
+                store.transaction(mutator)
+
+            mutator.assert_not_called()
+            self.assertEqual(store.ledger_path.read_bytes(), original)
+
+    def test_invalid_ledger_loads_latest_valid_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+
+            def mutate(ledger):
+                ledger["reservations"].append({"id": "backed-up"})
+                return ledger, None, [], True
+
+            store.transaction(mutate)
+            store.ledger_path.write_text("not-json", encoding="utf-8")
+
+            restored = store.load()
+
+            self.assertEqual([item["id"] for item in restored["reservations"]], ["backed-up"])
+            self.assertIn("latest valid backup", store.last_warning)
+
+    def test_valid_journal_recovers_over_an_invalid_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+            store.ensure()
+            store.ledger_path.write_text("not-json", encoding="utf-8")
+            journal = {
+                "version": 1,
+                "transaction_id": "repair-transaction",
+                "created_at": "2030-01-01T00:00:00Z",
+                "ledger": {
+                    "version": 1,
+                    "last_transaction_id": "repair-transaction",
+                    "reservations": [{"id": "recovered"}],
+                },
+                "logs": [],
+            }
+            store._write_journal(journal)
+
+            recovered = store.load()
+
+            self.assertEqual([item["id"] for item in recovered["reservations"]], ["recovered"])
+            self.assertFalse(store.journal_path.exists())
+            self.assertEqual(json.loads(store.ledger_path.read_text(encoding="utf-8")), recovered)
+
     def test_private_defaults_do_not_grant_group_or_world_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = LedgerStore(Path(tmp) / "private")

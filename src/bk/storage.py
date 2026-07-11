@@ -206,11 +206,15 @@ class LedgerStore:
                 data = json.load(fh)
             self._validate_ledger(data)
             return data
-        except (json.JSONDecodeError, OSError, ValueError):
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
             restored = self._load_latest_backup()
             if restored is not None:
+                self.last_warning = f"ledger is invalid; loaded the latest valid backup: {exc}"
                 return restored
-            return _empty_ledger()
+            raise OSError(
+                errno.EIO,
+                f"ledger is invalid and no valid backup exists: {self.ledger_path}: {exc}",
+            ) from exc
 
     def _load_latest_backup(self) -> Optional[dict]:
         if not self.backup_dir.exists():
@@ -274,7 +278,10 @@ class LedgerStore:
     def _apply_journal_unlocked(self, journal: dict) -> None:
         ledger = journal.get("ledger")
         if ledger is not None:
-            current = self._load_unlocked()
+            try:
+                current = self._load_unlocked()
+            except OSError:
+                current = _empty_ledger()
             if current.get("last_transaction_id") != journal["transaction_id"]:
                 self._atomic_write_ledger(ledger)
         logs = journal.get("logs", [])
