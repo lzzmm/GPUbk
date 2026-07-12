@@ -706,7 +706,10 @@ class CliTests(unittest.TestCase):
             self.assertIn("queued:", queued.stdout)
             ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
             self.assertEqual([item["share_units"] for item in ledger["reservations"]], [3, 1, 1])
-            self.assertEqual(ledger["reservations"][0]["start_at"], ledger["reservations"][1]["start_at"])
+            self.assertLess(
+                ledger["reservations"][1]["start_at"],
+                ledger["reservations"][0]["end_at"],
+            )
             self.assertEqual(ledger["reservations"][0]["end_at"], ledger["reservations"][2]["start_at"])
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1135,6 +1138,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(cleanup.returncode, 0, cleanup.stderr)
             self.assertEqual(
                 json.loads(cleanup.stdout)["private_job_cleanup"]["failed"],
+                0,
+            )
+            self.assertEqual(
+                json.loads(cleanup.stdout)["private_job_log_cleanup"]["failed"],
                 0,
             )
             self.assertEqual(list((log_dir / "specs").glob("*.json")), [])

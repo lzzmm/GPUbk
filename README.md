@@ -163,15 +163,16 @@ Put the command after `--`:
 ```bash
 bk 2 1h30m --mem 12g -- python train.py --config exp.yaml
 bk j                    # list scheduled jobs
-bk j --cleanup          # inspect and prune private command specs
+bk j --cleanup          # inspect and prune private job files
 bk w                    # run this user's due jobs
 ```
 
 The worker sets `CUDA_VISIBLE_DEVICES`, `CUDA_DEVICE_ORDER`,
 `BK_RESERVATION_ID`, and `BK_RESERVED_GPUS`. Commands and working directories
 stay in UID-owned `0600` job specs; they are not written to the shared ledger.
-The worker uses `shell=False`. Use an explicit shell only when shell syntax is
-required:
+The worker uses `shell=False` and supervises the command's process group until
+it exits or the reservation ends. Commands must not daemonize or create a new
+session. Use an explicit shell only when shell syntax is required:
 
 ```bash
 bk 1 30m -- sh -lc 'python train.py > train.log 2>&1'
@@ -193,7 +194,13 @@ most every five minutes while running. A spec with no ledger reference gets a
 interrupted, uncertain, pending, claimed, and running jobs keep their specs
 while they can still run or be retried. `bk jobs --cleanup --json` exposes the
 same cleanup as a machine-readable operation. Private job logs are deliberately
-retained for the user to review or remove; they are never placed in shared data.
+kept outside shared data. Direct stdout/stderr is drained through a two-segment
+rolling log capped at 64 MiB per job by default. Terminal logs are kept for 30
+days and oldest terminal logs are pruned if this UID exceeds 4 GiB. Active and
+retryable jobs are retained. `bk jobs --cleanup --json` reports spec and log cleanup;
+`job_log_retention_days`, `job_log_max_mb`, and `job_log_total_max_mb` configure
+the policy, and `0` disables the corresponding limit. Files created by a command
+itself, including shell redirections, are outside this policy.
 
 For unattended jobs, each user can install the bundled systemd user unit:
 
@@ -308,6 +315,9 @@ Put a root-owned `config.json` in that directory:
   "usage_event_retention_days": 365,
   "require_shared_memory": true,
   "shared_memory_reserve_mb": 512,
+  "job_log_retention_days": 30,
+  "job_log_max_mb": 64,
+  "job_log_total_max_mb": 4096,
   "worker_live_guard": true,
   "file_mode": "0660",
   "dir_mode": "2770"

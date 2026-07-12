@@ -299,6 +299,9 @@ def build_agent_context(
             "queue_search_hours": config.queue_search_hours,
             "ledger_retention_days": config.ledger_retention_days,
             "worker_live_guard": config.worker_live_guard,
+            "job_log_retention_days": config.job_log_retention_days,
+            "job_log_max_mb": config.job_log_max_mb,
+            "job_log_total_max_mb": config.job_log_total_max_mb,
             "usage_retention": {
                 "load_minutes": config.usage_load_window_minutes,
                 "minute_days": config.usage_minute_retention_days,
@@ -325,6 +328,8 @@ def build_agent_context(
             "private_job_specs": True,
             "private_job_spec_cleanup": True,
             "private_job_spec_orphan_grace_seconds": JOB_SPEC_ORPHAN_GRACE_SECONDS,
+            "bounded_private_job_logs": True,
+            "private_job_log_cleanup": True,
             "versioned_usage_history": True,
             "usage_api_schema": "gpubk.usage.v1",
             "external_allocator_is_advisory": True,

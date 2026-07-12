@@ -94,6 +94,7 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     {"reservation_id": created.structuredContent["reservation"]["short_id"]},
                 )
                 cleanup = await session.call_tool("cleanup_my_job_specs", {})
+                log_cleanup = await session.call_tool("cleanup_my_job_logs", {})
 
             self.assertEqual(
                 names,
@@ -106,6 +107,7 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     "edit_my_gpu_booking",
                     "cancel_my_gpu_booking",
                     "cleanup_my_job_specs",
+                    "cleanup_my_job_logs",
                     "read_my_job_log",
                 },
             )
@@ -124,6 +126,8 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(by_name["cancel_my_gpu_booking"].annotations.idempotentHint)
             self.assertTrue(by_name["cleanup_my_job_specs"].annotations.destructiveHint)
             self.assertTrue(by_name["cleanup_my_job_specs"].annotations.idempotentHint)
+            self.assertTrue(by_name["cleanup_my_job_logs"].annotations.destructiveHint)
+            self.assertTrue(by_name["cleanup_my_job_logs"].annotations.idempotentHint)
             self.assertTrue(all(tool.annotations.openWorldHint is False for tool in by_name.values()))
             self.assertIn('"schema_version": "bk.agent.v1"', context_resource.contents[0].text)
             self.assertIn('"schema_version": "gpubk.usage.v1"', usage_resource.contents[0].text)
@@ -143,6 +147,7 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(edit_retried.structuredContent["status"], "exists")
             self.assertEqual(cancelled.structuredContent["reservation"]["status"], "cancelled")
             self.assertEqual(cleanup.structuredContent["kind"], "job-spec-cleanup")
+            self.assertEqual(log_cleanup.structuredContent["kind"], "job-log-cleanup")
 
 
 if __name__ == "__main__":

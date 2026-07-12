@@ -11,7 +11,12 @@ Supported security boundaries:
 - Shared data files reject symbolic links, FIFOs, devices, and other non-regular leaf files before reading or writing.
 - Scheduled command arguments live in UID-owned `0600` specs, not the shared ledger.
 - Terminal and expired private command specs are pruned by the owning UID; unreferenced specs
-  receive a 24-hour race-safety grace period. Private job logs remain user-managed.
+  receive a 24-hour race-safety grace period.
+- Direct job stdout/stderr uses UID-owned rolling logs with configurable per-job, age, and
+  per-UID limits. Cleanup retains active/retryable logs and refuses unsafe file types or ownership.
+- Full launch diagnostics remain in the owning UID's private log; shared job state uses
+  path-free failure reasons. The worker supervises the launched process group, not processes
+  that deliberately escape into a new session.
 - Scheduled jobs re-check live process authorization and physical VRAM immediately before
   launch; this reduces races but cannot replace kernel device access control.
 - Shared capacity units enforce ledger admission and inferred memory budgets only. They do

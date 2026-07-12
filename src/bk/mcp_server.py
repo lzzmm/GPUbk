@@ -9,6 +9,12 @@ from typing import List, Optional
 from .config import Config, load_config
 from .fileio import open_existing_regular
 from .identity import current_actor
+from .joblogs import (
+    JobLogCleanupResult,
+    cleanup_job_logs,
+    job_log_paths,
+    read_job_log_tail,
+)
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError
 from .scheduler import list_active
 from .sharing import parse_share_units, share_units_for_peer_limit
@@ -24,7 +30,7 @@ from .service import (
 from .storage import LedgerStore
 from .timeparse import parse_duration_seconds, parse_memory_mb, parse_start, to_iso, utc_now
 from .usage_api import UsageQueryService
-from .worker import JobSpecCleanupResult, cleanup_job_specs, job_log_path
+from .worker import JobSpecCleanupResult, cleanup_job_specs
 
 
 class BkMcpBackend:
@@ -260,19 +266,37 @@ class BkMcpBackend:
             "private_job_cleanup": cleanup.as_dict(),
         }
 
+    def cleanup_private_job_logs(self) -> dict:
+        try:
+            cleanup = cleanup_job_logs(
+                self.config,
+                self.store.load(),
+                self.actor,
+            )
+        except (BookingError, OSError, ValueError) as exc:
+            cleanup = JobLogCleanupResult(
+                failed=1,
+                warnings=(f"private job log cleanup failed: {exc}",),
+            )
+        return {
+            "schema_version": "bk.agent.v1",
+            "kind": "job-log-cleanup",
+            "private_job_log_cleanup": cleanup.as_dict(),
+        }
+
     def read_job_log(self, reservation_id: str, max_chars: int = 32000) -> dict:
         if max_chars < 1 or max_chars > 128000:
             raise BookingError("max_chars must be between 1 and 128000")
         reservation = self._resolve_own_job(reservation_id)
-        path = job_log_path(self.config, str(reservation["id"]))
-        text = ""
-        if path.exists():
-            text = _read_tail(path, max_chars)
+        paths = job_log_paths(self.config, str(reservation["id"]))
+        text = read_job_log_tail(self.config, str(reservation["id"]), max_chars) if paths else ""
         return {
             "schema_version": "bk.agent.v1",
             "kind": "job_log",
             "reservation_id": reservation["id"],
             "status": reservation["job"].get("status"),
+            "available": bool(paths),
+            "segments": len(paths),
             "text": text,
             "truncated_to_chars": max_chars,
         }
@@ -456,6 +480,11 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
     def cleanup_my_job_specs() -> dict[str, object]:
         """Prune only this UID's terminal, expired, or old orphaned private command specs."""
         return api.cleanup_private_job_specs()
+
+    @mcp.tool(annotations=idempotent_cleanup, structured_output=True)
+    def cleanup_my_job_logs() -> dict[str, object]:
+        """Apply this UID's age and quota policy to terminal private job logs."""
+        return api.cleanup_private_job_logs()
 
     @mcp.tool(annotations=read_only, structured_output=True)
     def read_my_job_log(reservation_id: str, max_chars: int = 32000) -> dict[str, object]:

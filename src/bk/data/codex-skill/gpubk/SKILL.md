@@ -74,8 +74,9 @@ GPUbk sets `CUDA_VISIBLE_DEVICES`; do not add physical GPU IDs to the training c
 For edits, an explicit `start` is exact and does not move unless `allow_queue=true` was explicitly
 requested. Keep `bk worker` running for scheduled commands. Use `list_gpu_reservations`,
 `bk j --json`, or the bounded job-log tool to inspect state. `cleanup_my_job_specs` and
-`bk j --cleanup --json` prune only terminal/expired private command specs; they deliberately retain
-job logs and runnable or retryable specs.
+`cleanup_my_job_logs` expose separate idempotent private cleanup operations. `bk j --cleanup
+--json` runs both. Never remove runnable/retryable specs or logs; report cleanup warnings and
+quota excess to the user.
 
 ## Respect Safety Boundaries
 

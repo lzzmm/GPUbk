@@ -41,8 +41,10 @@ Cancellation returns `kind=cancellation_result`, the cancelled reservation, and
 `private_job_cleanup`. A non-null cleanup warning means cancellation committed but the owning UID
 could not remove one or more private command specs; do not repeat the destructive cancellation.
 `bk j --cleanup --json` is the retry-safe cleanup operation. It retains runnable/retryable specs,
-applies a 24-hour grace period to unreferenced files, and never removes private job logs.
+applies a 24-hour grace period to unreferenced specs, and applies the configured age/quota policy
+only to terminal private job logs.
 `private_job_cleanup` reports `removed`, `retained`, `deferred_orphans`, `failed`, and `warnings`.
+`private_job_log_cleanup` additionally reports retained/removed bytes and unresolved quota excess.
 
 `share` accepts whole units, an exactly representable fraction, or a percentage. `share_with=N` reserves all but `N` minimum units. These values control scheduling admission and inferred VRAM, not hardware-enforced compute bandwidth. Explicit `expected_memory` remains the actual per-GPU estimate and is not multiplied by share units.
 
@@ -55,6 +57,7 @@ applies a 24-hour grace period to unreferenced files, and never removes private 
 - `edit_my_gpu_booking`: idempotent current-UID edit; `operation_id` is required.
 - `cancel_my_gpu_booking`: current UID only.
 - `cleanup_my_job_specs`: idempotently prune only this UID's non-runnable private command specs.
+- `cleanup_my_job_logs`: idempotently apply this UID's terminal log retention and quota policy.
 - `read_my_job_log`: bounded current-UID private log tail.
 - `get_my_gpu_usage`: versioned current-UID summaries, samples, and optional audit events.
 

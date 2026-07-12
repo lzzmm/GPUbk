@@ -3,6 +3,7 @@ import os
 import stat
 import sys
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -10,6 +11,7 @@ from pathlib import Path
 
 from bk.config import Config
 from bk.gpu import GpuProcessSnapshot, GpuSnapshot
+from bk.joblogs import MIB, job_log_paths, read_job_log_tail
 from bk.models import Actor, BookingError, BookingRequest
 from bk.scheduler import add_booking, cancel_booking
 from bk.storage import LedgerStore
@@ -93,12 +95,66 @@ class ScheduledJobTests(unittest.TestCase):
         self.assertEqual(summary.started, 1)
         self.assertEqual(summary.succeeded, 1)
         self.assertEqual(by_id[mine["id"]]["job"]["status"], "succeeded")
+        self.assertNotIn("log_path", by_id[mine["id"]]["job"])
         self.assertEqual(by_id[other["id"]]["job"]["status"], "pending")
         log = job_log_path(self.config, mine["id"]).read_text(encoding="utf-8")
         output = json.loads(log.splitlines()[-1])
         self.assertEqual(output["cuda"], "0")
         self.assertEqual(output["rid"], mine["id"])
         self.assertFalse(job_spec_path(self.config, mine["job"]["spec_id"]).exists())
+
+    def test_worker_rolls_high_volume_output_without_blocking_the_job(self):
+        config = replace(self.config, job_log_max_mb=1)
+        reservation = self.booking(
+            command=[
+                sys.executable,
+                "-c",
+                "import sys; sys.stdout.write('x' * 1500000); print('TAIL-MARKER')",
+            ]
+        )
+
+        summary = run_worker(config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True)
+
+        paths = job_log_paths(config, reservation["id"])
+        self.assertEqual(summary.succeeded, 1)
+        self.assertEqual(len(paths), 2)
+        self.assertLessEqual(sum(path.stat().st_size for path in paths), MIB)
+        self.assertTrue(read_job_log_tail(config, reservation["id"], 64).endswith("TAIL-MARKER\n"))
+
+    def test_worker_tracks_same_process_group_children_after_the_leader_exits(self):
+        marker = self.work_dir / "child-finished"
+        child_code = f"import time; time.sleep(0.4); open({str(marker)!r}, 'w').write('done')"
+        self.booking(
+            command=[
+                sys.executable,
+                "-c",
+                f"import subprocess,sys; subprocess.Popen([sys.executable, '-c', {child_code!r}])",
+            ]
+        )
+
+        started = time.monotonic()
+        summary = run_worker(self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True)
+
+        self.assertEqual(summary.succeeded, 1)
+        self.assertTrue(marker.exists())
+        self.assertGreaterEqual(time.monotonic() - started, 0.3)
+
+    def test_worker_rejects_a_symbolic_link_job_log_without_touching_its_target(self):
+        marker = self.work_dir / "must-not-run"
+        reservation = self.booking(
+            command=[sys.executable, "-c", f"open({str(marker)!r}, 'w').write('bad')"]
+        )
+        target = self.work_dir / "outside-log"
+        target.write_text("safe", encoding="utf-8")
+        job_log_path(self.config, reservation["id"]).symlink_to(target)
+
+        summary = run_worker(self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True)
+
+        stored = next(item for item in self.store.load()["reservations"] if item["id"] == reservation["id"])
+        self.assertEqual(summary.failed, 1)
+        self.assertEqual(stored["job"]["status"], "failed")
+        self.assertFalse(marker.exists())
+        self.assertEqual(target.read_text(encoding="utf-8"), "safe")
 
     def test_live_guard_waits_without_log_spam_then_launches_when_gpu_is_safe(self):
         marker = self.work_dir / "guard-launched"
@@ -196,6 +252,23 @@ class ScheduledJobTests(unittest.TestCase):
         self.assertEqual(stored["job"]["status"], "failed")
         self.assertFalse(marker.exists())
         self.assertTrue(job_spec_path(self.config, reservation["job"]["spec_id"]).exists())
+
+    def test_launch_failure_keeps_private_paths_out_of_the_shared_ledger(self):
+        secret = "private-launch-path-token"
+        missing = self.work_dir / secret / "missing-command"
+        reservation = self.booking(command=[str(missing)])
+
+        run_worker(self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True)
+
+        ledger_text = self.store.ledger_path.read_text(encoding="utf-8")
+        stored = next(item for item in self.store.load()["reservations"] if item["id"] == reservation["id"])
+        private_log = job_log_path(self.config, reservation["id"]).read_text(encoding="utf-8")
+        self.assertNotIn(secret, ledger_text)
+        self.assertEqual(
+            stored["job"]["message"],
+            "scheduled executable or working directory was not found",
+        )
+        self.assertIn(secret, private_log)
 
     def test_cancelled_pending_job_is_never_executed(self):
         marker = self.work_dir / "not-run"

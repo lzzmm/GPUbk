@@ -152,14 +152,15 @@ bk t
 ```bash
 bk 2 1h30m --mem 12g -- python train.py --config exp.yaml
 bk j                    # 查看任务
-bk j --cleanup          # 检查并清理私有命令文件
+bk j --cleanup          # 检查并清理私有任务文件
 bk w                    # 执行当前用户已经到点的任务
 ```
 
 worker 会设置 `CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、
 `BK_RESERVATION_ID` 和 `BK_RESERVED_GPUS`。命令和工作目录保存在当前 UID 所有的
-`0600` 私有文件里，不会写入共享台账。worker 使用 `shell=False`；确实需要 shell
-语法时应明确调用 shell：
+`0600` 私有文件里，不会写入共享台账。worker 使用 `shell=False`，并持续监管命令
+所在的进程组，直到它退出或预约结束；任务脚本不应自行 daemonize 或创建新 session。
+确实需要 shell 语法时应明确调用 shell：
 
 ```bash
 bk 1 30m -- sh -lc 'python train.py > train.log 2>&1'
@@ -175,7 +176,12 @@ worker 会在预约窗口内持续重试；`bk worker --once` 有等待任务时
 启动、退出以及持续运行时最多每 5 分钟检查一次。没有台账引用的规范 spec 会保留
 24 小时宽限期，避免与正在提交的预约发生竞争；仍待执行、运行中或可重试的任务不会
 被删除。`bk jobs --cleanup --json` 提供同一清理流程的机器可读结果。私有任务日志会
-保留给用户复盘或自行删除，不会进入共享数据目录。
+保存在共享数据目录之外。worker 会持续排空脚本的 stdout/stderr，并默认用两个分段
+滚动把每个任务的直接输出限制在最多 64 MiB；终态日志保留 30 天，当前 UID 的终态日志总量超过
+4 GiB 时从最旧的开始清理。仍在运行或可重试的任务不会删除。`bk jobs --cleanup
+--json` 会同时报告 spec 与日志清理结果；`job_log_retention_days`、`job_log_max_mb` 和
+`job_log_total_max_mb` 可调整策略，设为 `0` 可关闭对应限制。脚本自行创建的文件，
+包括 shell 内部重定向的输出，不受此策略管理。
 
 需要无人值守运行时，每位用户可以安装内置的 systemd user unit：
 
@@ -283,6 +289,9 @@ export BK_DATA_DIR=/data2/shared/bk
   "usage_event_retention_days": 365,
   "require_shared_memory": true,
   "shared_memory_reserve_mb": 512,
+  "job_log_retention_days": 30,
+  "job_log_max_mb": 64,
+  "job_log_total_max_mb": 4096,
   "worker_live_guard": true,
   "file_mode": "0660",
   "dir_mode": "2770"

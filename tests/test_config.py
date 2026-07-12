@@ -22,6 +22,9 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.file_mode, 0o600)
             self.assertEqual(config.dir_mode, 0o700)
             self.assertTrue(config.worker_live_guard)
+            self.assertEqual(config.job_log_retention_days, 30)
+            self.assertEqual(config.job_log_max_mb, 64)
+            self.assertEqual(config.job_log_total_max_mb, 4096)
 
     def test_gpu_count_is_auto_detected_when_not_configured(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -128,6 +131,24 @@ class ConfigTests(unittest.TestCase):
                 config = load_config()
 
             self.assertEqual(config.usage_daily_retention_days, 0)
+
+    def test_job_log_limits_can_be_overridden_or_disabled(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "BK_DATA_DIR": tmp,
+                    "BK_JOB_LOG_RETENTION_DAYS": "0",
+                    "BK_JOB_LOG_MAX_MB": "8",
+                    "BK_JOB_LOG_TOTAL_MAX_MB": "512",
+                },
+                clear=True,
+            ):
+                config = load_config()
+
+            self.assertEqual(config.job_log_retention_days, 0)
+            self.assertEqual(config.job_log_max_mb, 8)
+            self.assertEqual(config.job_log_total_max_mb, 512)
 
     def test_file_mode_rejects_executable_bits(self):
         with tempfile.TemporaryDirectory() as tmp:

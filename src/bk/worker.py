@@ -18,8 +18,18 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from .config import Config
-from .fileio import ensure_directory, open_existing_regular, open_or_create_regular
+from .fileio import open_existing_regular
 from .gpu import GpuSnapshot, snapshot
+from .joblogs import (
+    MIB,
+    JobLogPump,
+    cleanup_job_logs,
+    ensure_job_log_dir,
+    ensure_private_directory,
+    job_log_path,
+    job_log_root,
+    validate_private_directory,
+)
 from .launch_guard import LaunchGuardDecision, assess_job_launch
 from .models import (
     JOB_CANCELLED,
@@ -54,6 +64,7 @@ class RunningJob:
     reservation_id: str
     claim_token: str
     process: subprocess.Popen
+    log_pump: JobLogPump
     end_at: datetime
     termination_reason: Optional[str] = None
     termination_requested_at: Optional[float] = None
@@ -114,9 +125,9 @@ def prepare_job_spec(
     }
     digest = _job_spec_digest(payload)
     payload["digest"] = digest
-    _ensure_job_log_dir(config, actor)
+    ensure_job_log_dir(config, actor)
     path = job_spec_path(config, spec_id)
-    _ensure_private_directory(path.parent, actor)
+    ensure_private_directory(path.parent, actor)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -158,14 +169,14 @@ def cleanup_job_specs(
     if orphan_grace_seconds < 0:
         raise ValueError("job spec orphan grace must be nonnegative")
 
-    root = _job_log_root(config)
+    root = job_log_root(config)
     if not os.path.lexists(root):
         return JobSpecCleanupResult()
-    _validate_existing_private_directory(root, actor)
+    validate_private_directory(root, actor)
     spec_dir = root / "specs"
     if not os.path.lexists(spec_dir):
         return JobSpecCleanupResult()
-    _validate_existing_private_directory(spec_dir, actor)
+    validate_private_directory(spec_dir, actor)
 
     current = (now if now is not None else datetime.now(timezone.utc)).astimezone(timezone.utc)
     ledger = store.load()
@@ -288,7 +299,7 @@ def run_worker(
     if parallel < 1:
         raise ValueError("worker max parallel jobs must be >= 1")
 
-    log_dir = _ensure_job_log_dir(config, actor)
+    log_dir = ensure_job_log_dir(config, actor)
     worker_id = str(uuid.uuid4())
     hostname = socket.gethostname()
     stop_event = threading.Event()
@@ -312,6 +323,7 @@ def run_worker(
             monotonic_now = time.monotonic()
             if monotonic_now >= next_spec_cleanup_at:
                 _cleanup_job_specs_best_effort(config, store, actor, now, quiet)
+                _cleanup_job_logs_best_effort(config, store, actor, now, quiet)
                 next_spec_cleanup_at = monotonic_now + JOB_SPEC_CLEANUP_INTERVAL_SECONDS
 
             if stop_event.is_set():
@@ -374,6 +386,7 @@ def run_worker(
                 _kill_process_group(item.process)
             _reconcile_running(store, actor, running, utc_now(), counts, quiet)
         _cleanup_job_specs_best_effort(config, store, actor, utc_now(), quiet)
+        _cleanup_job_logs_best_effort(config, store, actor, utc_now(), quiet)
         _restore_signal_handlers(previous_handlers)
     summary = WorkerSummary(**counts)
     if not quiet:
@@ -569,17 +582,8 @@ def _record_launch_guard_decisions(
     return store.transaction(mutate)
 
 
-def job_log_path(config: Config, reservation_id: str) -> Path:
-    log_dir = _job_log_root(config)
-    try:
-        normalized = str(uuid.UUID(str(reservation_id)))
-    except (ValueError, AttributeError):
-        normalized = hashlib.sha256(str(reservation_id).encode("utf-8", errors="replace")).hexdigest()
-    return log_dir / f"{normalized}.log"
-
-
 def job_spec_path(config: Config, spec_id: str) -> Path:
-    log_dir = _job_log_root(config)
+    log_dir = job_log_root(config)
     try:
         normalized = str(uuid.UUID(str(spec_id)))
     except (ValueError, AttributeError) as exc:
@@ -626,6 +630,8 @@ def retry_job(
             "launch_guard_state",
             "launch_guard_key",
             "waiting_since",
+            "log_warning",
+            "log_rotated",
         ):
             job.pop(key, None)
         reservation["updated_at"] = to_iso(now)
@@ -646,11 +652,12 @@ def _start_claimed_job(
     reservation_id = str(reservation.get("id", ""))
     log_path = job_log_path(config, reservation_id)
     if log_path.parent != log_dir:
-        _mark_launch_failure(store, actor, reservation_id, claim_token, "invalid log path", None)
+        _mark_launch_failure(store, actor, reservation_id, claim_token, "invalid log path")
         return None
+    process: Optional[subprocess.Popen] = None
+    log_pump: Optional[JobLogPump] = None
     try:
         argv, cwd = _validated_job_payload(config, actor, job)
-        log_fh = _open_secure_log(log_path)
         header = {
             "event": "bk-job-start",
             "timestamp": to_iso(utc_now()),
@@ -659,9 +666,12 @@ def _start_claimed_job(
             "cwd": cwd,
             "argv": argv,
         }
-        log_fh.write((json.dumps(header, ensure_ascii=False) + "\n").encode("utf-8"))
-        log_fh.flush()
-        os.fsync(log_fh.fileno())
+        log_pump = JobLogPump(
+            log_path,
+            actor,
+            config.job_log_max_mb * MIB,
+            header,
+        )
 
         env = os.environ.copy()
         physical_gpus = ",".join(str(item) for item in reservation.get("gpus", []))
@@ -676,28 +686,52 @@ def _start_claimed_job(
             cwd=cwd,
             env=env,
             stdin=subprocess.DEVNULL,
-            stdout=log_fh,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            bufsize=0,
             start_new_session=True,
             close_fds=True,
         )
-        log_fh.close()
+        if process.stdout is None:
+            raise OSError("failed to open the job log stream")
+        log_pump.start(process.stdout)
     except (OSError, ValueError, BookingError) as exc:
-        try:
-            log_fh.close()  # type: ignore[possibly-undefined]
-        except (UnboundLocalError, OSError):
-            pass
-        _mark_launch_failure(store, actor, reservation_id, claim_token, str(exc), str(log_path))
+        if process is not None:
+            _terminate_process_group(process)
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                _kill_process_group(process)
+        if log_pump is not None:
+            try:
+                log_pump.record_event(
+                    {
+                        "event": "bk-job-launch-error",
+                        "timestamp": to_iso(utc_now()),
+                        "error": str(exc),
+                    }
+                )
+            except (OSError, ValueError, BookingError, RuntimeError):
+                pass
+            log_pump.abort()
+        _mark_launch_failure(
+            store,
+            actor,
+            reservation_id,
+            claim_token,
+            _public_launch_failure(exc),
+        )
         return None
 
     try:
-        marked_running = _mark_running(store, actor, reservation_id, claim_token, process.pid, str(log_path))
+        marked_running = _mark_running(store, actor, reservation_id, claim_token, process.pid)
     except Exception:
         _terminate_process_group(process)
         try:
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             _kill_process_group(process)
+        log_pump.finish()
         raise
     if not marked_running:
         _terminate_process_group(process)
@@ -705,11 +739,13 @@ def _start_claimed_job(
             process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             _kill_process_group(process)
+        log_pump.finish()
         return None
     return RunningJob(
         reservation_id=reservation_id,
         claim_token=claim_token,
         process=process,
+        log_pump=log_pump,
         end_at=parse_iso(reservation["end_at"]),
     )
 
@@ -813,7 +849,6 @@ def _mark_running(
     reservation_id: str,
     claim_token: str,
     child_pid: int,
-    log_path: str,
 ) -> bool:
     def mutate(ledger: dict):
         reservation = _find_reservation(ledger, reservation_id)
@@ -831,7 +866,6 @@ def _mark_running(
         job["status"] = JOB_RUNNING
         job["started_at"] = to_iso(now)
         job["runner_pid"] = child_pid
-        job["log_path"] = log_path
         reservation["updated_at"] = to_iso(now)
         return ledger, True, [_job_log(actor, "job-start", reservation, f"pid={child_pid}")], True
 
@@ -844,7 +878,6 @@ def _mark_launch_failure(
     reservation_id: str,
     claim_token: str,
     message: str,
-    log_path: Optional[str],
 ) -> None:
     def mutate(ledger: dict):
         reservation = _find_reservation(ledger, reservation_id)
@@ -857,8 +890,6 @@ def _mark_launch_failure(
         job["status"] = JOB_FAILED
         job["finished_at"] = to_iso(now)
         job["message"] = message[:1000]
-        if log_path:
-            job["log_path"] = log_path
         reservation["updated_at"] = to_iso(now)
         return ledger, None, [_job_log(actor, "job-failed", reservation, message[:200])], True
 
@@ -888,10 +919,21 @@ def _reconcile_running(
             _kill_process_group(item.process)
 
         exit_code = item.process.poll()
-        if exit_code is None:
+        if exit_code is None or _process_group_alive(item.process):
             continue
+        log_warning = item.log_pump.finish()
+        if log_warning and not quiet:
+            print(f"warning: {reservation_id[:8]} private job log is incomplete: {log_warning}")
         status = _completion_status(exit_code, item.termination_reason)
-        _complete_job(store, actor, item, status, exit_code)
+        _complete_job(
+            store,
+            actor,
+            item,
+            status,
+            exit_code,
+            log_warning=log_warning,
+            log_rotations=item.log_pump.rotation_count,
+        )
         if status == JOB_SUCCEEDED:
             counts["succeeded"] += 1
         elif status == JOB_CANCELLED:
@@ -909,6 +951,9 @@ def _complete_job(
     running: RunningJob,
     status: str,
     exit_code: int,
+    *,
+    log_warning: Optional[str],
+    log_rotations: int,
 ) -> None:
     def mutate(ledger: dict):
         reservation = _find_reservation(ledger, running.reservation_id)
@@ -921,6 +966,10 @@ def _complete_job(
         job["status"] = status
         job["finished_at"] = to_iso(now)
         job["exit_code"] = int(exit_code)
+        if log_rotations:
+            job["log_rotated"] = True
+        if log_warning:
+            job["log_warning"] = "private job log is incomplete; inspect the owning worker"
         if running.termination_reason:
             job["message"] = running.termination_reason
         reservation["updated_at"] = to_iso(now)
@@ -939,6 +988,25 @@ def _completion_status(exit_code: int, termination_reason: Optional[str]) -> str
     return JOB_SUCCEEDED if exit_code == 0 else JOB_FAILED
 
 
+def _public_launch_failure(exc: Exception) -> str:
+    message = str(exc)
+    if isinstance(exc, FileNotFoundError):
+        return "scheduled executable or working directory was not found"
+    if isinstance(exc, PermissionError):
+        return "scheduled executable or private job storage was not accessible"
+    if isinstance(exc, BookingError):
+        if "working directory" in message:
+            return "scheduled working directory is invalid or no longer exists"
+        if "digest" in message or "internally inconsistent" in message:
+            return "private job spec integrity check failed"
+        if "job spec" in message or "private job" in message or "job log" in message:
+            return "private job storage validation failed"
+        return "scheduled command validation failed"
+    if isinstance(exc, ValueError):
+        return "scheduled command configuration is invalid"
+    return "scheduled command could not be started"
+
+
 def _stop_running_jobs(running: Dict[str, RunningJob]) -> None:
     for item in running.values():
         if item.termination_reason is None:
@@ -952,60 +1020,37 @@ def _request_termination(item: RunningJob, reason: str) -> None:
 
 
 def _terminate_process_group(process: subprocess.Popen) -> None:
-    if process.poll() is not None:
-        return
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except (OSError, ProcessLookupError):
-        try:
-            process.terminate()
-        except OSError:
-            pass
+        if process.poll() is None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
 
 
 def _kill_process_group(process: subprocess.Popen) -> None:
-    if process.poll() is not None:
-        return
     try:
         os.killpg(process.pid, signal.SIGKILL)
     except (OSError, ProcessLookupError):
-        try:
-            process.kill()
-        except OSError:
-            pass
+        if process.poll() is None:
+            try:
+                process.kill()
+            except OSError:
+                pass
 
 
-def _ensure_job_log_dir(config: Config, actor: Actor) -> Path:
-    path = _job_log_root(config)
-    if not path.is_absolute():
-        raise BookingError(f"job log directory must be absolute: {path}")
-    _ensure_private_directory(path, actor)
-    return path
-
-
-def _ensure_private_directory(path: Path, actor: Actor) -> None:
-    ensure_directory(path, 0o700)
-    metadata = path.lstat()
-    if metadata.st_uid != actor.uid:
-        raise BookingError(f"private job directory is not owned by UID {actor.uid}: {path}")
-    path.chmod(0o700)
-
-
-def _job_log_root(config: Config) -> Path:
-    return config.job_log_dir or (Path.home() / ".local" / "state" / "bk" / "jobs")
-
-
-def _validate_existing_private_directory(path: Path, actor: Actor) -> None:
+def _process_group_alive(process: subprocess.Popen) -> bool:
     try:
-        metadata = path.lstat()
-    except OSError as exc:
-        raise BookingError(f"cannot inspect private job directory {path}: {exc}") from exc
-    if not stat.S_ISDIR(metadata.st_mode):
-        raise BookingError(f"private job path is not a directory: {path}")
-    if metadata.st_uid != actor.uid:
-        raise BookingError(f"private job directory is not owned by UID {actor.uid}: {path}")
-    if stat.S_IMODE(metadata.st_mode) & 0o077:
-        raise BookingError(f"private job directory must not be accessible by group or other users: {path}")
+        os.killpg(process.pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
 
 
 def _job_spec_is_needed(reservation: dict, job: dict, now: datetime) -> bool:
@@ -1090,10 +1135,22 @@ def _cleanup_job_specs_best_effort(
         print(f"warning: {result.failed} private job spec cleanup issue(s): {detail}")
 
 
-def _open_secure_log(path: Path):
-    fd = open_or_create_regular(path, os.O_WRONLY | os.O_APPEND, 0o600)
-    os.fchmod(fd, 0o600)
-    return os.fdopen(fd, "ab", buffering=0)
+def _cleanup_job_logs_best_effort(
+    config: Config,
+    store: LedgerStore,
+    actor: Actor,
+    now: datetime,
+    quiet: bool,
+) -> None:
+    try:
+        result = cleanup_job_logs(config, store.load(), actor, now=now)
+    except (BookingError, OSError, ValueError) as exc:
+        if not quiet:
+            print(f"warning: private job log cleanup failed: {exc}")
+        return
+    if result.failed and not quiet:
+        detail = result.warnings[0] if result.warnings else "unknown cleanup error"
+        print(f"warning: {result.failed} private job log cleanup issue(s): {detail}")
 
 
 def _find_reservation(ledger: dict, reservation_id: str) -> Optional[dict]:

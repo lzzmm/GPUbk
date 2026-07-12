@@ -36,6 +36,9 @@ class Config:
     require_shared_memory: bool = False
     shared_memory_reserve_mb: int = 512
     job_log_dir: Optional[Path] = None
+    job_log_retention_days: int = 30
+    job_log_max_mb: int = 64
+    job_log_total_max_mb: int = 4096
     worker_poll_seconds: float = 1.0
     worker_claim_timeout_seconds: float = 30.0
     worker_live_guard: bool = True
@@ -171,6 +174,9 @@ def load_config() -> Config:
         "timeline_hours": "BK_TIMELINE_HOURS",
         "require_shared_memory": "BK_REQUIRE_SHARED_MEMORY",
         "shared_memory_reserve_mb": "BK_SHARED_MEMORY_RESERVE_MB",
+        "job_log_retention_days": "BK_JOB_LOG_RETENTION_DAYS",
+        "job_log_max_mb": "BK_JOB_LOG_MAX_MB",
+        "job_log_total_max_mb": "BK_JOB_LOG_TOTAL_MAX_MB",
         "worker_poll_seconds": "BK_WORKER_POLL_SECONDS",
         "worker_claim_timeout_seconds": "BK_WORKER_CLAIM_TIMEOUT_SECONDS",
         "worker_live_guard": "BK_WORKER_LIVE_GUARD",
@@ -210,6 +216,9 @@ def load_config() -> Config:
         require_shared_memory=_bool_value(raw, "require_shared_memory", False),
         shared_memory_reserve_mb=_nonnegative_int_value(raw, "shared_memory_reserve_mb", 512),
         job_log_dir=job_log_dir,
+        job_log_retention_days=_nonnegative_int_value(raw, "job_log_retention_days", 30),
+        job_log_max_mb=_nonnegative_int_value(raw, "job_log_max_mb", 64),
+        job_log_total_max_mb=_nonnegative_int_value(raw, "job_log_total_max_mb", 4096),
         worker_poll_seconds=_float_value(raw, "worker_poll_seconds", 1.0),
         worker_claim_timeout_seconds=_float_value(raw, "worker_claim_timeout_seconds", 30.0),
         worker_live_guard=_bool_value(raw, "worker_live_guard", True),

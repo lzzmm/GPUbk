@@ -17,6 +17,7 @@ from .config import Config, load_config
 from .fileio import open_existing_regular
 from .gpu import snapshot
 from .identity import current_actor
+from .joblogs import JobLogCleanupResult, cleanup_job_logs, job_log_paths
 from .monitor import MONITOR_BUSY_EXIT_CODE, MonitorBusyError, run_monitor
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, EditRequest
 from .scheduler import (
@@ -63,7 +64,6 @@ from .worker import (
     JobSpecCleanupResult,
     WORKER_WAITING_EXIT_CODE,
     cleanup_job_specs,
-    job_log_path,
     retry_job,
     run_worker,
 )
@@ -584,18 +584,26 @@ def _jobs_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser.add_argument(
         "--cleanup",
         action="store_true",
-        help="remove this UID's terminal, expired, and old orphaned private job specs",
+        help="prune this UID's private command specs and bounded job logs",
     )
     args = parser.parse_args(argv)
     actor = _current_actor()
-    cleanup = None
+    spec_cleanup = None
+    log_cleanup = None
     if args.cleanup:
         try:
-            cleanup = cleanup_job_specs(config, store, actor)
+            spec_cleanup = cleanup_job_specs(config, store, actor)
         except (BookingError, OSError, ValueError) as exc:
-            cleanup = JobSpecCleanupResult(
+            spec_cleanup = JobSpecCleanupResult(
                 failed=1,
                 warnings=(f"private job spec cleanup failed: {exc}",),
+            )
+        try:
+            log_cleanup = cleanup_job_logs(config, store.load(), actor)
+        except (BookingError, OSError, ValueError) as exc:
+            log_cleanup = JobLogCleanupResult(
+                failed=1,
+                warnings=(f"private job log cleanup failed: {exc}",),
             )
     reservations = _own_job_reservations(store, actor)
     if args.json:
@@ -608,23 +616,35 @@ def _jobs_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                         public_reservation(item, actor, config.max_shared_users)
                         for item in reservations
                     ],
-                    "private_job_cleanup": cleanup.as_dict() if cleanup is not None else None,
+                    "private_job_cleanup": (
+                        spec_cleanup.as_dict() if spec_cleanup is not None else None
+                    ),
+                    "private_job_log_cleanup": (
+                        log_cleanup.as_dict() if log_cleanup is not None else None
+                    ),
                 },
                 ensure_ascii=False,
                 sort_keys=True,
             )
         )
-        return 2 if cleanup is not None and cleanup.failed else 0
-    if cleanup is not None:
+        return 2 if any(item is not None and item.failed for item in (spec_cleanup, log_cleanup)) else 0
+    if spec_cleanup is not None:
         print(
-            f"cleanup: removed={cleanup.removed} retained={cleanup.retained} "
-            f"deferred={cleanup.deferred_orphans} failed={cleanup.failed}"
+            f"spec cleanup: removed={spec_cleanup.removed} retained={spec_cleanup.retained} "
+            f"deferred={spec_cleanup.deferred_orphans} failed={spec_cleanup.failed}"
         )
-        for warning in cleanup.warnings:
+        for warning in spec_cleanup.warnings:
+            print(f"warning: {warning}", file=sys.stderr)
+    if log_cleanup is not None:
+        print(
+            f"log cleanup: removed={log_cleanup.removed} retained={log_cleanup.retained} "
+            f"kept={_format_bytes(log_cleanup.bytes_retained)} failed={log_cleanup.failed}"
+        )
+        for warning in log_cleanup.warnings:
             print(f"warning: {warning}", file=sys.stderr)
     if not reservations:
         print("No jobs.")
-        return 2 if cleanup is not None and cleanup.failed else 0
+        return 2 if any(item is not None and item.failed for item in (spec_cleanup, log_cleanup)) else 0
     print("#  ID       State        GPU       Start                  Command")
     for index, reservation in enumerate(reservations, 1):
         job = reservation["job"]
@@ -638,7 +658,7 @@ def _jobs_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         )
         if job.get("message"):
             print(f"   note: {_clip_text(str(job['message']), 88)}")
-    return 2 if cleanup is not None and cleanup.failed else 0
+    return 2 if any(item is not None and item.failed for item in (spec_cleanup, log_cleanup)) else 0
 
 
 def _job_log_command(argv: List[str], config: Config, store: LedgerStore) -> int:
@@ -651,14 +671,20 @@ def _job_log_command(argv: List[str], config: Config, store: LedgerStore) -> int
         raise BookingError("you have no jobs")
     token = args.reservation_id or input("job number or short id: ").strip()
     reservation = _resolve_job_reservation(reservations, token)
-    path = job_log_path(config, str(reservation["id"]))
-    if not path.exists():
-        print(f"job log not created yet: {path}")
+    paths = job_log_paths(config, str(reservation["id"]))
+    if not paths:
+        reason = (
+            f"removed by the {config.job_log_retention_days}-day retention policy"
+            if config.job_log_retention_days
+            else "removed manually"
+        )
+        print(f"job log unavailable: it has not been created or was {reason}")
         return 0
-    fd = open_existing_regular(path)
-    with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as fh:
-        while chunk := fh.read(64 * 1024):
-            sys.stdout.write(chunk)
+    for path in paths:
+        fd = open_existing_regular(path)
+        with os.fdopen(fd, "r", encoding="utf-8", errors="replace") as fh:
+            while chunk := fh.read(64 * 1024):
+                sys.stdout.write(chunk)
     return 0
 
 
@@ -1870,6 +1896,16 @@ def _format_memory_mb(value: Optional[int]) -> str:
     return f"{value}MiB"
 
 
+def _format_bytes(value: int) -> str:
+    if value >= 1024**3:
+        return f"{value / 1024**3:.1f}GiB"
+    if value >= 1024**2:
+        return f"{value / 1024**2:.1f}MiB"
+    if value >= 1024:
+        return f"{value / 1024:.1f}KiB"
+    return f"{value}B"
+
+
 def _current_actor() -> Actor:
     return current_actor()
 
@@ -1992,7 +2028,7 @@ MANAGE
 JOBS AND USAGE
   bk w                            run this UID's due jobs
   bk j / bk jl ID / bk jr ID     list, inspect, or retry jobs
-  bk j --cleanup                  prune terminal private command specs
+  bk j --cleanup                  prune private job files by policy
   bk m [--once]                  monitor GPU processes
   bk u / bk u users --since 30d  own or all-user summaries
   bk u events / bk u samples     audit events or time series
@@ -2044,7 +2080,7 @@ def _print_shell_help() -> None:
   u storage                 inspect tiers, retention, and migration
   w | worker                execute only this UID's due jobs
   j | jobs                  list scheduled job states
-  j --cleanup               prune terminal private command specs
+  j --cleanup               prune private job files by policy
   jl <number|short_id>      show a job log
   jr <number|short_id>      retry a failed job
   agent context             emit stable allocation context JSON

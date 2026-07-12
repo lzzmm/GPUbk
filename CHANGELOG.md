@@ -26,6 +26,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Keep plain `bk doctor` strictly read-only: do not recover pending transactions or follow unsafe managed paths, and report malformed records and backup fallback as structured issues.
 - Preserve subsecond precision before aligning relative and queued future starts, preventing `--at +30m` from starting fractionally early at an exact slot boundary.
 - Add UID-local scheduled-command lifecycle cleanup across CLI, TUI, Agent, MCP, and workers, while retaining runnable/retryable specs and protecting concurrent submissions with a 24-hour orphan grace period.
+- Bound direct scheduled-job output with rolling private logs, age and per-UID quotas, process-group tracking, and explicit CLI/MCP cleanup reports.
 
 ## 0.1.0 - 2026-07-12
 

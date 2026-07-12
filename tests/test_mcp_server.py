@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from bk.config import Config
+from bk.joblogs import job_log_path, rotated_job_log_path
 from bk.mcp_server import BkMcpBackend, _read_tail
 from bk.models import Actor, BookingError, BookingRequest
 from bk.scheduler import add_booking
@@ -108,6 +109,9 @@ class McpBackendTests(unittest.TestCase):
         cleanup = self.backend.cleanup_private_job_specs()
         self.assertEqual(cleanup["kind"], "job-spec-cleanup")
         self.assertEqual(cleanup["private_job_cleanup"]["failed"], 0)
+        log_cleanup = self.backend.cleanup_private_job_logs()
+        self.assertEqual(log_cleanup["kind"], "job-log-cleanup")
+        self.assertEqual(log_cleanup["private_job_log_cleanup"]["failed"], 0)
 
     def test_cancel_tool_cannot_target_another_uid(self):
         other = add_booking(
@@ -134,6 +138,28 @@ class McpBackendTests(unittest.TestCase):
 
         self.assertEqual(result, "测" * 8 + "-end")
         self.assertEqual(len(result), 12)
+
+    def test_job_log_api_reads_rolling_segments_in_order(self):
+        created = self.backend.book(
+            1,
+            "30m",
+            "mcp-log-segments",
+            command=["python", "-c", "print('ok')"],
+            working_directory=self.tmp.name,
+        )
+        reservation_id = created["reservation"]["id"]
+        current = job_log_path(self.config, reservation_id)
+        rotated = rotated_job_log_path(current)
+        rotated.write_text("older-", encoding="utf-8")
+        current.write_text("newest", encoding="utf-8")
+        rotated.chmod(0o600)
+        current.chmod(0o600)
+
+        result = self.backend.read_job_log(created["reservation"]["short_id"], 13)
+
+        self.assertTrue(result["available"])
+        self.assertEqual(result["segments"], 2)
+        self.assertEqual(result["text"], "older-newest")
 
     def test_job_log_tail_rejects_symbolic_link(self):
         target = Path(self.tmp.name) / "target.log"

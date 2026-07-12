@@ -77,11 +77,16 @@ class AgentServiceTests(unittest.TestCase):
         self.assertTrue(context["capabilities"]["scheduled_job_live_guard"])
         self.assertTrue(context["capabilities"]["weighted_shared_capacity"])
         self.assertTrue(context["capabilities"]["private_job_spec_cleanup"])
+        self.assertTrue(context["capabilities"]["bounded_private_job_logs"])
+        self.assertTrue(context["capabilities"]["private_job_log_cleanup"])
         self.assertEqual(
             context["capabilities"]["private_job_spec_orphan_grace_seconds"],
             24 * 60 * 60,
         )
         self.assertEqual(context["policy"]["shared_capacity_units_per_gpu"], 2)
+        self.assertEqual(context["policy"]["job_log_retention_days"], 30)
+        self.assertEqual(context["policy"]["job_log_max_mb"], 64)
+        self.assertEqual(context["policy"]["job_log_total_max_mb"], 4096)
         self.assertNotIn("secret", str(context))
 
     def test_recommendation_is_read_only_and_prefers_live_idle_gpu(self):

@@ -173,7 +173,6 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
                 "exit_code": None,
                 "runner_pid": None,
                 "runner_host": None,
-                "log_path": None,
             }
         ledger["reservations"].append(reservation)
         log = _log_item(request.actor, "add", reservation, "ok", "queued" if queued else "created")
