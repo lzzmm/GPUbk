@@ -277,6 +277,8 @@ History is stored in checksummed daily partitions with 1-minute, 5-minute,
 10-minute, hourly, and daily levels. The public `gpubk.usage.v1` query model is
 available through Python, JSON CLI, and MCP; visualizers should not parse storage
 files. See [Telemetry](https://github.com/lzzmm/gpubk/blob/main/TELEMETRY.md).
+`usage_load_window_minutes` controls how much recent device history is retained
+and considered by automatic GPU placement.
 
 The monitor also has a user service:
 

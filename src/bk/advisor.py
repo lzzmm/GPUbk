@@ -70,7 +70,12 @@ def build_gpu_advice(
             config.dir_mode,
         ).load_load_history()
     live = assess_gpu_live_states(devices, config.gpu_count)
-    historical = historical_gpu_loads(history, config.gpu_count, generated_at)
+    historical = historical_gpu_loads(
+        history,
+        config.gpu_count,
+        generated_at,
+        window_minutes=config.usage_load_window_minutes,
+    )
     scores = combined_gpu_scores(live, historical)
     return GpuAdvice(
         generated_at=generated_at,

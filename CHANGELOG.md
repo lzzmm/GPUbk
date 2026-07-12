@@ -6,6 +6,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 - Separate trusted `BK_CONFIG_FILE` from the group-writable ledger, pin and validate its complete directory chain, and capture the canonical path in generated services.
 - Make monitor sampling and rollup cadence configurable with validated timing relationships, CLI overrides, and Agent-visible effective policy.
+- Apply the configured scheduling-load window to historical placement scores instead of silently truncating prediction input to 30 minutes.
 - Fail closed with an actionable installer upgrade message when an old Debian/Ubuntu pip ignores the required isolated setuptools and would otherwise build an unusable `UNKNOWN` source package.
 - Validate configuration with a versioned closed schema, bounded finite values, typo hints, and a read-only redacted `bk config` report that detects ledger-policy drift.
 - Make booking granularity configurable through policy-bound `slot_minutes`/`BK_SLOT_MINUTES`, with consistent scheduler, CLI, TUI, Agent, and MCP behavior while retaining a 5-minute default.

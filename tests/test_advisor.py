@@ -74,6 +74,57 @@ class GpuAdvisorTests(unittest.TestCase):
         self.assertEqual(advice.order[:2], [2, 1])
         self.assertGreater(advice.historical_loads[0].predicted_percent, 80)
 
+    def test_prediction_window_uses_configured_load_retention(self):
+        snapshots = [
+            GpuSnapshot(
+                0,
+                "sim",
+                memory_total_mb=24000,
+                utilization_percent=0,
+                source="simulation",
+            )
+        ]
+        history = {
+            "version": 1,
+            "gpus": {
+                "0": [
+                    {
+                        "window_end": to_iso(self.now - timedelta(minutes=60)),
+                        "known_samples": 30,
+                        "avg_utilization_percent": 90,
+                        "avg_memory_percent": 80,
+                        "busy_fraction": 1,
+                    }
+                ]
+            },
+        }
+        short_window = Config(
+            data_dir=self.config.data_dir,
+            gpu_count=1,
+            usage_load_window_minutes=30,
+        )
+        long_window = Config(
+            data_dir=self.config.data_dir,
+            gpu_count=1,
+            usage_load_window_minutes=120,
+        )
+
+        short_advice = build_gpu_advice(
+            short_window,
+            snapshots=snapshots,
+            history=history,
+            at=self.now,
+        )
+        long_advice = build_gpu_advice(
+            long_window,
+            snapshots=snapshots,
+            history=history,
+            at=self.now,
+        )
+
+        self.assertEqual(short_advice.historical_loads[0].sample_count, 0)
+        self.assertEqual(long_advice.historical_loads[0].sample_count, 30)
+
 
 if __name__ == "__main__":
     unittest.main()

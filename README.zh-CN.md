@@ -247,6 +247,7 @@ NVML 只初始化一次，并复用设备句柄。监测器保存有限长度的
 历史数据按天分区并带校验和，提供 1 分钟、5 分钟、10 分钟、小时和每日层级。
 Python、JSON CLI 和 MCP 统一返回 `gpubk.usage.v1` 公共模型；可视化程序不应
 直接解析内部文件。完整说明见 [Telemetry](TELEMETRY.md)。
+`usage_load_window_minutes` 同时控制自动选卡保留并纳入判断的近期设备历史长度。
 
 监测器也提供用户服务：
 
