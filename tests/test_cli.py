@@ -69,7 +69,9 @@ class CliTests(unittest.TestCase):
     def test_diagnostic_entrypoints_do_not_require_a_valid_shared_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
-            (data_dir / "config.json").write_text("{broken", encoding="utf-8")
+            config_path = data_dir / "config.json"
+            config_path.write_text("{broken", encoding="utf-8")
+            config_path.chmod(0o600)
             skill_dir = data_dir / "installed-skill"
 
             version = self.run_bk(["--version"], data_dir)
