@@ -206,6 +206,11 @@ class UsageQueryService:
                 "json_cli": "bk usage ... --json",
                 "mcp": "get_my_gpu_usage",
             },
+            "writer_policy": {
+                "configured_uid": self.config.monitor_uid,
+                "role_required": bool(self.config.dir_mode & 0o022),
+                "root_owned_config_required": bool(self.config.dir_mode & 0o022),
+            },
             "durability": {
                 "single_writer_lock": True,
                 "append_batch_rollback": True,

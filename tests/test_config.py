@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -41,6 +42,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.monitor_interval_seconds, 2.0)
             self.assertEqual(config.monitor_rollup_seconds, 60)
             self.assertEqual(config.tui_refresh_seconds, 1.0)
+            self.assertIsNone(config.monitor_uid)
+            self.assertIsNone(config.config_owner_uid)
 
     def test_gpu_count_is_auto_detected_when_not_configured(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -145,14 +148,25 @@ class ConfigTests(unittest.TestCase):
             config_dir.mkdir(mode=0o700)
             config_path = config_dir / "config.json"
             config_path.write_text(
-                json.dumps({"config_version": 1, "gpu_count": 3, "slot_minutes": 10}),
+                json.dumps(
+                    {
+                        "config_version": 1,
+                        "gpu_count": 3,
+                        "slot_minutes": 10,
+                        "monitor_uid": 1234,
+                    }
+                ),
                 encoding="utf-8",
             )
             config_path.chmod(0o600)
 
             with mock.patch.dict(
                 "os.environ",
-                {"BK_DATA_DIR": str(data_dir), "BK_CONFIG_FILE": str(config_path)},
+                {
+                    "BK_DATA_DIR": str(data_dir),
+                    "BK_CONFIG_FILE": str(config_path),
+                    "BK_MONITOR_UID": "9999",
+                },
                 clear=True,
             ):
                 config = load_config()
@@ -162,6 +176,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.config_path, config_path.resolve())
             self.assertEqual(config.gpu_count, 3)
             self.assertEqual(config.slot_minutes, 10)
+            self.assertEqual(config.monitor_uid, 1234)
+            self.assertEqual(config.config_owner_uid, os.getuid())
 
     def test_explicit_config_file_must_exist(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -376,6 +392,16 @@ class ConfigTests(unittest.TestCase):
                     clear=True,
                 ):
                     with self.assertRaisesRegex(ValueError, message):
+                        load_config()
+
+    def test_monitor_uid_rejects_boolean_negative_and_oversized_values(self):
+        for value in (True, -1, 2**32 - 1):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "config.json"
+                path.write_text(json.dumps({"monitor_uid": value}), encoding="utf-8")
+                path.chmod(0o600)
+                with mock.patch.dict("os.environ", {"BK_DATA_DIR": tmp}, clear=True):
+                    with self.assertRaisesRegex(ValueError, "monitor_uid"):
                         load_config()
 
     def test_file_mode_rejects_executable_bits(self):

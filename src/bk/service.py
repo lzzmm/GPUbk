@@ -323,6 +323,7 @@ def build_agent_context(
             "monitoring": {
                 "sample_interval_seconds": config.monitor_interval_seconds,
                 "rollup_seconds": config.monitor_rollup_seconds,
+                "writer_uid": config.monitor_uid,
             },
         },
         "gpu_advice": gpu_advice.as_dict(),

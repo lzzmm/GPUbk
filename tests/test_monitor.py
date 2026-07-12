@@ -7,7 +7,15 @@ from unittest import mock
 
 from bk.config import Config
 from bk.gpu import GpuProcessSnapshot, GpuSnapshot
-from bk.monitor import UsageAuditStore, UsageMonitor, _proc_parent_pid
+from bk.monitor import (
+    MonitorAuthorizationError,
+    UsageAuditStore,
+    UsageMonitor,
+    _proc_parent_pid,
+    authorize_monitor,
+    monitor_configuration_error,
+    run_monitor,
+)
 from bk.storage import LedgerStore
 
 
@@ -94,6 +102,66 @@ class UsageMonitorTests(unittest.TestCase):
                     interval_seconds=7,
                     rollup_seconds=60,
                 )
+
+    def test_shared_monitor_requires_root_owned_config_and_assigned_uid(self):
+        data_dir = Path("/tmp/bk-shared-monitor-policy")
+        missing_path = Config(data_dir=data_dir, dir_mode=0o2770, file_mode=0o660)
+        user_owned = Config(
+            data_dir=data_dir,
+            dir_mode=0o2770,
+            file_mode=0o660,
+            config_file=Path("/tmp/config.json"),
+            config_owner_uid=1001,
+            monitor_uid=1001,
+        )
+        missing_uid = Config(
+            data_dir=data_dir,
+            dir_mode=0o2770,
+            file_mode=0o660,
+            config_file=Path("/etc/gpubk/config.json"),
+            config_owner_uid=0,
+        )
+        configured = Config(
+            data_dir=data_dir,
+            dir_mode=0o2770,
+            file_mode=0o660,
+            config_file=Path("/etc/gpubk/config.json"),
+            config_owner_uid=0,
+            monitor_uid=1001,
+        )
+
+        self.assertIn("explicit BK_CONFIG_FILE", monitor_configuration_error(missing_path))
+        self.assertIn("root-owned", monitor_configuration_error(user_owned))
+        self.assertIn("monitor_uid", monitor_configuration_error(missing_uid))
+        self.assertIsNone(monitor_configuration_error(configured))
+        self.assertEqual(authorize_monitor(configured, uid=1001), 1001)
+        with self.assertRaisesRegex(MonitorAuthorizationError, "current UID is 1002"):
+            authorize_monitor(configured, uid=1002)
+
+    def test_private_monitor_remains_available_without_role_configuration(self):
+        config = Config(data_dir=Path("/tmp/bk-private-monitor-policy"))
+
+        self.assertIsNone(monitor_configuration_error(config))
+        self.assertEqual(authorize_monitor(config, uid=1234), 1234)
+
+    def test_shared_monitor_rejects_policy_before_creating_storage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "absent"
+            config = Config(
+                data_dir=data_dir,
+                dir_mode=0o2770,
+                file_mode=0o660,
+            )
+            store = LedgerStore(
+                data_dir,
+                file_mode=config.file_mode,
+                dir_mode=config.dir_mode,
+            )
+
+            with self.assertRaisesRegex(MonitorAuthorizationError, "explicit BK_CONFIG_FILE"):
+                run_monitor(config, store, once=True)
+
+            self.assertFalse(data_dir.exists())
 
     def test_event_append_rejects_symbolic_link_without_touching_target(self):
         with tempfile.TemporaryDirectory() as tmp:

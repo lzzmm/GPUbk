@@ -9,6 +9,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Apply the configured scheduling-load window to historical placement scores instead of silently truncating prediction input to 30 minutes.
 - Drive curses polling and every TUI refresh label from configurable `tui_refresh_seconds` while retaining the one-second default.
 - Remove hard-coded monitor timing flags from the bundled systemd unit so services honor the trusted runtime configuration on every start.
+- Require a root-owned shared-server configuration and matching file-only `monitor_uid` before monitor startup, service installation, or applied telemetry maintenance/migration, with doctor and Agent visibility.
 - Fail closed with an actionable installer upgrade message when an old Debian/Ubuntu pip ignores the required isolated setuptools and would otherwise build an unusable `UNKNOWN` source package.
 - Validate configuration with a versioned closed schema, bounded finite values, typo hints, and a read-only redacted `bk config` report that detects ledger-policy drift.
 - Make booking granularity configurable through policy-bound `slot_minutes`/`BK_SLOT_MINUTES`, with consistent scheduler, CLI, TUI, Agent, and MCP behavior while retaining a 5-minute default.

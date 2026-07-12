@@ -261,7 +261,8 @@ systemctl --user enable --now bk-monitor.service
 ```
 
 共享服务器只能运行一个受信任的 monitor 写入者，不能每个用户各启一个；每位用户的
-worker 仍然相互独立。上述用户 monitor 服务适合私人服务器或管理员指定的唯一账号。
+worker 仍然相互独立。上述用户 monitor 服务适合私人服务器，或 `monitor_uid` 指定的
+唯一账号。
 生成的 unit 会固化共享数据目录和显式可信配置路径；服务每次启动都会从该配置重新读取
 采样与聚合周期。第二个 monitor 会以状态码 75 快速退出，systemd 不会循环重启这个
 重复实例。
@@ -339,6 +340,7 @@ export BK_CONFIG_FILE=/etc/gpubk/config.json
   "worker_live_guard": true,
   "monitor_interval_seconds": 2,
   "monitor_rollup_seconds": 60,
+  "monitor_uid": 1001,
   "tui_refresh_seconds": 1,
   "file_mode": "0660",
   "dir_mode": "2770"
@@ -350,11 +352,17 @@ sudo chown root:root /etc/gpubk/config.json
 sudo chmod 0644 /etc/gpubk/config.json
 ```
 
-配置文件及其每一级目录必须由 root 或当前 UID 所有，并且不可被 group/other 写入。
+请用 `id -u <monitor账号>` 的结果替换 `1001`。配置文件及其每一级目录必须由 root
+或当前 UID 所有，并且不可被 group/other 写入。
 即使文件自身是 root 所有的 `0644`，只要它位于 `/data2/shared/bk` 这种组可写目录中，
 目录成员仍能通过 rename 替换它。GPUbk 会按文件描述符逐级固定并验证配置路径，拒绝
 这种部署。单用户安装继续兼容 `$BK_DATA_DIR/config.json` 默认路径；只有选择独立配置
 时才需要 `BK_CONFIG_FILE`。
+
+向组可写目录写入遥测的 monitor 会执行更严格的检查：必须显式使用 root-owned
+`BK_CONFIG_FILE`，配置 `monitor_uid`，且进程 UID 必须完全一致。退出码 `77` 表示当前
+进程不是指定写入者。实际执行遥测维护和迁移也要求同一角色，dry-run 仍可由普通用户
+查看。单用户私有目录不要求配置该角色。
 
 `max_shared_users` 为兼容旧配置保留，现表示每张 GPU 的 shared 容量单位数；
 旧预约没有 `share_units` 字段时按 1 单位读取。
@@ -371,7 +379,8 @@ bk config
 bk config --json
 ```
 
-环境变量覆盖文件值，单次命令参数再覆盖对应默认值。新配置应声明
+环境变量可覆盖普通文件值，单次命令参数再覆盖对应默认值。安全角色 `monitor_uid`
+只能来自配置文件，不能用环境变量替换。新配置应声明
 `"config_version": 1`，旧的无版本配置仍可兼容读取。未知字段、错误类型、NaN/Infinity、
 不安全路径和越界数值会直接报错，不再静默忽略。JSON 报告只列出当前生效的环境变量名，
 不会输出外部分配器命令内容。

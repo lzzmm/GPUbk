@@ -294,11 +294,11 @@ systemctl --user enable --now bk-monitor.service
 
 Run exactly one trusted monitor writer on a shared server. Per-user workers are
 still separate. The monitor service above is intended for a private server or
-for the one account selected by the administrator. Its generated unit captures
-the absolute shared data directory and explicit trusted config path. Sampling
-and rollup values are reloaded from that config whenever the service starts. A
-second monitor fails with exit status 75; systemd does not restart that duplicate
-instance in a loop.
+for the account whose numeric UID is selected by `monitor_uid`. Its generated
+unit captures the absolute shared data directory and explicit trusted config
+path. Sampling and rollup values are reloaded from that config whenever the
+service starts. A second monitor fails with exit status 75; systemd does not
+restart that duplicate instance in a loop.
 
 ## Agents and MCP
 
@@ -376,6 +376,7 @@ group-writable ledger directory:
   "worker_live_guard": true,
   "monitor_interval_seconds": 2,
   "monitor_rollup_seconds": 60,
+  "monitor_uid": 1001,
   "tui_refresh_seconds": 1,
   "file_mode": "0660",
   "dir_mode": "2770"
@@ -387,14 +388,22 @@ sudo chown root:root /etc/gpubk/config.json
 sudo chmod 0644 /etc/gpubk/config.json
 ```
 
-The configuration file and every directory that contains it must be owned by
-root or the current UID and must not be writable by group or other users. A
+Replace `1001` with `id -u <monitor-account>`. The configuration file and every
+directory that contains it must be owned by root or the current UID and must
+not be writable by group or other users. A
 root-owned file inside `/data2/shared/bk` is still replaceable by members who
 can write that directory, regardless of the file's `0644` mode. GPUbk therefore
 opens the configured parent chain and file by descriptor and rejects that layout.
 For a single-user installation, the backward-compatible default remains
 `$BK_DATA_DIR/config.json`; `BK_CONFIG_FILE` is required only when selecting a
 separate file.
+
+A monitor writing to a group-writable data directory has stricter checks: it
+requires an explicit root-owned `BK_CONFIG_FILE`, a configured `monitor_uid`,
+and an exact match with the process UID. Exit status `77` means the process is
+not the configured writer. Single-user private directories do not require this
+role setting. Applied usage maintenance and migration use the same role; their
+dry-run forms stay available to ordinary users.
 
 `max_shared_users` is retained as the compatible configuration name; it now
 defines whole shared capacity units per GPU. Old reservations without a
@@ -413,8 +422,10 @@ bk config
 bk config --json
 ```
 
-Environment variables override file values, and a command flag overrides the
-corresponding default for that invocation. New files should declare
+Environment variables override ordinary file values, and a command flag
+overrides the corresponding default for that invocation. Security role
+`monitor_uid` is file-only and cannot be replaced by an environment variable.
+New files should declare
 `"config_version": 1`; unversioned files remain readable for compatibility.
 Unknown keys, wrong types, non-finite numbers, unsafe paths, and excessive
 values are rejected instead of ignored. The JSON report lists active override

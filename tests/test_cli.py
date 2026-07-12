@@ -185,7 +185,9 @@ class CliTests(unittest.TestCase):
             self.assertFalse(data_dir.exists())
             payload = json.loads(result.stdout)
             self.assertEqual(payload["config_file"]["path"], str(config_path.resolve()))
+            self.assertEqual(payload["config_file"]["owner_uid"], os.getuid())
             self.assertEqual(payload["effective"]["config_file"], str(config_path.resolve()))
+            self.assertIsNone(payload["effective"]["monitor_uid"])
             self.assertIn("BK_CONFIG_FILE", payload["environment_overrides"])
 
     def test_plain_interactive_shell_can_create_booking(self):
@@ -1487,6 +1489,82 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("--interval", unit)
             self.assertNotIn("--rollup", unit)
             self.assertIn(f"captured config file: {config_path.resolve()}", installed.stdout)
+
+    def test_shared_monitor_policy_fails_before_runtime_or_service_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "absent-data"
+            units = root / "absent-units"
+            environment = {"BK_FILE_MODE": "0660", "BK_DIR_MODE": "2770"}
+
+            monitor = self.run_bk(["monitor", "--once"], data_dir, environment)
+            service = self.run_bk(
+                ["service", "install", "monitor", "--target-dir", str(units)],
+                data_dir,
+                environment,
+            )
+            maintenance_dry_run = self.run_bk(
+                ["usage", "maintain", "--json"],
+                data_dir,
+                environment,
+            )
+            maintenance = self.run_bk(
+                ["usage", "maintain", "--yes"],
+                data_dir,
+                environment,
+            )
+            migration = self.run_bk(
+                ["usage", "migrate", "--yes"],
+                data_dir,
+                environment,
+            )
+            doctor = self.run_bk(
+                ["doctor", "--json", "--strict"],
+                data_dir,
+                environment,
+            )
+
+            self.assertEqual(monitor.returncode, 77)
+            self.assertIn("explicit BK_CONFIG_FILE", monitor.stderr)
+            self.assertEqual(service.returncode, 77)
+            self.assertIn("explicit BK_CONFIG_FILE", service.stderr)
+            self.assertEqual(maintenance_dry_run.returncode, 0, maintenance_dry_run.stderr)
+            self.assertEqual(maintenance.returncode, 77)
+            self.assertEqual(migration.returncode, 77)
+            self.assertFalse(data_dir.exists())
+            self.assertFalse(units.exists())
+            self.assertEqual(doctor.returncode, 2)
+            doctor_payload = json.loads(doctor.stdout)
+            self.assertIsNone(doctor_payload["monitor_uid"])
+            policy_issues = doctor_payload["policy_issues"]
+            self.assertEqual(policy_issues[0]["type"], "monitor-policy")
+
+    def test_assigned_shared_monitor_can_install_its_user_service(self):
+        from bk.cli import _service_command
+        from bk.config import Config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            units = root / "units"
+            config = Config(
+                data_dir=root / "shared",
+                file_mode=0o660,
+                dir_mode=0o2770,
+                config_file=Path("/etc/gpubk/config.json"),
+                config_owner_uid=0,
+                monitor_uid=os.getuid(),
+            )
+            output = StringIO()
+
+            with redirect_stdout(output):
+                result = _service_command(
+                    ["install", "monitor", "--target-dir", str(units)],
+                    config,
+                )
+
+            self.assertEqual(result, 0)
+            self.assertTrue((units / "bk-monitor.service").is_file())
+            self.assertIn("captured config file: /etc/gpubk/config.json", output.getvalue())
 
     def test_usage_cli_exposes_stable_storage_and_dry_run_maintenance(self):
         with tempfile.TemporaryDirectory() as tmp:

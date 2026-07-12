@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from .config import Config
+from .monitor import authorize_monitor
 from .timeparse import parse_duration_seconds, parse_iso, utc_now
 from .usage_api import UsageQueryService
 from .usage_store import UsageAuditStore, UsageRetentionPolicy
@@ -95,6 +96,7 @@ def _admin_command(action: str, argv: List[str], config: Config) -> int:
         }
     elif action == "maintain":
         if args.yes:
+            authorize_monitor(config)
             with store.lock():
                 report = store.maintain(UsageRetentionPolicy.from_config(config), dry_run=False)
         else:
@@ -102,6 +104,7 @@ def _admin_command(action: str, argv: List[str], config: Config) -> int:
         payload = {"schema_version": "gpubk.usage.v1", "kind": "usage-maintenance", "report": report}
     else:
         if args.yes:
+            authorize_monitor(config)
             with store.lock():
                 report = store.migrate_legacy(dry_run=False)
         else:

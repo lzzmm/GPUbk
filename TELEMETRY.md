@@ -31,6 +31,10 @@ but the value was unavailable. A numeric zero is a measured zero.
 A separate trusted collector can implement `bk.telemetry.TelemetrySink`, or use
 `open_usage_store()` as the reference sink. Exactly one writer must hold
 `store.lock()` for its lifetime. Readers do not take that lock.
+For group-writable deployments, the bundled writer additionally requires a
+root-owned explicit configuration and matching numeric `monitor_uid`.
+Applied `bk u maintain --yes` and `bk u migrate --yes` operations require that
+same UID; their dry-run forms remain read-only.
 
 The bundled monitor samples every 2 seconds and emits 60-second rollups by
 default. `monitor_interval_seconds` and `monitor_rollup_seconds` are versioned
@@ -49,6 +53,10 @@ bk u events --user me --since 7d --json
 bk u capabilities --json
 bk u storage --json
 ```
+
+The capabilities response exposes `writer_policy` so external visualizers and
+administration tools can discover the configured writer UID without parsing
+the private configuration file.
 
 MCP exposes `get_my_gpu_usage` and `bk://usage/me/recent`. Both are bound to the
 MCP process UID and cannot request another UID.

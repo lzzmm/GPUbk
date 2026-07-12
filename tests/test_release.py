@@ -81,7 +81,18 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("UPGRADING.md", chinese)
         self.assertIn("0.1.x to 0.2.x", guide)
         self.assertIn("weighted `--share` capacity", guide)
+        self.assertIn("monitor_uid", guide)
         self.assertIn("Do not run a 0.1 worker", guide)
+
+    def test_bundled_monitor_unit_defers_timing_to_trusted_config(self):
+        unit = (ROOT / "src" / "bk" / "data" / "systemd" / "bk-monitor.service").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("ExecStart=@PYTHON_EXECUTABLE@ -m bk monitor\n", unit)
+        self.assertNotIn("--interval", unit)
+        self.assertNotIn("--rollup", unit)
+        self.assertIn("RestartPreventExitStatus=75 77", unit)
 
     def test_prerelease_targets_a_documented_final_version(self):
         init = (ROOT / "src" / "bk" / "__init__.py").read_text(encoding="utf-8")

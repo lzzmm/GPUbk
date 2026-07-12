@@ -94,7 +94,11 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(context["policy"]["worker_recovery_grace_seconds"], 5.0)
         self.assertEqual(
             context["policy"]["monitoring"],
-            {"sample_interval_seconds": 2.0, "rollup_seconds": 60},
+            {
+                "sample_interval_seconds": 2.0,
+                "rollup_seconds": 60,
+                "writer_uid": None,
+            },
         )
         self.assertEqual(context["policy"]["worker_busy_exit_code"], 75)
         self.assertEqual(context["policy"]["worker_waiting_exit_code"], 3)

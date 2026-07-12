@@ -45,6 +45,12 @@ Supported security boundaries:
 - Trusted configuration can live outside the writable ledger through `BK_CONFIG_FILE`.
   GPUbk canonicalizes its parent, pins every directory component and the leaf by file
   descriptor, rejects replaceable non-sticky directories, and never follows a leaf symlink.
+- A monitor targeting a group-writable data directory requires an explicit root-owned
+  configuration and matching numeric `monitor_uid`. This prevents accidental or
+  misconfigured telemetry writers that still use GPUbk; it does not stop a group member
+  from bypassing GPUbk and modifying group-writable files directly.
+- Applied telemetry maintenance and migration commands use the same writer role; dry-run
+  inspection and public usage queries remain available to ordinary users.
 
 Administrator responsibilities:
 
@@ -58,6 +64,8 @@ Administrator responsibilities:
 - Treat allocator commands as trusted code running with the configuring user's privileges.
 - Run exactly one trusted telemetry writer per server. Do not expose `TelemetrySink` as an
   unauthenticated network write endpoint or allow users to submit records for arbitrary UIDs.
+- Put the selected telemetry account's numeric UID in `monitor_uid`; do not reuse a username
+  as an identity. Exit status 77 is a persistent role/configuration error, not a retry signal.
 - Review generated user units before enabling them. `bk service install` captures absolute data
   and private job-log paths plus an explicit trusted config path; reinstall the unit after
   those paths change.

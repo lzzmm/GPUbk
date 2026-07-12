@@ -7,7 +7,7 @@ Type=simple
 @SERVICE_ENVIRONMENT@
 ExecStart=@PYTHON_EXECUTABLE@ -m bk monitor
 Restart=on-failure
-RestartPreventExitStatus=75
+RestartPreventExitStatus=75 77
 RestartSec=5
 Nice=10
 IOSchedulingClass=idle

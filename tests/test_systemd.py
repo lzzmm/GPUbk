@@ -21,6 +21,7 @@ class BundledSystemdTests(unittest.TestCase):
         self.assertNotIn("--rollup", monitor)
         self.assertIn('Environment="BK_DATA_DIR=/data2/shared/bk"', worker)
         self.assertIn("RestartPreventExitStatus=75", monitor)
+        self.assertIn("RestartPreventExitStatus=75 77", monitor)
         self.assertIn("RestartPreventExitStatus=75", worker)
         self.assertNotIn("EnvironmentFile=", worker)
         self.assertNotIn("@PYTHON_EXECUTABLE@", worker)

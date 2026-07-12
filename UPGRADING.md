@@ -24,6 +24,16 @@ sudo install -m 0644 -o root -g root /data2/shared/bk/config.json \
 export BK_CONFIG_FILE=/etc/gpubk/config.json
 ```
 
+Add the numeric UID of the one telemetry account to that reviewed file before
+starting the 0.2 monitor:
+
+```json
+{"monitor_uid": 1001}
+```
+
+Replace `1001` with `id -u <monitor-account>`. This is required when the
+configured data-directory mode is group-writable.
+
 Confirm `bk config` reports the new canonical path and a matching ledger policy.
 Reinstall monitor and worker units with `--force` so they capture it. GPUbk rejects
 an existing configuration whose directory can be replaced by shared-group members.

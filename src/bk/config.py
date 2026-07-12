@@ -37,6 +37,7 @@ MAX_MONITOR_INTERVAL_SECONDS = 60 * 60
 MAX_MONITOR_ROLLUP_SECONDS = 24 * 60 * 60
 MIN_TUI_REFRESH_SECONDS = 0.1
 MAX_TUI_REFRESH_SECONDS = 60.0
+MAX_UID = 2**32 - 2
 
 CONFIG_ENV_MAP = {
     "gpu_count": "BK_GPU_COUNT",
@@ -77,6 +78,7 @@ CONFIG_FILE_KEYS = frozenset(
         "allocator_command",
         "allocator_timeout_seconds",
         "allocator_weight",
+        "monitor_uid",
     }
 )
 
@@ -118,6 +120,8 @@ class Config:
     monitor_interval_seconds: float = 2.0
     monitor_rollup_seconds: int = 60
     tui_refresh_seconds: float = 1.0
+    monitor_uid: Optional[int] = None
+    config_owner_uid: Optional[int] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "slot_minutes", validate_slot_minutes(self.slot_minutes))
@@ -131,6 +135,16 @@ class Config:
             self,
             "tui_refresh_seconds",
             validate_tui_refresh_seconds(self.tui_refresh_seconds),
+        )
+        object.__setattr__(
+            self,
+            "monitor_uid",
+            validate_optional_uid(self.monitor_uid, "monitor_uid"),
+        )
+        object.__setattr__(
+            self,
+            "config_owner_uid",
+            validate_optional_uid(self.config_owner_uid, "config_owner_uid"),
         )
 
     @property
@@ -206,11 +220,29 @@ def validate_tui_refresh_seconds(value: object) -> float:
     return parsed
 
 
-def _read_config_file(path: Path, *, required: bool = False) -> Dict[str, Any]:
+def validate_optional_uid(value: object, key: str) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f"{key} must be an integer UID or null")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be an integer UID or null") from exc
+    if parsed < 0 or parsed > MAX_UID:
+        raise ValueError(f"{key} must be between 0 and {MAX_UID}")
+    return parsed
+
+
+def _read_config_file(
+    path: Path,
+    *,
+    required: bool = False,
+) -> Tuple[Dict[str, Any], Optional[int]]:
     if not os.path.lexists(path):
         if required:
             raise FileNotFoundError(f"configured BK_CONFIG_FILE does not exist: {path}")
-        return {}
+        return {}, None
     parent_fd = _open_trusted_config_parent(path.parent)
     try:
         fd = open_existing_regular_at(parent_fd, path.name, path)
@@ -218,7 +250,8 @@ def _read_config_file(path: Path, *, required: bool = False) -> Dict[str, Any]:
         os.close(parent_fd)
     try:
         metadata = os.fstat(fd)
-        if metadata.st_uid not in {0, os.getuid()}:
+        config_owner_uid = metadata.st_uid
+        if config_owner_uid not in {0, os.getuid()}:
             raise PermissionError(f"{path} must be owned by root or UID {os.getuid()}")
         if stat.S_IMODE(metadata.st_mode) & 0o022:
             raise PermissionError(f"{path} must not be writable by group or other users")
@@ -234,7 +267,7 @@ def _read_config_file(path: Path, *, required: bool = False) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError(f"{path} must contain a JSON object")
     _validate_config_document(raw, path)
-    return raw
+    return raw, config_owner_uid
 
 
 def _validate_config_document(raw: Dict[str, Any], path: Path) -> None:
@@ -382,7 +415,7 @@ def load_config() -> Config:
         if explicit_config_file
         else data_dir / "config.json"
     )
-    raw = _read_config_file(config_file, required=explicit_config_file)
+    raw, config_owner_uid = _read_config_file(config_file, required=explicit_config_file)
 
     for key, env_name in CONFIG_ENV_MAP.items():
         if env_name in os.environ:
@@ -494,6 +527,8 @@ def load_config() -> Config:
             1.0,
             maximum=MAX_TUI_REFRESH_SECONDS,
         ),
+        monitor_uid=validate_optional_uid(raw.get("monitor_uid"), "monitor_uid"),
+        config_owner_uid=config_owner_uid,
         file_mode=_mode_value(raw, "file_mode", DEFAULT_PRIVATE_FILE_MODE, directory=False),
         dir_mode=_mode_value(raw, "dir_mode", DEFAULT_PRIVATE_DIR_MODE, directory=True),
         allocator_command=allocator_command,

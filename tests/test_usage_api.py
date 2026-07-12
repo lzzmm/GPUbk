@@ -106,6 +106,14 @@ class UsageApiTests(unittest.TestCase):
         self.assertEqual(payload["interfaces"]["writer_protocol"], "bk.telemetry.TelemetrySink")
         self.assertEqual(payload["retention"]["minute_days"], 30)
         self.assertEqual(payload["retention"]["daily_days"], 0)
+        self.assertEqual(
+            payload["writer_policy"],
+            {
+                "configured_uid": None,
+                "role_required": False,
+                "root_owned_config_required": False,
+            },
+        )
         self.assertTrue(payload["durability"]["append_batch_rollback"])
         self.assertTrue(payload["durability"]["interrupted_tail_repair"])
 

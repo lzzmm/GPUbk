@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import signal
 import threading
 import time
@@ -30,10 +31,39 @@ from .workload import describe_workload
 
 SnapshotProvider = Callable[[Config], List[GpuSnapshot]]
 MONITOR_BUSY_EXIT_CODE = 75
+MONITOR_AUTH_EXIT_CODE = 77
 
 
 class MonitorBusyError(BookingError):
     pass
+
+
+class MonitorAuthorizationError(BookingError):
+    pass
+
+
+def monitor_configuration_error(config: Config) -> Optional[str]:
+    if not config.dir_mode & 0o022:
+        return None
+    if config.config_file is None:
+        return "shared monitor requires an explicit BK_CONFIG_FILE"
+    if config.config_owner_uid != 0:
+        return "shared monitor requires a root-owned BK_CONFIG_FILE"
+    if config.monitor_uid is None:
+        return "shared monitor requires monitor_uid in the trusted configuration"
+    return None
+
+
+def authorize_monitor(config: Config, uid: Optional[int] = None) -> int:
+    configuration_error = monitor_configuration_error(config)
+    if configuration_error:
+        raise MonitorAuthorizationError(configuration_error)
+    current_uid = os.getuid() if uid is None else uid
+    if config.monitor_uid is not None and current_uid != config.monitor_uid:
+        raise MonitorAuthorizationError(
+            f"monitor is assigned to UID {config.monitor_uid}; current UID is {current_uid}"
+        )
+    return current_uid
 
 
 @dataclass(frozen=True)
@@ -280,6 +310,7 @@ def run_monitor(
 ) -> int:
     if max_samples is not None and max_samples < 1:
         raise ValueError("--samples must be >= 1")
+    authorize_monitor(config)
     interval_seconds, rollup_seconds = validate_monitor_timing(
         (
             config.monitor_interval_seconds

@@ -18,7 +18,15 @@ from .fileio import open_existing_regular
 from .gpu import snapshot
 from .identity import current_actor
 from .joblogs import WorkerBusyError, JobLogCleanupResult, cleanup_job_logs, job_log_paths
-from .monitor import MONITOR_BUSY_EXIT_CODE, MonitorBusyError, run_monitor
+from .monitor import (
+    MONITOR_AUTH_EXIT_CODE,
+    MONITOR_BUSY_EXIT_CODE,
+    MonitorAuthorizationError,
+    MonitorBusyError,
+    authorize_monitor,
+    monitor_configuration_error,
+    run_monitor,
+)
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, EditRequest
 from .policy import validate_ledger_policy
 from .scheduler import (
@@ -166,6 +174,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     except MonitorBusyError as exc:
         print(f"bk: {exc}", file=sys.stderr)
         return MONITOR_BUSY_EXIT_CODE
+    except MonitorAuthorizationError as exc:
+        print(f"bk: {exc}", file=sys.stderr)
+        return MONITOR_AUTH_EXIT_CODE
     except WorkerBusyError as exc:
         print(f"bk: {exc}", file=sys.stderr)
         return WORKER_BUSY_EXIT_CODE
@@ -927,6 +938,8 @@ def _service_command(argv: List[str], config: Config) -> int:
     if args.action == "show":
         print(unit_text(args.kind, environment=environment), end="")
         return 0
+    if args.kind == "monitor":
+        authorize_monitor(config)
     path = install_user_unit(
         args.kind,
         args.target_dir,
@@ -992,6 +1005,7 @@ def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         "config_file": {
             "path": str(config_path),
             "present": os.path.lexists(config_path),
+            "owner_uid": config.config_owner_uid,
         },
         "environment_overrides": sorted(name for name in environment_names if name in os.environ),
         "effective": _effective_config(config),
@@ -1033,7 +1047,8 @@ def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         f"live-guard={'on' if effective['worker_live_guard'] else 'off'}"
     )
     print(
-        f"monitor: sample={effective['monitor_interval_seconds']}s "
+        f"monitor: uid={effective['monitor_uid'] if effective['monitor_uid'] is not None else 'local'} "
+        f"sample={effective['monitor_interval_seconds']}s "
         f"rollup={effective['monitor_rollup_seconds']}s"
     )
     print(
@@ -1085,6 +1100,7 @@ def _effective_config(config: Config) -> dict:
         "worker_live_guard": config.worker_live_guard,
         "monitor_interval_seconds": config.monitor_interval_seconds,
         "monitor_rollup_seconds": config.monitor_rollup_seconds,
+        "monitor_uid": config.monitor_uid,
         "tui_refresh_seconds": config.tui_refresh_seconds,
         "file_mode": f"{config.file_mode:04o}",
         "dir_mode": f"{config.dir_mode:04o}",
@@ -1881,6 +1897,14 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             )
 
     issues = []
+    monitor_error = monitor_configuration_error(config)
+    if monitor_error:
+        issues.append(
+            {
+                "type": "monitor-policy",
+                "message": monitor_error,
+            }
+        )
     if ledger_readable:
         try:
             validate_ledger_policy(ledger, config)
@@ -1923,6 +1947,7 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         "data_dir": str(config.data_dir),
         "configured_gpu_count": config.gpu_count,
         "booking_slot_minutes": config.slot_minutes,
+        "monitor_uid": config.monitor_uid,
         "file_mode": f"{config.file_mode:04o}",
         "dir_mode": f"{config.dir_mode:04o}",
         "storage_issues": storage_issues,
