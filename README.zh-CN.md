@@ -152,6 +152,7 @@ bk t
 ```bash
 bk 2 1h30m --mem 12g -- python train.py --config exp.yaml
 bk j                    # 查看任务
+bk j --cleanup          # 检查并清理私有命令文件
 bk w                    # 执行当前用户已经到点的任务
 ```
 
@@ -169,6 +170,12 @@ bk 1 30m -- sh -lc 'python train.py > train.log 2>&1'
 不足时会等待。实时探测不可用时也默认拒绝启动。任务保持 `pending` 并显示原因，常驻
 worker 会在预约窗口内持续重试；`bk worker --once` 有等待任务时返回状态码 `3`。
 只有明确接受兼容性风险时才应设置 `worker_live_guard=false`。
+
+预约取消、任务成功、超时或可重试窗口结束后，私有命令 spec 会被清理。worker 会在
+启动、退出以及持续运行时最多每 5 分钟检查一次。没有台账引用的规范 spec 会保留
+24 小时宽限期，避免与正在提交的预约发生竞争；仍待执行、运行中或可重试的任务不会
+被删除。`bk jobs --cleanup --json` 提供同一清理流程的机器可读结果。私有任务日志会
+保留给用户复盘或自行删除，不会进入共享数据目录。
 
 需要无人值守运行时，每位用户可以安装内置的 systemd user unit：
 
@@ -241,9 +248,9 @@ bk-mcp                       # 等同于 bk mcp
 bk skill install            # 安装 wheel 内置的 Codex Skill
 ```
 
-MCP 提供 context、recommend、create、list、edit、cancel 和私有任务日志工具。
-它只使用 stdio，不监听网络端口；每位用户运行自己的 MCP 进程。工具 schema 标明
-read-only、idempotent、destructive 和 closed-world 属性。
+MCP 提供 context、recommend、create、list、edit、cancel、私有 spec 清理和私有
+任务日志工具。它只使用 stdio，不监听网络端口；每位用户运行自己的 MCP 进程。工具
+schema 标明 read-only、idempotent、destructive 和 closed-world 属性。
 
 管理员还可以通过 `BK_ALLOCATOR_COMMAND` 配置受信任的本地程序。它读取
 `bk.allocator.v1` JSON，并返回 GPU 排序。外部结果只提供建议，最终仍须通过内置的

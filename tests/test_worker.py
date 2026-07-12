@@ -15,6 +15,7 @@ from bk.scheduler import add_booking, cancel_booking
 from bk.storage import LedgerStore
 from bk.timeparse import to_iso, utc_now
 from bk.worker import (
+    cleanup_job_specs,
     claim_due_jobs,
     job_log_path,
     job_spec_path,
@@ -97,6 +98,7 @@ class ScheduledJobTests(unittest.TestCase):
         output = json.loads(log.splitlines()[-1])
         self.assertEqual(output["cuda"], "0")
         self.assertEqual(output["rid"], mine["id"])
+        self.assertFalse(job_spec_path(self.config, mine["job"]["spec_id"]).exists())
 
     def test_live_guard_waits_without_log_spam_then_launches_when_gpu_is_safe(self):
         marker = self.work_dir / "guard-launched"
@@ -193,6 +195,7 @@ class ScheduledJobTests(unittest.TestCase):
         self.assertEqual(summary.failed, 1)
         self.assertEqual(stored["job"]["status"], "failed")
         self.assertFalse(marker.exists())
+        self.assertTrue(job_spec_path(self.config, reservation["job"]["spec_id"]).exists())
 
     def test_cancelled_pending_job_is_never_executed(self):
         marker = self.work_dir / "not-run"
@@ -203,6 +206,7 @@ class ScheduledJobTests(unittest.TestCase):
 
         self.assertEqual(summary.started, 0)
         self.assertFalse(marker.exists())
+        self.assertFalse(job_spec_path(self.config, reservation["job"]["spec_id"]).exists())
 
     def test_running_job_is_terminated_at_reservation_deadline(self):
         reservation = self.booking(command=[sys.executable, "-c", "import time; time.sleep(30)"])
@@ -218,6 +222,7 @@ class ScheduledJobTests(unittest.TestCase):
         stored = next(item for item in self.store.load()["reservations"] if item["id"] == reservation["id"])
         self.assertEqual(summary.failed, 1)
         self.assertEqual(stored["job"]["status"], "timed-out")
+        self.assertFalse(job_spec_path(self.config, reservation["job"]["spec_id"]).exists())
 
     def test_stale_claim_becomes_uncertain_instead_of_running_twice(self):
         reservation = self.booking()
@@ -257,6 +262,87 @@ class ScheduledJobTests(unittest.TestCase):
             accept_duplicate_risk=True,
         )
         self.assertEqual(retried["job"]["status"], "pending")
+        self.assertTrue(job_spec_path(self.config, reservation["job"]["spec_id"]).exists())
+
+    def test_cleanup_defers_fresh_orphans_then_removes_them_after_grace(self):
+        spec = prepare_job_spec(
+            self.config,
+            self.actor,
+            [sys.executable, "-c", "print('orphan')"],
+            str(self.work_dir),
+        )
+        path = job_spec_path(self.config, spec.spec_id)
+
+        deferred = cleanup_job_specs(self.config, self.store, self.actor)
+        removed = cleanup_job_specs(
+            self.config,
+            self.store,
+            self.actor,
+            orphan_grace_seconds=0,
+        )
+
+        self.assertEqual(deferred.deferred_orphans, 1)
+        self.assertEqual(deferred.removed, 0)
+        self.assertEqual(removed.removed, 1)
+        self.assertFalse(path.exists())
+
+    def test_cleanup_reports_missing_active_spec_without_touching_the_ledger(self):
+        reservation = self.booking()
+        path = job_spec_path(self.config, reservation["job"]["spec_id"])
+        path.unlink()
+
+        result = cleanup_job_specs(self.config, self.store, self.actor)
+
+        self.assertEqual(result.failed, 1)
+        self.assertIn("missing", result.warnings[0])
+        stored = next(
+            item for item in self.store.load()["reservations"] if item["id"] == reservation["id"]
+        )
+        self.assertEqual(stored["job"]["status"], "pending")
+
+    def test_cleanup_retains_a_spec_referenced_by_a_malformed_uid(self):
+        spec = prepare_job_spec(
+            self.config,
+            self.actor,
+            [sys.executable, "-c", "print('retain')"],
+            str(self.work_dir),
+        )
+        path = job_spec_path(self.config, spec.spec_id)
+
+        def add_malformed_reference(ledger):
+            ledger["reservations"].append(
+                {
+                    "id": "malformed-uid",
+                    "uid": "not-an-integer",
+                    "job": {"spec_id": spec.spec_id, "status": "succeeded"},
+                }
+            )
+            return ledger, None, [], True
+
+        self.store.transaction(add_malformed_reference)
+
+        result = cleanup_job_specs(
+            self.config,
+            self.store,
+            self.actor,
+            orphan_grace_seconds=0,
+        )
+
+        self.assertEqual(result.failed, 1)
+        self.assertEqual(result.retained, 1)
+        self.assertIn("invalid UID", result.warnings[0])
+        self.assertTrue(path.exists())
+
+    def test_cleanup_rejects_a_symlink_spec_directory(self):
+        self.log_dir.mkdir(mode=0o700)
+        outside = Path(self.tmp.name) / "outside-specs"
+        outside.mkdir()
+        (self.log_dir / "specs").symlink_to(outside, target_is_directory=True)
+
+        with self.assertRaisesRegex(BookingError, "not a directory"):
+            cleanup_job_specs(self.config, self.store, self.actor)
+
+        self.assertEqual(list(outside.iterdir()), [])
 
     def test_job_command_requires_absolute_working_directory(self):
         with self.assertRaisesRegex(BookingError, "must be absolute"):

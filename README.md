@@ -163,6 +163,7 @@ Put the command after `--`:
 ```bash
 bk 2 1h30m --mem 12g -- python train.py --config exp.yaml
 bk j                    # list scheduled jobs
+bk j --cleanup          # inspect and prune private command specs
 bk w                    # run this user's due jobs
 ```
 
@@ -184,6 +185,15 @@ physical VRAM. Missing live telemetry also fails closed. The job remains
 the reservation ends; `bk worker --once` returns `3` when work is waiting.
 `worker_live_guard=false` disables this protection and should only be used for
 an explicitly accepted compatibility case.
+
+Private command specs are removed after cancellation, success, timeout, or an
+expired retry window. The worker checks them at startup, after shutdown, and at
+most every five minutes while running. A spec with no ledger reference gets a
+24-hour grace period so cleanup cannot race a concurrent booking. Failed,
+interrupted, uncertain, pending, claimed, and running jobs keep their specs
+while they can still run or be retried. `bk jobs --cleanup --json` exposes the
+same cleanup as a machine-readable operation. Private job logs are deliberately
+retained for the user to review or remove; they are never placed in shared data.
 
 For unattended jobs, each user can install the bundled systemd user unit:
 
@@ -263,9 +273,9 @@ bk skill install            # installs the bundled Codex Skill
 ```
 
 The MCP server provides context, recommendation, create, list, edit, cancel,
-and private job-log tools. It listens on stdio only; each user runs their own
-process. Tool schemas include read-only, idempotent, destructive, and
-closed-world annotations.
+private-spec cleanup, and private job-log tools. It listens on stdio only; each
+user runs their own process. Tool schemas include read-only, idempotent,
+destructive, and closed-world annotations.
 
 An administrator may also set `BK_ALLOCATOR_COMMAND` to a trusted local program
 that reads `bk.allocator.v1` JSON and returns a GPU ordering. Its output is

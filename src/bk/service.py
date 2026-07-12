@@ -14,6 +14,7 @@ from .scheduler import (
     BOOKING_GRANULARITY_SECONDS,
     MAX_EDIT_OPERATIONS_PER_RESERVATION,
     add_booking,
+    cancel_booking,
     edit_booking,
     find_earliest_slot,
     list_active,
@@ -23,7 +24,13 @@ from .scheduler import (
 from .sharing import normalize_share_units, reservation_share_units, share_text
 from .storage import LedgerStore
 from .timeparse import normalize_queue_start, parse_iso, to_iso, utc_now
-from .worker import delete_job_spec, prepare_job_spec
+from .worker import (
+    JOB_SPEC_ORPHAN_GRACE_SECONDS,
+    JobSpecCleanupResult,
+    cleanup_job_specs,
+    delete_job_spec,
+    prepare_job_spec,
+)
 
 
 AGENT_SCHEMA_VERSION = "bk.agent.v1"
@@ -35,6 +42,12 @@ class BookingSubmission:
     advice: GpuAdvice
     allocator: AllocatorDecision
     share_capacity_units: int
+
+
+@dataclass(frozen=True)
+class CancellationSubmission:
+    reservation: dict
+    cleanup: JobSpecCleanupResult
 
 
 def submit_booking(
@@ -232,6 +245,29 @@ def submit_edit(
     return BookingSubmission(result, gpu_advice, allocator, config.max_shared_users)
 
 
+def submit_cancellation(
+    config: Config,
+    store: LedgerStore,
+    actor: Actor,
+    reservation_id: str,
+) -> CancellationSubmission:
+    reservation = cancel_booking(store, reservation_id, actor)
+    transaction_warning = store.last_warning
+    try:
+        cleanup = cleanup_job_specs(config, store, actor)
+    except (BookingError, OSError, ValueError) as exc:
+        cleanup = JobSpecCleanupResult(
+            failed=1,
+            warnings=(f"private job spec cleanup failed: {exc}",),
+        )
+    warnings = [item for item in (transaction_warning, store.last_warning) if item]
+    if cleanup.failed:
+        detail = cleanup.warnings[0] if cleanup.warnings else "unknown cleanup error"
+        warnings.append(f"{cleanup.failed} private job spec cleanup issue(s): {detail}")
+    store.last_warning = "; ".join(dict.fromkeys(warnings)) or None
+    return CancellationSubmission(reservation, cleanup)
+
+
 def build_agent_context(
     config: Config,
     store: LedgerStore,
@@ -287,6 +323,8 @@ def build_agent_context(
             "scheduled_jobs": True,
             "scheduled_job_live_guard": config.worker_live_guard,
             "private_job_specs": True,
+            "private_job_spec_cleanup": True,
+            "private_job_spec_orphan_grace_seconds": JOB_SPEC_ORPHAN_GRACE_SECONDS,
             "versioned_usage_history": True,
             "usage_api_schema": "gpubk.usage.v1",
             "external_allocator_is_advisory": True,

@@ -25,12 +25,12 @@ from .schedule_index import ReservationIndex
 from .scheduler import (
     add_booking,
     availability_detail,
-    cancel_booking,
     edit_booking,
     find_earliest_slot,
     list_active,
     shared_capacity_units_for_gpu,
 )
+from .service import submit_cancellation
 from .sharing import parse_share_units, reservation_share_units, share_example, share_text
 from .storage import LedgerStore
 from .timeparse import format_local_range, parse_iso, parse_memory_mb, utc_now
@@ -407,7 +407,7 @@ def _handle_key(stdscr, key: int, config: Config, store: LedgerStore, state: Tui
             state.message = "switch to reservations to delete"
             state.error = True
             return
-        _delete_selected(stdscr, store, state)
+        _delete_selected(stdscr, config, store, state)
         return
     if key in (ord("?"), ord("p"), ord("P")):
         if stdscr is None:
@@ -1714,7 +1714,12 @@ def _own_reservation_index(store: LedgerStore, reservation_id: str) -> int:
     return -1
 
 
-def _delete_selected(stdscr, store: LedgerStore, state: TuiState) -> None:
+def _delete_selected(
+    stdscr,
+    config: Config,
+    store: LedgerStore,
+    state: TuiState,
+) -> None:
     mine = _own_reservations(store)
     if not mine:
         state.message = "no reservation to delete"
@@ -1737,9 +1742,13 @@ def _delete_selected(stdscr, store: LedgerStore, state: TuiState) -> None:
         state.message = "delete cancelled"
         state.error = False
         return
-    cancel_booking(store, reservation["id"], _current_actor())
-    state.message = f"deleted {short_id}"
-    state.error = False
+    submit_cancellation(config, store, _current_actor(), reservation["id"])
+    if store.last_warning:
+        state.message = f"deleted {short_id}; warning: {store.last_warning}"
+        state.error = True
+    else:
+        state.message = f"deleted {short_id}"
+        state.error = False
 
 
 def _prompt_fields(stdscr, title: str, fields: Sequence[Tuple[str, str]]) -> Optional[List[str]]:

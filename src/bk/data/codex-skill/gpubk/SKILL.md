@@ -68,8 +68,14 @@ GPUbk sets `CUDA_VISIBLE_DEVICES`; do not add physical GPU IDs to the training c
 - Recommendation exit `3`: no legal exact slot; present `nearest_available` without booking it.
 - `uncertain` job: it may already be running. Check processes and logs before using duplicate-risk retry.
 - `pending` with `launch_guard_state=waiting`: the reservation is active, but a live process or VRAM check blocked launch. Report `message`; do not bypass the guard unless the user explicitly accepts that collision risk.
+- Cancellation results include `private_job_cleanup`; cancellation remains committed when cleanup
+  reports a warning. Surface that warning instead of retrying the destructive operation.
 
-For edits, an explicit `start` is exact and does not move unless `allow_queue=true` was explicitly requested. Keep `bk worker` running for scheduled commands. Use `list_gpu_reservations`, `bk j --json`, or the bounded job-log tool to inspect state.
+For edits, an explicit `start` is exact and does not move unless `allow_queue=true` was explicitly
+requested. Keep `bk worker` running for scheduled commands. Use `list_gpu_reservations`,
+`bk j --json`, or the bounded job-log tool to inspect state. `cleanup_my_job_specs` and
+`bk j --cleanup --json` prune only terminal/expired private command specs; they deliberately retain
+job logs and runnable or retryable specs.
 
 ## Respect Safety Boundaries
 

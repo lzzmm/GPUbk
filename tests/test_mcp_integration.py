@@ -93,6 +93,7 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     "cancel_my_gpu_booking",
                     {"reservation_id": created.structuredContent["reservation"]["short_id"]},
                 )
+                cleanup = await session.call_tool("cleanup_my_job_specs", {})
 
             self.assertEqual(
                 names,
@@ -104,6 +105,7 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     "get_my_gpu_usage",
                     "edit_my_gpu_booking",
                     "cancel_my_gpu_booking",
+                    "cleanup_my_job_specs",
                     "read_my_job_log",
                 },
             )
@@ -120,6 +122,8 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(by_name["edit_my_gpu_booking"].annotations.destructiveHint)
             self.assertTrue(by_name["cancel_my_gpu_booking"].annotations.destructiveHint)
             self.assertFalse(by_name["cancel_my_gpu_booking"].annotations.idempotentHint)
+            self.assertTrue(by_name["cleanup_my_job_specs"].annotations.destructiveHint)
+            self.assertTrue(by_name["cleanup_my_job_specs"].annotations.idempotentHint)
             self.assertTrue(all(tool.annotations.openWorldHint is False for tool in by_name.values()))
             self.assertIn('"schema_version": "bk.agent.v1"', context_resource.contents[0].text)
             self.assertIn('"schema_version": "gpubk.usage.v1"', usage_resource.contents[0].text)
@@ -138,6 +142,7 @@ class McpProtocolIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(edited.structuredContent["status"], "updated")
             self.assertEqual(edit_retried.structuredContent["status"], "exists")
             self.assertEqual(cancelled.structuredContent["reservation"]["status"], "cancelled")
+            self.assertEqual(cleanup.structuredContent["kind"], "job-spec-cleanup")
 
 
 if __name__ == "__main__":

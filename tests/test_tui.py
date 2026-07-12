@@ -11,6 +11,7 @@ from bk.gpu import GpuProcessSnapshot, GpuSnapshot
 from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingRequest
 from bk.schedule_index import ReservationIndex
 from bk.scheduler import add_booking
+from bk.service import submit_cancellation
 from bk.storage import LedgerStore
 from bk.tui import (
     AddPreview,
@@ -410,6 +411,40 @@ class TuiAddPreviewTests(unittest.TestCase):
             self.assertEqual(state.add_selected_gpus, {1})
             preview = _build_add_preview(store.load(), config, state, state.editor_view_start)
             self.assertTrue(preview.blink)
+
+    def test_delete_key_uses_central_cancellation_lifecycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = Config(
+                data_dir=root / "data",
+                gpu_count=2,
+                max_shared_users=2,
+                job_log_dir=root / "private-jobs",
+            )
+            store = LedgerStore(config.data_dir)
+            actor = Actor(uid=os.getuid(), username="current")
+            created = add_booking(
+                store,
+                config,
+                BookingRequest(actor, 1, 30 * 60, self.start, MODE_SHARED, [0]),
+            ).reservation
+            state = TuiState(selected=0, focus=FOCUS_RESERVATIONS)
+
+            with (
+                mock.patch("bk.tui._prompt_line", return_value="yes"),
+                mock.patch(
+                    "bk.tui.submit_cancellation",
+                    wraps=submit_cancellation,
+                ) as submit,
+            ):
+                _handle_key(None, ord("d"), config, store, state)
+
+            submit.assert_called_once_with(config, store, mock.ANY, created["id"])
+            stored = next(
+                item for item in store.load()["reservations"] if item["id"] == created["id"]
+            )
+            self.assertEqual(stored["status"], "cancelled")
+            self.assertIn("deleted", state.message)
 
     def test_add_auto_find_switches_to_an_available_gpu_without_writing(self):
         with tempfile.TemporaryDirectory() as tmp:

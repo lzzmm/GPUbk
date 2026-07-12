@@ -20,7 +20,6 @@ from .identity import current_actor
 from .monitor import MONITOR_BUSY_EXIT_CODE, MonitorBusyError, run_monitor
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, EditRequest
 from .scheduler import (
-    cancel_booking,
     edit_booking,
     find_earliest_slot,
     find_policy_violations,
@@ -42,6 +41,7 @@ from .service import (
     public_reservation,
     recommend_booking,
     submit_booking,
+    submit_cancellation,
     submit_edit,
 )
 from .storage import LedgerStore
@@ -59,7 +59,14 @@ from .tui import run_tui
 from .usage import USAGE_SYSTEM, assess_gpu_live_states, classify_process_usage, summarize_process_command
 from .usage_cli import run_usage_cli
 from .usage_store import UsageAuditStore
-from .worker import WORKER_WAITING_EXIT_CODE, job_log_path, retry_job, run_worker
+from .worker import (
+    JobSpecCleanupResult,
+    WORKER_WAITING_EXIT_CODE,
+    cleanup_job_specs,
+    job_log_path,
+    retry_job,
+    run_worker,
+)
 
 try:
     import readline  # noqa: F401
@@ -103,7 +110,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if head in {"worker", "w"}:
             return _worker_command(argv[1:], config, store)
         if head in {"jobs", "j"}:
-            return _jobs_command(argv[1:], store)
+            return _jobs_command(argv[1:], config, store)
         if head in {"job-log", "jl"}:
             return _job_log_command(argv[1:], config, store)
         if head in {"job-retry", "jr"}:
@@ -130,7 +137,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if head in {"edit", "e"}:
             return _edit_command(argv[1:], config, store)
         if head in {"del", "delete", "d", "rm"}:
-            return _delete_command(argv[1:], store)
+            return _delete_command(argv[1:], config, store)
         if head == "reset":
             return _reset_command(argv[1:], config, store)
         if head in {"log", "lg"}:
@@ -239,7 +246,7 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         _doctor_command(args[1:], config, store)
         return True
     if head in {"del", "delete", "cancel", "d", "rm"}:
-        _delete_command(args[1:], store)
+        _delete_command(args[1:], config, store)
         return True
     if head in {"edit", "e"}:
         _edit_command(args[1:], config, store)
@@ -263,7 +270,7 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         _worker_command(args[1:], config, store)
         return True
     if head in {"jobs", "j"}:
-        _jobs_command(args[1:], store)
+        _jobs_command(args[1:], config, store)
         return True
     if head in {"job-log", "jl"}:
         _job_log_command(args[1:], config, store)
@@ -571,11 +578,25 @@ def _worker_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     return 0
 
 
-def _jobs_command(argv: List[str], store: LedgerStore) -> int:
+def _jobs_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser = argparse.ArgumentParser(prog="bk jobs")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--cleanup",
+        action="store_true",
+        help="remove this UID's terminal, expired, and old orphaned private job specs",
+    )
     args = parser.parse_args(argv)
     actor = _current_actor()
+    cleanup = None
+    if args.cleanup:
+        try:
+            cleanup = cleanup_job_specs(config, store, actor)
+        except (BookingError, OSError, ValueError) as exc:
+            cleanup = JobSpecCleanupResult(
+                failed=1,
+                warnings=(f"private job spec cleanup failed: {exc}",),
+            )
     reservations = _own_job_reservations(store, actor)
     if args.json:
         print(
@@ -583,16 +604,27 @@ def _jobs_command(argv: List[str], store: LedgerStore) -> int:
                 {
                     "schema_version": AGENT_SCHEMA_VERSION,
                     "kind": "jobs",
-                    "jobs": [public_reservation(item, actor) for item in reservations],
+                    "jobs": [
+                        public_reservation(item, actor, config.max_shared_users)
+                        for item in reservations
+                    ],
+                    "private_job_cleanup": cleanup.as_dict() if cleanup is not None else None,
                 },
                 ensure_ascii=False,
                 sort_keys=True,
             )
         )
-        return 0
+        return 2 if cleanup is not None and cleanup.failed else 0
+    if cleanup is not None:
+        print(
+            f"cleanup: removed={cleanup.removed} retained={cleanup.retained} "
+            f"deferred={cleanup.deferred_orphans} failed={cleanup.failed}"
+        )
+        for warning in cleanup.warnings:
+            print(f"warning: {warning}", file=sys.stderr)
     if not reservations:
         print("No jobs.")
-        return 0
+        return 2 if cleanup is not None and cleanup.failed else 0
     print("#  ID       State        GPU       Start                  Command")
     for index, reservation in enumerate(reservations, 1):
         job = reservation["job"]
@@ -606,7 +638,7 @@ def _jobs_command(argv: List[str], store: LedgerStore) -> int:
         )
         if job.get("message"):
             print(f"   note: {_clip_text(str(job['message']), 88)}")
-    return 0
+    return 2 if cleanup is not None and cleanup.failed else 0
 
 
 def _job_log_command(argv: List[str], config: Config, store: LedgerStore) -> int:
@@ -765,13 +797,16 @@ def _agent_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             exit_code = 0
         else:
             reservation_id = _resolve_own_reservation_id(store, args.reservation_id, actor)
-            reservation = cancel_booking(store, reservation_id, actor)
+            cancellation = submit_cancellation(config, store, actor, reservation_id)
+            reservation = cancellation.reservation
             payload = {
                 "schema_version": AGENT_SCHEMA_VERSION,
                 "kind": "cancellation_result",
                 "reservation": public_reservation(
                     reservation, actor, config.max_shared_users
                 ),
+                "private_job_cleanup": cancellation.cleanup.as_dict(),
+                "warning": store.last_warning,
             }
             compact = args.compact
             exit_code = 0
@@ -1210,15 +1245,17 @@ def _duration_detail(seconds: int) -> str:
     return f"{total} ({_duration_compact(seconds)})"
 
 
-def _delete_command(argv: List[str], store: LedgerStore) -> int:
+def _delete_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser = argparse.ArgumentParser(prog="bk del")
     parser.add_argument("reservation_id", nargs="?")
     args = parser.parse_args(argv)
     actor = _current_actor()
     reservation_id = args.reservation_id or _prompt_reservation_token(store, actor, "delete")
     resolved = _resolve_own_reservation_id(store, reservation_id, actor)
-    reservation = cancel_booking(store, resolved, actor)
-    print(f"cancelled: {_short_id(reservation)}")
+    cancellation = submit_cancellation(config, store, actor, resolved)
+    print(f"cancelled: {_short_id(cancellation.reservation)}")
+    if store.last_warning:
+        print(f"warning: {store.last_warning}", file=sys.stderr)
     return 0
 
 
@@ -1955,6 +1992,7 @@ MANAGE
 JOBS AND USAGE
   bk w                            run this UID's due jobs
   bk j / bk jl ID / bk jr ID     list, inspect, or retry jobs
+  bk j --cleanup                  prune terminal private command specs
   bk m [--once]                  monitor GPU processes
   bk u / bk u users --since 30d  own or all-user summaries
   bk u events / bk u samples     audit events or time series
@@ -2006,6 +2044,7 @@ def _print_shell_help() -> None:
   u storage                 inspect tiers, retention, and migration
   w | worker                execute only this UID's due jobs
   j | jobs                  list scheduled job states
+  j --cleanup               prune terminal private command specs
   jl <number|short_id>      show a job log
   jr <number|short_id>      retry a failed job
   agent context             emit stable allocation context JSON

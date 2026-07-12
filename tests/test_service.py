@@ -1,3 +1,5 @@
+import os
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -9,8 +11,16 @@ from bk.config import Config
 from bk.gpu import GpuProcessSnapshot, GpuSnapshot
 from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingRequest
 from bk.scheduler import add_booking
-from bk.service import AGENT_SCHEMA_VERSION, build_agent_context, recommend_booking, submit_booking, submit_edit
+from bk.service import (
+    AGENT_SCHEMA_VERSION,
+    build_agent_context,
+    recommend_booking,
+    submit_booking,
+    submit_cancellation,
+    submit_edit,
+)
 from bk.storage import LedgerStore
+from bk.worker import job_spec_path
 
 
 class AgentServiceTests(unittest.TestCase):
@@ -66,6 +76,11 @@ class AgentServiceTests(unittest.TestCase):
         self.assertTrue(context["capabilities"]["structured_cancel"])
         self.assertTrue(context["capabilities"]["scheduled_job_live_guard"])
         self.assertTrue(context["capabilities"]["weighted_shared_capacity"])
+        self.assertTrue(context["capabilities"]["private_job_spec_cleanup"])
+        self.assertEqual(
+            context["capabilities"]["private_job_spec_orphan_grace_seconds"],
+            24 * 60 * 60,
+        )
         self.assertEqual(context["policy"]["shared_capacity_units_per_gpu"], 2)
         self.assertNotIn("secret", str(context))
 
@@ -165,6 +180,71 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(recommendation["request"]["share_units_per_gpu"], 3)
         self.assertEqual(recommendation["request"]["share_fraction_per_gpu"], "3/4")
         self.assertEqual(submission.result.reservation["share_units"], 3)
+
+    def test_cancellation_removes_the_current_uids_pending_private_job_spec(self):
+        actor = Actor(os.getuid(), "current")
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            job_log_dir=Path(self.tmp.name) / "private-jobs",
+        )
+        submission = submit_booking(
+            config,
+            self.store,
+            actor,
+            count=1,
+            duration_seconds=30 * 60,
+            start_at=self.start,
+            mode=MODE_SHARED,
+            command_argv=[sys.executable, "-c", "print('private')"],
+            working_directory=self.tmp.name,
+            allow_queue=False,
+            advice=self.advice,
+        )
+        reservation = submission.result.reservation
+        path = job_spec_path(config, reservation["job"]["spec_id"])
+
+        cancelled = submit_cancellation(config, self.store, actor, reservation["id"])
+
+        self.assertEqual(cancelled.reservation["status"], "cancelled")
+        self.assertEqual(cancelled.cleanup.removed, 1)
+        self.assertEqual(cancelled.cleanup.failed, 0)
+        self.assertFalse(path.exists())
+
+    def test_cancellation_stays_successful_when_private_cleanup_is_unsafe(self):
+        actor = Actor(os.getuid(), "current")
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            job_log_dir=Path(self.tmp.name) / "private-jobs",
+        )
+        submission = submit_booking(
+            config,
+            self.store,
+            actor,
+            count=1,
+            duration_seconds=30 * 60,
+            start_at=self.start,
+            command_argv=[sys.executable, "-c", "print('private')"],
+            working_directory=self.tmp.name,
+            allow_queue=False,
+            advice=self.advice,
+        )
+        reservation = submission.result.reservation
+        spec_dir = config.job_log_dir / "specs"
+        outside = Path(self.tmp.name) / "outside-specs"
+        spec_dir.rename(outside)
+        spec_dir.symlink_to(outside, target_is_directory=True)
+
+        cancelled = submit_cancellation(config, self.store, actor, reservation["id"])
+
+        self.assertEqual(cancelled.reservation["status"], "cancelled")
+        self.assertEqual(cancelled.cleanup.failed, 1)
+        self.assertIn("not a directory", cancelled.cleanup.warnings[0])
+        self.assertIn("cleanup issue", self.store.last_warning)
+        self.assertEqual(len(list(outside.glob("*.json"))), 1)
 
     def test_context_fails_closed_for_malformed_legacy_share_units(self):
         add_booking(

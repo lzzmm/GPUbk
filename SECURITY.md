@@ -10,6 +10,8 @@ Supported security boundaries:
 - Shared-ledger writes use an advisory lock, WAL journal, atomic replacement, and idempotent audit events.
 - Shared data files reject symbolic links, FIFOs, devices, and other non-regular leaf files before reading or writing.
 - Scheduled command arguments live in UID-owned `0600` specs, not the shared ledger.
+- Terminal and expired private command specs are pruned by the owning UID; unreferenced specs
+  receive a 24-hour race-safety grace period. Private job logs remain user-managed.
 - Scheduled jobs re-check live process authorization and physical VRAM immediately before
   launch; this reduces races but cannot replace kernel device access control.
 - Shared capacity units enforce ledger admission and inferred memory budgets only. They do

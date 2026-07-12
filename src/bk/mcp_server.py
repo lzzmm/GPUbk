@@ -10,7 +10,7 @@ from .config import Config, load_config
 from .fileio import open_existing_regular
 from .identity import current_actor
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError
-from .scheduler import cancel_booking, list_active
+from .scheduler import list_active
 from .sharing import parse_share_units, share_units_for_peer_limit
 from .service import (
     booking_result_payload,
@@ -18,12 +18,13 @@ from .service import (
     public_reservation,
     recommend_booking,
     submit_booking,
+    submit_cancellation,
     submit_edit,
 )
 from .storage import LedgerStore
 from .timeparse import parse_duration_seconds, parse_memory_mb, parse_start, to_iso, utc_now
 from .usage_api import UsageQueryService
-from .worker import job_log_path
+from .worker import JobSpecCleanupResult, cleanup_job_specs, job_log_path
 
 
 class BkMcpBackend:
@@ -227,13 +228,36 @@ class BkMcpBackend:
 
     def cancel(self, reservation_id: str) -> dict:
         reservation = self._resolve_own_active(reservation_id)
-        cancelled = cancel_booking(self.store, str(reservation["id"]), self.actor)
+        cancellation = submit_cancellation(
+            self.config,
+            self.store,
+            self.actor,
+            str(reservation["id"]),
+        )
         return {
             "schema_version": "bk.agent.v1",
             "kind": "cancellation_result",
             "reservation": public_reservation(
-                cancelled, self.actor, self.config.max_shared_users
+                cancellation.reservation,
+                self.actor,
+                self.config.max_shared_users,
             ),
+            "private_job_cleanup": cancellation.cleanup.as_dict(),
+            "warning": self.store.last_warning,
+        }
+
+    def cleanup_private_job_specs(self) -> dict:
+        try:
+            cleanup = cleanup_job_specs(self.config, self.store, self.actor)
+        except (BookingError, OSError, ValueError) as exc:
+            cleanup = JobSpecCleanupResult(
+                failed=1,
+                warnings=(f"private job spec cleanup failed: {exc}",),
+            )
+        return {
+            "schema_version": "bk.agent.v1",
+            "kind": "job-spec-cleanup",
+            "private_job_cleanup": cleanup.as_dict(),
         }
 
     def read_job_log(self, reservation_id: str, max_chars: int = 32000) -> dict:
@@ -313,6 +337,12 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
         readOnlyHint=False,
         destructiveHint=True,
         idempotentHint=False,
+        openWorldHint=False,
+    )
+    idempotent_cleanup = ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
         openWorldHint=False,
     )
 
@@ -421,6 +451,11 @@ def create_mcp_server(backend: Optional[BkMcpBackend] = None):
     def cancel_my_gpu_booking(reservation_id: str) -> dict[str, object]:
         """Cancel only a reservation owned by this MCP process UID; short IDs are accepted when unique."""
         return api.cancel(reservation_id)
+
+    @mcp.tool(annotations=idempotent_cleanup, structured_output=True)
+    def cleanup_my_job_specs() -> dict[str, object]:
+        """Prune only this UID's terminal, expired, or old orphaned private command specs."""
+        return api.cleanup_private_job_specs()
 
     @mcp.tool(annotations=read_only, structured_output=True)
     def read_my_job_log(reservation_id: str, max_chars: int = 32000) -> dict[str, object]:

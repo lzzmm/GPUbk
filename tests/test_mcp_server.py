@@ -98,6 +98,16 @@ class McpBackendTests(unittest.TestCase):
         self.assertEqual(result["status"], "created")
         self.assertNotIn(secret, self.store.ledger_path.read_text(encoding="utf-8"))
         self.assertEqual(result["reservation"]["job"]["summary"], "python -c (+1 args)")
+        self.assertEqual(len(list((self.config.job_log_dir / "specs").glob("*.json"))), 1)
+
+        cancelled = self.backend.cancel(result["reservation"]["short_id"])
+
+        self.assertEqual(cancelled["private_job_cleanup"]["removed"], 1)
+        self.assertEqual(cancelled["private_job_cleanup"]["failed"], 0)
+        self.assertEqual(list((self.config.job_log_dir / "specs").glob("*.json")), [])
+        cleanup = self.backend.cleanup_private_job_specs()
+        self.assertEqual(cleanup["kind"], "job-spec-cleanup")
+        self.assertEqual(cleanup["private_job_cleanup"]["failed"], 0)
 
     def test_cancel_tool_cannot_target_another_uid(self):
         other = add_booking(

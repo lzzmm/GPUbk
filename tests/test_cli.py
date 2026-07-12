@@ -1124,6 +1124,7 @@ class CliTests(unittest.TestCase):
             worker = self.run_bk(["w", "--once", "--quiet", "--poll", "0.1"], data_dir, env)
             jobs = self.run_bk(["j"], data_dir, env)
             log = self.run_bk(["jl", "1"], data_dir, env)
+            cleanup = self.run_bk(["jobs", "--cleanup", "--json"], data_dir, env)
 
             self.assertEqual(create.returncode, 0, create.stderr)
             self.assertIn("job: pending", create.stdout)
@@ -1131,6 +1132,63 @@ class CliTests(unittest.TestCase):
             self.assertEqual(jobs.returncode, 0, jobs.stderr)
             self.assertIn("succeeded", jobs.stdout)
             self.assertIn("CUDA=0", log.stdout)
+            self.assertEqual(cleanup.returncode, 0, cleanup.stderr)
+            self.assertEqual(
+                json.loads(cleanup.stdout)["private_job_cleanup"]["failed"],
+                0,
+            )
+            self.assertEqual(list((log_dir / "specs").glob("*.json")), [])
+
+    def test_cli_cancellation_removes_a_pending_private_job_spec(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            log_dir = root / "job-logs"
+            start = iso(ceil_5m(datetime.now(timezone.utc) + timedelta(days=1)))
+            env = {"BK_JOB_LOG_DIR": str(log_dir)}
+            created = self.run_bk(
+                [
+                    "1",
+                    "30m",
+                    "--start",
+                    start,
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "print('private')",
+                ],
+                data_dir,
+                env,
+            )
+
+            cancelled = self.run_bk(["d", "1"], data_dir, env)
+
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
+            self.assertIn("cancelled:", cancelled.stdout)
+            self.assertEqual(list((log_dir / "specs").glob("*.json")), [])
+
+    def test_jobs_cleanup_keeps_json_contract_for_an_unsafe_private_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            log_dir = root / "job-logs"
+            outside = root / "outside-specs"
+            log_dir.mkdir(mode=0o700)
+            outside.mkdir()
+            (log_dir / "specs").symlink_to(outside, target_is_directory=True)
+
+            result = self.run_bk(
+                ["jobs", "--cleanup", "--json"],
+                data_dir,
+                {"BK_JOB_LOG_DIR": str(log_dir)},
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["private_job_cleanup"]["failed"], 1)
+            self.assertIn("not a directory", payload["private_job_cleanup"]["warnings"][0])
+            self.assertEqual(list(outside.iterdir()), [])
 
     def test_worker_once_returns_waiting_status_when_live_guard_blocks_launch(self):
         with tempfile.TemporaryDirectory() as tmp:
