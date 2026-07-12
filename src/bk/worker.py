@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
-from .config import Config
+from .config import DEFAULT_WORKER_TERMINATION_GRACE_SECONDS, Config
 from .fileio import fsync_directory, open_existing_regular
 from .gpu import GpuSnapshot, snapshot
 from .job_recovery import active_legacy_job_count, recover_abandoned_jobs
@@ -325,6 +325,18 @@ def run_worker(
         "recovered_uncertain": 0,
         "terminated_groups": 0,
     }
+
+    def reconcile(at: datetime) -> None:
+        _reconcile_running(
+            store,
+            actor,
+            running,
+            at,
+            counts,
+            quiet,
+            termination_grace_seconds=config.worker_termination_grace_seconds,
+        )
+
     next_spec_cleanup_at = 0.0
     try:
         previous_handlers = _install_signal_handlers(stop_event)
@@ -342,7 +354,9 @@ def run_worker(
         if not quiet:
             print(
                 f"worker started: uid={actor.uid} poll={poll:g}s "
-                f"parallel={parallel} logs={log_dir}"
+                f"parallel={parallel} "
+                f"stop-grace={config.worker_termination_grace_seconds:g}s "
+                f"logs={log_dir}"
             )
             if recovery.examined:
                 print(
@@ -356,7 +370,7 @@ def run_worker(
                 print(f"warning: {warning}")
         while True:
             now = utc_now()
-            _reconcile_running(store, actor, running, now, counts, quiet)
+            reconcile(now)
             monotonic_now = time.monotonic()
             if monotonic_now >= next_spec_cleanup_at:
                 _cleanup_job_specs_best_effort(config, store, actor, now, quiet)
@@ -364,8 +378,8 @@ def run_worker(
                 next_spec_cleanup_at = monotonic_now + JOB_SPEC_CLEANUP_INTERVAL_SECONDS
 
             if stop_event.is_set():
-                _stop_running_jobs(running)
-                _reconcile_running(store, actor, running, utc_now(), counts, quiet)
+                _stop_running_jobs(running, now)
+                reconcile(utc_now())
                 if not running:
                     break
             else:
@@ -462,14 +476,17 @@ def run_worker(
         try:
             try:
                 if running:
-                    _stop_running_jobs(running)
-                    deadline = time.monotonic() + 5.0
+                    _stop_running_jobs(running, utc_now())
+                    deadline = (
+                        time.monotonic()
+                        + config.worker_termination_grace_seconds
+                    )
                     while running and time.monotonic() < deadline:
-                        _reconcile_running(store, actor, running, utc_now(), counts, quiet)
+                        reconcile(utc_now())
                         time.sleep(0.05)
                     for item in running.values():
                         _kill_process_group(item.process)
-                    _reconcile_running(store, actor, running, utc_now(), counts, quiet)
+                    reconcile(utc_now())
                 _cleanup_job_specs_best_effort(config, store, actor, utc_now(), quiet)
                 _cleanup_job_logs_best_effort(config, store, actor, utc_now(), quiet)
             finally:
@@ -817,7 +834,10 @@ def _start_claimed_job(
         log_pump.start(process.stdout)
     except (OSError, ValueError, BookingError) as exc:
         if process is not None:
-            _terminate_and_reap_process_group(process)
+            _terminate_and_reap_process_group(
+                process,
+                config.worker_termination_grace_seconds,
+            )
         if log_pump is not None:
             try:
                 log_pump.record_event(
@@ -842,11 +862,17 @@ def _start_claimed_job(
     try:
         marked_running = _mark_running(store, actor, reservation_id, claim_token, process.pid)
     except Exception:
-        _terminate_and_reap_process_group(process)
+        _terminate_and_reap_process_group(
+            process,
+            config.worker_termination_grace_seconds,
+        )
         log_pump.finish()
         raise
     if not marked_running:
-        _terminate_and_reap_process_group(process)
+        _terminate_and_reap_process_group(
+            process,
+            config.worker_termination_grace_seconds,
+        )
         log_pump.finish()
         _mark_aborted_claim(store, actor, reservation_id, claim_token)
         return None
@@ -1067,19 +1093,30 @@ def _reconcile_running(
     now: datetime,
     counts: Dict[str, int],
     quiet: bool,
+    *,
+    termination_grace_seconds: float = DEFAULT_WORKER_TERMINATION_GRACE_SECONDS,
 ) -> None:
     if not running:
         return
     ledger = store.load()
     by_id = {str(item.get("id", "")): item for item in ledger.get("reservations", [])}
+    graceful_start = timedelta(seconds=termination_grace_seconds)
     for reservation_id, item in list(running.items()):
         reservation = by_id.get(reservation_id)
-        if item.termination_reason is None:
-            if reservation is None or reservation.get("status") == STATUS_CANCELLED:
+        if reservation is None or reservation.get("status") == STATUS_CANCELLED:
+            if item.termination_reason != "cancelled":
                 _request_termination(item, "cancelled")
-            elif now >= item.end_at:
-                _request_termination(item, "deadline")
-        elif item.termination_requested_at is not None and time.monotonic() - item.termination_requested_at >= 5.0:
+        elif item.termination_reason is None and now >= item.end_at - graceful_start:
+            _request_termination(item, "deadline")
+
+        if item.termination_reason == "deadline":
+            if now >= item.end_at:
+                _kill_process_group(item.process)
+        elif (
+            item.termination_requested_at is not None
+            and time.monotonic() - item.termination_requested_at
+            >= termination_grace_seconds
+        ):
             _kill_process_group(item.process)
 
         exit_code = item.process.poll()
@@ -1173,16 +1210,23 @@ def _public_launch_failure(exc: Exception) -> str:
     return "scheduled command could not be started"
 
 
-def _stop_running_jobs(running: Dict[str, RunningJob]) -> None:
+def _stop_running_jobs(
+    running: Dict[str, RunningJob],
+    now: Optional[datetime] = None,
+) -> None:
+    current = now or utc_now()
     for item in running.values():
-        if item.termination_reason is None:
-            _request_termination(item, "worker-stop")
+        if item.termination_reason == "cancelled":
+            continue
+        reason = "deadline" if current >= item.end_at else "worker-stop"
+        _request_termination(item, reason)
 
 
 def _request_termination(item: RunningJob, reason: str) -> None:
     item.termination_reason = reason
-    item.termination_requested_at = time.monotonic()
-    _terminate_process_group(item.process)
+    if item.termination_requested_at is None:
+        item.termination_requested_at = time.monotonic()
+        _terminate_process_group(item.process)
 
 
 def _terminate_process_group(process: subprocess.Popen) -> None:

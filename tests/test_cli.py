@@ -128,6 +128,7 @@ class CliTests(unittest.TestCase):
                     "BK_GPU_COUNT": "8",
                     "BK_MAX_SHARED_USERS": "4",
                     "BK_WORKER_MAX_PARALLEL": "20",
+                    "BK_WORKER_TERMINATION_GRACE_SECONDS": "7.5",
                     "BK_ALLOCATOR_COMMAND": "allocator --token secret-value",
                 },
             )
@@ -143,6 +144,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["effective"]["tui_refresh_seconds"], 2.5)
             self.assertEqual(payload["effective"]["worker_max_parallel"], 20)
             self.assertEqual(payload["effective"]["worker_effective_max_parallel"], 20)
+            self.assertEqual(
+                payload["effective"]["worker_termination_grace_seconds"],
+                7.5,
+            )
             self.assertTrue(payload["effective"]["allocator_command_configured"])
             self.assertNotIn("secret-value", result.stdout)
             self.assertEqual(payload["ledger_policy"]["status"], "unbound")
@@ -150,6 +155,10 @@ class CliTests(unittest.TestCase):
             self.assertIn("BK_MONITOR_INTERVAL_SECONDS", payload["environment_overrides"])
             self.assertIn("BK_TUI_REFRESH_SECONDS", payload["environment_overrides"])
             self.assertIn("BK_WORKER_MAX_PARALLEL", payload["environment_overrides"])
+            self.assertIn(
+                "BK_WORKER_TERMINATION_GRACE_SECONDS",
+                payload["environment_overrides"],
+            )
 
     def test_config_report_detects_bound_policy_match_and_mismatch(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -2002,6 +2011,7 @@ class CliTests(unittest.TestCase):
                     "BK_GPU_COUNT": "8",
                     "BK_MAX_SHARED_USERS": "4",
                     "BK_WORKER_MAX_PARALLEL": "20",
+                    "BK_WORKER_TERMINATION_GRACE_SECONDS": "7.5",
                 },
             )
 
@@ -2011,8 +2021,12 @@ class CliTests(unittest.TestCase):
             self.assertIn('Environment="BK_MAX_SHARED_USERS=4"', text)
             self.assertIn('Environment="BK_WORKER_MAX_PARALLEL=20"', text)
             self.assertIn(
+                'Environment="BK_WORKER_TERMINATION_GRACE_SECONDS=7.5"',
+                text,
+            )
+            self.assertIn(
                 "captured config overrides: BK_GPU_COUNT, BK_MAX_SHARED_USERS, "
-                "BK_WORKER_MAX_PARALLEL",
+                "BK_WORKER_MAX_PARALLEL, BK_WORKER_TERMINATION_GRACE_SECONDS",
                 result.stdout,
             )
 

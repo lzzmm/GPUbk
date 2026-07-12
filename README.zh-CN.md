@@ -206,6 +206,11 @@ worker 会设置 `CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、
 bk 1 30m -- sh -lc 'python train.py > train.log 2>&1'
 ```
 
+为避免相邻预约重叠，worker 会在预约结束前发送 TERM；到达结束时间后进程组仍存活则
+立即发送 KILL。`worker_termination_grace_seconds` 控制提前通知窗口（默认 5 秒，允许
+0.1 到 60 秒）。取消预约或停止 worker 时，则从事件发生时开始计算同样的宽限。任务应
+处理 TERM 以保存 checkpoint；这段宽限位于已预约时段内，不会额外占用下一位用户时间。
+
 任务启动前，worker 会再次采样所有分配到的 GPU。exclusive 任务会等待所有非系统
 进程退出；shared 任务允许已有的合法共享者，但遇到未预约/身份未知进程或物理显存
 不足时会等待。实时探测不可用时也默认拒绝启动。任务保持 `pending` 并显示原因，常驻
@@ -403,6 +408,7 @@ sudo install -d -m 0755 -o root -g root /etc/gpubk
   "job_log_total_max_mb": 4096,
   "worker_poll_seconds": 1,
   "worker_max_parallel": 64,
+  "worker_termination_grace_seconds": 5,
   "worker_claim_timeout_seconds": 30,
   "worker_recovery_grace_seconds": 5,
   "worker_live_guard": true,

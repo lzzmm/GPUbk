@@ -119,6 +119,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
         )
 
         self.assertIn("RestartPreventExitStatus=75", unit)
+        self.assertIn("TimeoutStopSec=75", unit)
         self.assertIn("StartLimitIntervalSec=60", unit)
         self.assertIn("StartLimitBurst=3", unit)
 

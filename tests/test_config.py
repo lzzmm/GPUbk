@@ -40,6 +40,7 @@ class ConfigTests(unittest.TestCase):
             self.assertTrue(config.worker_live_guard)
             self.assertEqual(config.worker_max_parallel, 64)
             self.assertEqual(config.effective_worker_max_parallel, 2)
+            self.assertEqual(config.worker_termination_grace_seconds, 5.0)
             self.assertEqual(config.job_log_retention_days, 30)
             self.assertEqual(config.job_log_max_mb, 64)
             self.assertEqual(config.job_log_total_max_mb, 4096)
@@ -240,6 +241,7 @@ class ConfigTests(unittest.TestCase):
                         "usage_daily_retention_days": 0,
                         "usage_event_retention_days": 365,
                         "worker_max_parallel": 12,
+                        "worker_termination_grace_seconds": 7.5,
                         "worker_live_guard": False,
                         "monitor_interval_seconds": 5,
                         "monitor_rollup_seconds": 300,
@@ -266,6 +268,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.usage_event_retention_days, 365)
             self.assertEqual(config.worker_max_parallel, 12)
             self.assertEqual(config.effective_worker_max_parallel, 12)
+            self.assertEqual(config.worker_termination_grace_seconds, 7.5)
             self.assertFalse(config.worker_live_guard)
             self.assertEqual(config.monitor_interval_seconds, 5.0)
             self.assertEqual(config.monitor_rollup_seconds, 300)
@@ -512,6 +515,7 @@ class ConfigTests(unittest.TestCase):
                     "BK_JOB_LOG_MAX_MB": "8",
                     "BK_JOB_LOG_TOTAL_MAX_MB": "512",
                     "BK_WORKER_MAX_PARALLEL": "3",
+                    "BK_WORKER_TERMINATION_GRACE_SECONDS": "2.5",
                     "BK_WORKER_RECOVERY_GRACE_SECONDS": "0.25",
                 },
                 clear=True,
@@ -523,6 +527,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.job_log_total_max_mb, 512)
             self.assertEqual(config.worker_max_parallel, 3)
             self.assertEqual(config.effective_worker_max_parallel, 2)
+            self.assertEqual(config.worker_termination_grace_seconds, 2.5)
             self.assertEqual(config.worker_recovery_grace_seconds, 0.25)
 
     def test_worker_parallel_limit_is_bounded_by_config_and_shared_topology(self):
@@ -548,6 +553,16 @@ class ConfigTests(unittest.TestCase):
                 "worker_max_parallel",
             ):
                 Config(Path("/tmp/bk-worker-invalid-limit"), worker_max_parallel=invalid)
+
+        for invalid in (False, 0.01, 61, float("nan")):
+            with self.subTest(invalid_grace=invalid), self.assertRaisesRegex(
+                ValueError,
+                "worker_termination_grace_seconds",
+            ):
+                Config(
+                    Path("/tmp/bk-worker-invalid-grace"),
+                    worker_termination_grace_seconds=invalid,
+                )
 
     def test_monitor_cadence_can_be_overridden_by_environment(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -683,6 +698,8 @@ class ConfigTests(unittest.TestCase):
             ({"BK_QUEUE_SEARCH_HOURS": str(10 * 365 * 24 + 1)}, "<= 87600"),
             ({"BK_WORKER_MAX_PARALLEL": "0"}, ">= 1"),
             ({"BK_WORKER_MAX_PARALLEL": "4097"}, "<= 4096"),
+            ({"BK_WORKER_TERMINATION_GRACE_SECONDS": "0.01"}, ">= 0.1"),
+            ({"BK_WORKER_TERMINATION_GRACE_SECONDS": "61"}, "<= 60"),
         )
         for environment, message in cases:
             with self.subTest(environment=environment), tempfile.TemporaryDirectory() as tmp:

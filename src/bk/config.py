@@ -31,6 +31,9 @@ MAX_MEMORY_MB = 16 * 1024 * 1024
 MAX_WORKER_POLL_SECONDS = 60 * 60
 DEFAULT_WORKER_MAX_PARALLEL = 64
 MAX_WORKER_MAX_PARALLEL = 4096
+DEFAULT_WORKER_TERMINATION_GRACE_SECONDS = 5.0
+MIN_WORKER_TERMINATION_GRACE_SECONDS = 0.1
+MAX_WORKER_TERMINATION_GRACE_SECONDS = 60.0
 MAX_WORKER_CLAIM_TIMEOUT_SECONDS = 7 * 24 * 60 * 60
 MAX_WORKER_RECOVERY_GRACE_SECONDS = 24 * 60 * 60
 MAX_ALLOCATOR_TIMEOUT_SECONDS = 5 * 60
@@ -65,6 +68,7 @@ CONFIG_ENV_MAP = {
     "job_log_total_max_mb": "BK_JOB_LOG_TOTAL_MAX_MB",
     "worker_poll_seconds": "BK_WORKER_POLL_SECONDS",
     "worker_max_parallel": "BK_WORKER_MAX_PARALLEL",
+    "worker_termination_grace_seconds": "BK_WORKER_TERMINATION_GRACE_SECONDS",
     "worker_claim_timeout_seconds": "BK_WORKER_CLAIM_TIMEOUT_SECONDS",
     "worker_recovery_grace_seconds": "BK_WORKER_RECOVERY_GRACE_SECONDS",
     "worker_live_guard": "BK_WORKER_LIVE_GUARD",
@@ -128,6 +132,7 @@ class Config:
     monitor_uid: Optional[int] = None
     config_owner_uid: Optional[int] = None
     worker_max_parallel: int = DEFAULT_WORKER_MAX_PARALLEL
+    worker_termination_grace_seconds: float = DEFAULT_WORKER_TERMINATION_GRACE_SECONDS
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "slot_minutes", validate_slot_minutes(self.slot_minutes))
@@ -156,6 +161,13 @@ class Config:
             self,
             "worker_max_parallel",
             validate_worker_max_parallel(self.worker_max_parallel),
+        )
+        object.__setattr__(
+            self,
+            "worker_termination_grace_seconds",
+            validate_worker_termination_grace_seconds(
+                self.worker_termination_grace_seconds
+            ),
         )
 
     @property
@@ -244,6 +256,28 @@ def validate_worker_max_parallel(value: object) -> int:
     if value > MAX_WORKER_MAX_PARALLEL:
         raise ValueError(f"worker_max_parallel must be <= {MAX_WORKER_MAX_PARALLEL}")
     return value
+
+
+def validate_worker_termination_grace_seconds(value: object) -> float:
+    if isinstance(value, bool):
+        raise ValueError("worker_termination_grace_seconds must be a number")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("worker_termination_grace_seconds must be a number") from exc
+    if not math.isfinite(parsed):
+        raise ValueError("worker_termination_grace_seconds must be finite")
+    if parsed < MIN_WORKER_TERMINATION_GRACE_SECONDS:
+        raise ValueError(
+            "worker_termination_grace_seconds must be >= "
+            f"{MIN_WORKER_TERMINATION_GRACE_SECONDS:g}"
+        )
+    if parsed > MAX_WORKER_TERMINATION_GRACE_SECONDS:
+        raise ValueError(
+            "worker_termination_grace_seconds must be <= "
+            f"{MAX_WORKER_TERMINATION_GRACE_SECONDS:g}"
+        )
+    return parsed
 
 
 def validate_optional_uid(value: object, key: str) -> Optional[int]:
@@ -557,6 +591,12 @@ def load_config() -> Config:
             "worker_max_parallel",
             DEFAULT_WORKER_MAX_PARALLEL,
             maximum=MAX_WORKER_MAX_PARALLEL,
+        ),
+        worker_termination_grace_seconds=_float_value(
+            raw,
+            "worker_termination_grace_seconds",
+            DEFAULT_WORKER_TERMINATION_GRACE_SECONDS,
+            maximum=MAX_WORKER_TERMINATION_GRACE_SECONDS,
         ),
         worker_claim_timeout_seconds=_float_value(
             raw,

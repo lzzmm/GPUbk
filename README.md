@@ -229,6 +229,13 @@ session. Use an explicit shell only when shell syntax is required:
 bk 1 30m -- sh -lc 'python train.py > train.log 2>&1'
 ```
 
+To keep adjacent reservations from overlapping, the worker sends TERM before
+the reservation ends and sends KILL at the exact end if the process group is
+still alive. `worker_termination_grace_seconds` controls this warning window
+(default 5 seconds, allowed 0.1 through 60). Cancellation and worker shutdown
+use the same grace after the event instead. Commands should handle TERM for
+checkpointing; the grace is inside the booked interval, not extra GPU time.
+
 Immediately before launch, the worker samples every assigned GPU again. An
 exclusive job waits for all non-system processes to leave; a shared job allows
 authorized sharers but waits on unreserved/unknown processes or insufficient
@@ -461,6 +468,7 @@ group-writable ledger directory:
   "job_log_total_max_mb": 4096,
   "worker_poll_seconds": 1,
   "worker_max_parallel": 64,
+  "worker_termination_grace_seconds": 5,
   "worker_claim_timeout_seconds": 30,
   "worker_recovery_grace_seconds": 5,
   "worker_live_guard": true,

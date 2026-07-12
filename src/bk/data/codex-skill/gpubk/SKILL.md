@@ -93,6 +93,8 @@ Only one worker may hold a UID's private job directory. Exit `75` means another 
 holds the lease; do not loop or start a second worker.
 `policy.worker_effective_max_parallel` is the default scheduled-command concurrency after the
 configured safety cap is bounded by GPU shared capacity. Do not interpret it as extra capacity.
+Budget around `policy.worker_termination_grace_seconds`: scheduled commands receive TERM before
+`end_at` and cannot consume that warning window as guaranteed compute time.
 Before promising unattended execution, check `context.worker.running` or run
 `bk worker --status --json`. Only `state=running` with `running=true` proves that the kernel lease
 is held; PID, hostname, and acquisition time are diagnostic metadata. `stopped`, `not-seen`,

@@ -346,6 +346,9 @@ def build_agent_context(
             "worker_live_guard": config.worker_live_guard,
             "worker_max_parallel": config.worker_max_parallel,
             "worker_effective_max_parallel": config.effective_worker_max_parallel,
+            "worker_termination_grace_seconds": (
+                config.worker_termination_grace_seconds
+            ),
             "worker_recovery_grace_seconds": config.worker_recovery_grace_seconds,
             "worker_busy_exit_code": WORKER_BUSY_EXIT_CODE,
             "worker_waiting_exit_code": WORKER_WAITING_EXIT_CODE,

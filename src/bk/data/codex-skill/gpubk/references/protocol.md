@@ -66,6 +66,9 @@ Recommendation fields:
 - Context policy exposes `worker_max_parallel` and `worker_effective_max_parallel`. The latter is
   the topology-bounded default concurrency for scheduled commands, including legal same-GPU
   shared jobs; it is not additional booking capacity.
+- `policy.worker_termination_grace_seconds` is charged inside a reservation: TERM is sent that
+  far before `end_at`, and KILL is sent at `end_at` if needed. Agents should budget useful runtime
+  accordingly and make scheduled commands handle TERM for checkpointing.
 - Human `bk status` and TUI `W:` inspect that lease only while the current UID has a job that may
   still run automatically; terminal jobs do not create a stale worker warning.
 

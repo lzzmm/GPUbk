@@ -172,6 +172,26 @@ class ScheduledJobTests(unittest.TestCase):
 
                 self.assertEqual(claim.call_args.kwargs["limit"], expected)
 
+    def test_worker_passes_configured_termination_grace_to_reconciliation(self):
+        config = replace(self.config, worker_termination_grace_seconds=7.5)
+        with (
+            mock.patch("bk.worker.claim_due_jobs", return_value=[]),
+            mock.patch("bk.worker._reconcile_running") as reconcile,
+        ):
+            run_worker(
+                config,
+                self.store,
+                self.actor,
+                once=True,
+                poll_seconds=0.1,
+                quiet=True,
+            )
+
+        self.assertEqual(
+            reconcile.call_args.kwargs["termination_grace_seconds"],
+            7.5,
+        )
+
     def test_worker_rolls_high_volume_output_without_blocking_the_job(self):
         config = replace(self.config, job_log_max_mb=1)
         reservation = self.booking(
@@ -561,6 +581,161 @@ class ScheduledJobTests(unittest.TestCase):
         self.assertEqual(summary.failed, 1)
         self.assertEqual(stored["job"]["status"], "timed-out")
         self.assertFalse(job_spec_path(self.config, reservation["job"]["spec_id"]).exists())
+
+    def test_deadline_kills_a_real_process_that_ignores_term_without_post_window_grace(self):
+        marker = self.work_dir / "term-handler-ready"
+        reservation = self.booking(
+            command=[
+                sys.executable,
+                "-c",
+                (
+                    "import pathlib,signal,time\n"
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                    f"pathlib.Path({str(marker)!r}).write_text('ready', encoding='utf-8')\n"
+                    "time.sleep(30)\n"
+                ),
+            ]
+        )
+        config = replace(self.config, worker_termination_grace_seconds=0.1)
+        clock = {"now": utc_now()}
+        deadline = datetime.fromisoformat(reservation["end_at"].replace("Z", "+00:00"))
+        mark_running = worker_module._mark_running
+
+        def mark_running_then_reach_deadline(*args, **kwargs):
+            marked = mark_running(*args, **kwargs)
+            if marked:
+                ready_by = time.monotonic() + 3.0
+                while not marker.exists() and time.monotonic() < ready_by:
+                    time.sleep(0.01)
+                self.assertTrue(marker.exists(), "child did not install its TERM handler")
+                clock["now"] = deadline
+            return marked
+
+        started_at = time.monotonic()
+        with (
+            mock.patch("bk.worker.utc_now", side_effect=lambda: clock["now"]),
+            mock.patch(
+                "bk.worker._mark_running",
+                side_effect=mark_running_then_reach_deadline,
+            ),
+        ):
+            summary = run_worker(
+                config,
+                self.store,
+                self.actor,
+                once=True,
+                poll_seconds=0.1,
+                quiet=True,
+            )
+        elapsed = time.monotonic() - started_at
+
+        stored = next(
+            item
+            for item in self.store.load()["reservations"]
+            if item["id"] == reservation["id"]
+        )
+        self.assertLess(elapsed, 4.0)
+        self.assertEqual(summary.failed, 1)
+        self.assertEqual(stored["job"]["status"], "timed-out")
+
+    def test_worker_gives_grace_before_deadline_and_kills_at_deadline(self):
+        reservation = self.booking(command=[sys.executable, "-c", "import time; time.sleep(30)"])
+        deadline = datetime.fromisoformat(reservation["end_at"].replace("Z", "+00:00"))
+        process = mock.Mock(pid=424242)
+        process.poll.return_value = None
+        running = {
+            reservation["id"]: worker_module.RunningJob(
+                reservation_id=reservation["id"],
+                claim_token="claim-token",
+                process=process,
+                log_pump=mock.Mock(),
+                end_at=deadline,
+            )
+        }
+
+        with (
+            mock.patch("bk.worker.time.monotonic", side_effect=(100.0, 105.0)),
+            mock.patch("bk.worker._terminate_process_group") as terminate,
+            mock.patch("bk.worker._kill_process_group") as kill,
+        ):
+            worker_module._reconcile_running(
+                self.store,
+                self.actor,
+                running,
+                deadline - timedelta(seconds=5),
+                {},
+                True,
+            )
+            terminate.assert_called_once_with(process)
+            kill.assert_not_called()
+
+            worker_module._reconcile_running(
+                self.store,
+                self.actor,
+                running,
+                deadline,
+                {},
+                True,
+            )
+            kill.assert_called_once_with(process)
+
+    def test_cancelled_job_uses_configured_termination_grace(self):
+        reservation = self.booking(command=[sys.executable, "-c", "import time; time.sleep(30)"])
+        cancel_booking(self.store, reservation["id"], self.actor)
+        deadline = datetime.fromisoformat(reservation["end_at"].replace("Z", "+00:00"))
+        process = mock.Mock(pid=434343)
+        process.poll.return_value = None
+        running = {
+            reservation["id"]: worker_module.RunningJob(
+                reservation_id=reservation["id"],
+                claim_token="claim-token",
+                process=process,
+                log_pump=mock.Mock(),
+                end_at=deadline,
+            )
+        }
+
+        with (
+            mock.patch(
+                "bk.worker.time.monotonic",
+                side_effect=(100.0, 100.0, 102.9, 103.0),
+            ),
+            mock.patch("bk.worker._terminate_process_group") as terminate,
+            mock.patch("bk.worker._kill_process_group") as kill,
+        ):
+            worker_module._reconcile_running(
+                self.store,
+                self.actor,
+                running,
+                deadline - timedelta(minutes=1),
+                {},
+                True,
+                termination_grace_seconds=3.0,
+            )
+            terminate.assert_called_once_with(process)
+            kill.assert_not_called()
+
+            worker_module._reconcile_running(
+                self.store,
+                self.actor,
+                running,
+                deadline - timedelta(seconds=30),
+                {},
+                True,
+                termination_grace_seconds=3.0,
+            )
+            kill.assert_not_called()
+
+            worker_module._reconcile_running(
+                self.store,
+                self.actor,
+                running,
+                deadline - timedelta(seconds=20),
+                {},
+                True,
+                termination_grace_seconds=3.0,
+            )
+            kill.assert_called_once_with(process)
 
     def test_stale_claim_becomes_uncertain_instead_of_running_twice(self):
         reservation = self.booking()

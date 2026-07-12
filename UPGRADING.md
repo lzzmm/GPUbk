@@ -112,6 +112,12 @@ process groups whose environment exactly matches the reservation. The job
 remains `uncertain`; retry it only after reviewing its effects and explicitly
 accepting duplicate-execution risk.
 
+A 0.2 worker also reserves `worker_termination_grace_seconds` (5 seconds by
+default) at the end of each scheduled command window: it sends TERM during that
+interval and KILL at `end_at`. Make long-running commands checkpoint on TERM.
+Reinstall the bundled worker unit so its 75-second systemd stop timeout can
+accommodate the configurable grace and durable final state update.
+
 ## Rollback
 
 Stop GPUbk monitor and worker services before reinstalling the previous

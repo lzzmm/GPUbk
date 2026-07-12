@@ -31,6 +31,9 @@ Supported security boundaries:
   liveness evidence.
 - Scheduled jobs re-check live process authorization and physical VRAM immediately before
   launch; this reduces races but cannot replace kernel device access control.
+- Scheduled process groups receive TERM during the configured final grace window and KILL at the
+  reservation deadline, so graceful shutdown time is charged to the current booking rather than
+  leaking into the next one. Cancellation and worker shutdown use a bounded post-event grace.
 - The default launch guard passes the stable UUIDs from that same NVML snapshot to
   `CUDA_VISIBLE_DEVICES`, because NVML indices are not guaranteed to match CUDA ordinals.
   Missing identifiers fail closed on real NVML devices; disabling the guard explicitly accepts

@@ -11,7 +11,7 @@ ExecStart=@PYTHON_EXECUTABLE@ -m bk worker
 Restart=on-failure
 RestartPreventExitStatus=75
 RestartSec=5
-TimeoutStopSec=15
+TimeoutStopSec=75
 KillMode=control-group
 NoNewPrivileges=true
 

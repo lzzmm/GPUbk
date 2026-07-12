@@ -24,6 +24,7 @@ class BundledSystemdTests(unittest.TestCase):
         self.assertIn("StartLimitIntervalSec=60", monitor)
         self.assertIn("StartLimitBurst=3", monitor)
         self.assertIn("RestartPreventExitStatus=75", worker)
+        self.assertIn("TimeoutStopSec=75", worker)
         self.assertIn("StartLimitIntervalSec=60", worker)
         self.assertIn("StartLimitBurst=3", worker)
         self.assertNotIn("EnvironmentFile=", worker)
@@ -133,6 +134,7 @@ class BundledSystemdTests(unittest.TestCase):
             worker_max_parallel=20,
             worker_poll_seconds=1.0,
             worker_live_guard=False,
+            worker_termination_grace_seconds=7.5,
             file_mode=0o660,
         )
         environment = service_environment(
@@ -144,6 +146,7 @@ class BundledSystemdTests(unittest.TestCase):
                 "BK_WORKER_MAX_PARALLEL": "20",
                 "BK_WORKER_POLL_SECONDS": "1.000",
                 "BK_WORKER_LIVE_GUARD": "no",
+                "BK_WORKER_TERMINATION_GRACE_SECONDS": "7.500",
                 "BK_FILE_MODE": "0o660",
                 "BK_ALLOCATOR_COMMAND": "allocator --token secret-value",
                 "BK_MONITOR_UID": "9999",
@@ -155,6 +158,7 @@ class BundledSystemdTests(unittest.TestCase):
         self.assertEqual(environment["BK_WORKER_MAX_PARALLEL"], "20")
         self.assertEqual(environment["BK_WORKER_POLL_SECONDS"], "1")
         self.assertEqual(environment["BK_WORKER_LIVE_GUARD"], "false")
+        self.assertEqual(environment["BK_WORKER_TERMINATION_GRACE_SECONDS"], "7.5")
         self.assertEqual(environment["BK_FILE_MODE"], "0660")
         self.assertNotIn("BK_ALLOCATOR_COMMAND", environment)
         self.assertNotIn("BK_MONITOR_UID", environment)

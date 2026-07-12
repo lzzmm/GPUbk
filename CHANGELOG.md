@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Enforce scheduled-command reservation boundaries by sending TERM during a configurable
+  pre-deadline grace window and KILL at the exact deadline, while retaining the same bounded grace
+  after cancellation or worker shutdown and aligning the bundled systemd stop timeout.
 - Preserve explicitly active, non-secret `BK_*` configuration overrides in generated systemd
   units so unattended monitor and worker services cannot silently revert to defaults or hit a
   ledger-policy mismatch after the installing shell exits.
