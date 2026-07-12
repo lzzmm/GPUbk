@@ -295,8 +295,10 @@ systemctl --user enable --now bk-monitor.service
 Run exactly one trusted monitor writer on a shared server. Per-user workers are
 still separate. The monitor service above is intended for a private server or
 for the one account selected by the administrator. Its generated unit captures
-the absolute shared data directory. A second monitor fails with exit status 75;
-systemd does not restart that duplicate instance in a loop.
+the absolute shared data directory and explicit trusted config path. Sampling
+and rollup values are reloaded from that config whenever the service starts. A
+second monitor fails with exit status 75; systemd does not restart that duplicate
+instance in a loop.
 
 ## Agents and MCP
 

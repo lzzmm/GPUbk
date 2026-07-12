@@ -262,8 +262,9 @@ systemctl --user enable --now bk-monitor.service
 
 共享服务器只能运行一个受信任的 monitor 写入者，不能每个用户各启一个；每位用户的
 worker 仍然相互独立。上述用户 monitor 服务适合私人服务器或管理员指定的唯一账号。
-生成的 unit 会固化共享数据目录；第二个 monitor 会以状态码 75 快速退出，systemd
-不会循环重启这个重复实例。
+生成的 unit 会固化共享数据目录和显式可信配置路径；服务每次启动都会从该配置重新读取
+采样与聚合周期。第二个 monitor 会以状态码 75 快速退出，systemd 不会循环重启这个
+重复实例。
 
 ## Agent 与 MCP
 

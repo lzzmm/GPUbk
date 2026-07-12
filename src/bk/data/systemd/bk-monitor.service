@@ -5,7 +5,7 @@ After=default.target
 [Service]
 Type=simple
 @SERVICE_ENVIRONMENT@
-ExecStart=@PYTHON_EXECUTABLE@ -m bk monitor --interval 2 --rollup 60
+ExecStart=@PYTHON_EXECUTABLE@ -m bk monitor
 Restart=on-failure
 RestartPreventExitStatus=75
 RestartSec=5

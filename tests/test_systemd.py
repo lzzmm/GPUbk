@@ -17,6 +17,8 @@ class BundledSystemdTests(unittest.TestCase):
 
         self.assertIn('ExecStart="/opt/bk venv/bin/python" -m bk worker', worker)
         self.assertIn('ExecStart="/opt/bk venv/bin/python" -m bk monitor', monitor)
+        self.assertNotIn("--interval", monitor)
+        self.assertNotIn("--rollup", monitor)
         self.assertIn('Environment="BK_DATA_DIR=/data2/shared/bk"', worker)
         self.assertIn("RestartPreventExitStatus=75", monitor)
         self.assertIn("RestartPreventExitStatus=75", worker)

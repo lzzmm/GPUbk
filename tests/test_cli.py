@@ -1484,6 +1484,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(installed.returncode, 0, installed.stderr)
             unit = (units / "bk-monitor.service").read_text(encoding="utf-8")
             self.assertIn(f'Environment="BK_CONFIG_FILE={config_path.resolve()}"', unit)
+            self.assertNotIn("--interval", unit)
+            self.assertNotIn("--rollup", unit)
             self.assertIn(f"captured config file: {config_path.resolve()}", installed.stdout)
 
     def test_usage_cli_exposes_stable_storage_and_dry_run_maintenance(self):
