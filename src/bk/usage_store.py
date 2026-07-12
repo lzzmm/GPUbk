@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import gzip
 import hashlib
 import hmac
@@ -823,16 +824,37 @@ class UsageAuditStore:
     def _append_jsonl(self, path: Path, records: Sequence[dict], directory: Path) -> int:
         if not records:
             return 0
+        serialized = []
+        total_bytes = 0
+        for record in records:
+            line = (
+                json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
+            ).encode("utf-8")
+            if len(line) > MAX_USAGE_LINE_BYTES:
+                raise ValueError("usage record exceeds the 1 MiB limit")
+            serialized.append(line)
+            total_bytes += len(line)
         ensure_directory(directory, self.dir_mode)
-        fd = open_or_create_regular(path, os.O_WRONLY | os.O_APPEND, self.file_mode)
-        with os.fdopen(fd, "a", encoding="utf-8") as fh:
-            for record in records:
-                line = json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-                if len(line.encode("utf-8")) > MAX_USAGE_LINE_BYTES:
-                    raise ValueError("usage record exceeds the 1 MiB limit")
-                fh.write(line + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
+        fd = open_or_create_regular(path, os.O_RDWR | os.O_APPEND, self.file_mode)
+        try:
+            original_size = _repair_jsonl_tail(fd, path, self.last_warnings)
+            size_limit = MAX_DICTIONARY_BYTES if path == self.workloads_path else MAX_PARTITION_UNCOMPRESSED_BYTES
+            if original_size + total_bytes > size_limit:
+                raise UsageFormatError(f"usage file exceeds its safety limit: {path}")
+            try:
+                _write_jsonl_batch(fd, serialized)
+                os.fsync(fd)
+            except BaseException:
+                try:
+                    os.ftruncate(fd, original_size)
+                    os.fsync(fd)
+                except OSError as rollback_error:
+                    self.last_warnings.append(
+                        f"could not roll back a failed usage append in {path}: {rollback_error}"
+                    )
+                raise
+        finally:
+            os.close(fd)
         return len(records)
 
     def _merge_plain_partition(self, tier: str, day: date, records: Sequence[dict], key_fn) -> None:
@@ -921,6 +943,7 @@ class UsageAuditStore:
         tmp_path = Path(tmp_name)
         digest = hashlib.sha256()
         count = 0
+        uncompressed_bytes = 0
         try:
             os.fchmod(fd, self.file_mode)
             raw = os.fdopen(fd, "wb")
@@ -930,6 +953,9 @@ class UsageAuditStore:
                     line = (json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
                     if len(line) > MAX_USAGE_LINE_BYTES:
                         raise ValueError("usage record exceeds the 1 MiB limit")
+                    uncompressed_bytes += len(line)
+                    if uncompressed_bytes > MAX_PARTITION_UNCOMPRESSED_BYTES:
+                        raise UsageFormatError("usage partition exceeds the 512 MiB safety limit")
                     digest.update(line)
                     compressed.write(line)
                     count += 1
@@ -1212,6 +1238,62 @@ def _in_range(value: datetime, start: Optional[datetime], end: Optional[datetime
     return end is None or normalized <= end.astimezone(timezone.utc)
 
 
+def _repair_jsonl_tail(fd: int, path: Path, warnings: List[str]) -> int:
+    size = os.fstat(fd).st_size
+    if size == 0 or os.pread(fd, 1, size - 1) == b"\n":
+        return size
+
+    read_size = min(size, MAX_USAGE_LINE_BYTES + 1)
+    tail_start = size - read_size
+    tail = os.pread(fd, read_size, tail_start)
+    separator = tail.rfind(b"\n")
+    if separator >= 0:
+        record_start = tail_start + separator + 1
+        fragment = tail[separator + 1 :]
+    elif tail_start == 0:
+        record_start = 0
+        fragment = tail
+    else:
+        raise UsageFormatError(f"unterminated usage record exceeds the 1 MiB limit: {path}")
+
+    if len(fragment) + 1 > MAX_USAGE_LINE_BYTES:
+        raise UsageFormatError(f"unterminated usage record exceeds the 1 MiB limit: {path}")
+    try:
+        value = json.loads(fragment)
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        value = None
+    if isinstance(value, dict):
+        _write_all(fd, b"\n")
+        os.fsync(fd)
+        warnings.append(f"restored a missing final newline in {path}")
+        return size + 1
+
+    os.ftruncate(fd, record_start)
+    os.fsync(fd)
+    warnings.append(f"discarded an incomplete trailing usage record in {path}")
+    return record_start
+
+
+def _write_jsonl_batch(fd: int, lines: Sequence[bytes]) -> None:
+    chunk = bytearray()
+    for line in lines:
+        if chunk and len(chunk) + len(line) > 1024 * 1024:
+            _write_all(fd, chunk)
+            chunk.clear()
+        chunk.extend(line)
+    if chunk:
+        _write_all(fd, chunk)
+
+
+def _write_all(fd: int, payload: bytes | bytearray) -> None:
+    remaining = memoryview(payload)
+    while remaining:
+        written = os.write(fd, remaining)
+        if written <= 0:
+            raise OSError(errno.EIO, "short write while appending usage data")
+        remaining = remaining[written:]
+
+
 def _atomic_write_json(path: Path, payload: dict, mode: int, directory: Path, prefix: str) -> None:
     metadata = directory.lstat()
     if not stat.S_ISDIR(metadata.st_mode):
@@ -1244,11 +1326,16 @@ def _atomic_write_jsonl(path: Path, records: Sequence[dict], mode: int, director
         os.fchmod(fd, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fd = -1
+            total_bytes = 0
             for record in records:
-                line = json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-                if len(line.encode("utf-8")) > MAX_USAGE_LINE_BYTES:
+                line = json.dumps(record, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
+                line_bytes = len(line.encode("utf-8"))
+                if line_bytes > MAX_USAGE_LINE_BYTES:
                     raise ValueError("usage record exceeds the 1 MiB limit")
-                fh.write(line + "\n")
+                total_bytes += line_bytes
+                if total_bytes > MAX_PARTITION_UNCOMPRESSED_BYTES:
+                    raise UsageFormatError("usage partition exceeds the 512 MiB safety limit")
+                fh.write(line)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_path, path)

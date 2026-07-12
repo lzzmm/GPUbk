@@ -84,6 +84,17 @@ TIMELINE_AUTO_STEPS = (300, 600, 900, 1800, 3600, 7200, 14400, 28800, 43200, 864
 def main(argv: Optional[List[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
+        if argv:
+            head = argv[0]
+            if head in {"-h", "--help", "help"}:
+                _print_help()
+                return 0
+            if head in {"-V", "--version", "version"}:
+                print(f"bk {__version__}")
+                return 0
+            if head == "skill":
+                return _skill_command(argv[1:])
+
         config = load_config()
         store = LedgerStore(
             config.data_dir,
@@ -129,8 +140,6 @@ def main(argv: Optional[List[str]] = None) -> int:
 
             mcp_main()
             return 0
-        if head == "skill":
-            return _skill_command(argv[1:])
         if head == "service":
             return _service_command(argv[1:], config)
         if head in {"add", "a"}:
@@ -147,12 +156,6 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _doctor_command(argv[1:], config, store)
         if head in {"list", "ls", "l"}:
             return _list_command(argv[1:], config, store)
-        if head in {"-h", "--help", "help"}:
-            _print_help()
-            return 0
-        if head in {"-V", "--version", "version"}:
-            print(f"bk {__version__}")
-            return 0
         print(f"未知命令: {head}", file=sys.stderr)
         _print_help(file=sys.stderr)
         return 2

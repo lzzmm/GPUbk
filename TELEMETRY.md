@@ -89,6 +89,12 @@ written to long-term user history.
 Closed partitions use deterministic gzip plus record-count and SHA-256 metadata.
 Maintenance creates all coarser levels before removing a finer partition. Unknown
 future fields stop compaction and deletion instead of being silently discarded.
+Open partitions are append-only. Each batch is validated before writing and is
+truncated back to its original size if a detected write or fsync fails. After an
+unclean stop, the next writer preserves a complete final JSON record missing only
+its newline, or discards only the malformed trailing fragment before appending.
+Per-record and per-file safety limits prevent the writer from creating data that
+the bounded reader would later refuse.
 
 ```bash
 bk u maintain             # dry run

@@ -1,4 +1,5 @@
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,66 @@ class UsageStoreTests(unittest.TestCase):
         self.assertEqual(rollup_raw["n"], "alice")
         self.assertEqual(self.store.recent_events(1)[0]["workload_id"], workload_id)
         self.assertEqual(self.store.recent_rollups(1)[0]["username"], "alice")
+
+    def test_append_discards_only_an_incomplete_trailing_record(self):
+        self.store.append_rollups([self._rollup_at(0)])
+        path = self.store._partition_path("minute", self.at.date())
+        with path.open("ab") as fh:
+            fh.write(b'{"v":1,"partial"')
+
+        self.store.append_rollups([self._rollup_at(1)])
+
+        lines = path.read_bytes().splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertTrue(all(isinstance(json.loads(line), dict) for line in lines))
+        self.assertEqual(len(self.store.recent_rollups(10)), 2)
+        self.assertTrue(any("discarded an incomplete trailing" in item for item in self.store.last_warnings))
+
+    def test_append_preserves_a_valid_final_record_missing_only_its_newline(self):
+        self.store.append_rollups([self._rollup_at(0)])
+        path = self.store._partition_path("minute", self.at.date())
+        path.write_bytes(path.read_bytes().removesuffix(b"\n"))
+
+        self.store.append_rollups([self._rollup_at(1)])
+
+        self.assertEqual(len(path.read_bytes().splitlines()), 2)
+        self.assertEqual(len(self.store.recent_rollups(10)), 2)
+        self.assertTrue(any("restored a missing final newline" in item for item in self.store.last_warnings))
+
+    def test_failed_append_rolls_the_partition_back_to_its_original_size(self):
+        self.store.append_rollups([self._rollup_at(0)])
+        path = self.store._partition_path("minute", self.at.date())
+        original = path.read_bytes()
+        real_write = os.write
+        calls = 0
+
+        def fail_after_partial_write(fd, payload):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return real_write(fd, bytes(payload[:7]))
+            raise OSError("simulated full disk")
+
+        with mock.patch("bk.usage_store.os.write", side_effect=fail_after_partial_write):
+            with self.assertRaisesRegex(OSError, "simulated full disk"):
+                self.store.append_rollups([self._rollup_at(1)])
+
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(len(self.store.recent_rollups(10)), 1)
+
+    def test_append_refuses_to_create_a_partition_the_reader_cannot_open(self):
+        self.store.append_rollups([self._rollup_at(0)])
+        path = self.store._partition_path("minute", self.at.date())
+        original = path.read_bytes()
+
+        with mock.patch(
+            "bk.usage_store.MAX_PARTITION_UNCOMPRESSED_BYTES",
+            len(original) + 1,
+        ):
+            with self.assertRaisesRegex(UsageFormatError, "safety limit"):
+                self.store.append_rollups([self._rollup_at(1)])
+
+        self.assertEqual(path.read_bytes(), original)
 
     def test_workload_identity_is_stable_per_uid_and_does_not_store_raw_arguments(self):
         descriptor = describe_workload("python /private/train.py --token secret")
@@ -298,6 +359,13 @@ class UsageStoreTests(unittest.TestCase):
             "workload_ids": [workload_id] if workload_id else [],
             "workload_observed_seconds": {str(workload_id): 60} if workload_id else {},
         }
+
+    def _rollup_at(self, minute_offset):
+        item = self._rollup(None)
+        start = self.at + timedelta(minutes=minute_offset)
+        item["window_start"] = start.isoformat().replace("+00:00", "Z")
+        item["window_end"] = (start + timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+        return item
 
 
 if __name__ == "__main__":

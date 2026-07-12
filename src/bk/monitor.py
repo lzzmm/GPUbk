@@ -74,6 +74,7 @@ class UsageMonitor:
         self._workload_cache: Dict[Tuple[Optional[int], str, Optional[str]], int] = {}
         self._next_maintenance_check: Optional[datetime] = None
         self._retention_policy = UsageRetentionPolicy.from_config(config)
+        self._reported_sink_warnings = 0
 
     def collect(self, sampled_at: Optional[datetime] = None) -> MonitorSample:
         sampled_at = sampled_at or utc_now()
@@ -97,6 +98,7 @@ class UsageMonitor:
         self._record_groups(groups, sampled_at)
         self._record_device_load(devices, sampled_at)
         flushed = self.flush_rollups(sampled_at)
+        warnings.extend(self.take_warnings())
         process_count = sum(len(rows) for rows in usage_by_gpu.values())
         violation_count = sum(1 for rows in usage_by_gpu.values() for item in rows if item.violation)
         return MonitorSample(
@@ -106,7 +108,7 @@ class UsageMonitor:
             violation_count=violation_count,
             events=tuple(events),
             rollups_flushed=flushed,
-            warnings=tuple(warnings),
+            warnings=tuple(dict.fromkeys(warnings)),
         )
 
     def _maintain_storage(self, sampled_at: datetime) -> List[str]:
@@ -121,6 +123,19 @@ class UsageMonitor:
 
     def close(self, closed_at: Optional[datetime] = None) -> int:
         return self.flush_rollups(closed_at or utc_now(), force=True)
+
+    def take_warnings(self) -> Tuple[str, ...]:
+        raw = getattr(self.audit_store, "last_warnings", ())
+        if not isinstance(raw, (list, tuple)):
+            return ()
+        start = min(self._reported_sink_warnings, len(raw))
+        pending = tuple(str(item) for item in raw[start:])
+        if isinstance(raw, list):
+            raw.clear()
+            self._reported_sink_warnings = 0
+        else:
+            self._reported_sink_warnings = len(raw)
+        return pending
 
     def flush_rollups(self, at: datetime, force: bool = False) -> int:
         ready = []
@@ -289,7 +304,7 @@ def run_monitor(
                     started = time.monotonic()
                     result = monitor.collect()
                     samples += 1
-                    if once or verbose or result.events:
+                    if once or verbose or result.events or result.warnings:
                         _print_monitor_sample(result)
                     if once or (max_samples is not None and samples >= max_samples):
                         break
@@ -297,6 +312,8 @@ def run_monitor(
                     stop_event.wait(delay)
             finally:
                 flushed = monitor.close()
+                for warning in monitor.take_warnings():
+                    print(f"monitor warning: {warning}")
                 print(f"monitor stopped: samples={samples} partial_rollups={flushed}")
         finally:
             _restore_signal_handlers(previous_handlers)

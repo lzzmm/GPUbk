@@ -206,6 +206,12 @@ class UsageQueryService:
                 "json_cli": "bk usage ... --json",
                 "mcp": "get_my_gpu_usage",
             },
+            "durability": {
+                "single_writer_lock": True,
+                "append_batch_rollback": True,
+                "interrupted_tail_repair": True,
+                "closed_partition_checksums": True,
+            },
             "storage": self.store.storage_info(),
         }
 

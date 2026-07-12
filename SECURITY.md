@@ -31,6 +31,8 @@ Supported security boundaries:
   environments, stdout, or absolute script paths.
 - Closed telemetry partitions carry record counts and SHA-256 checksums. Unknown future
   fields block compaction instead of being discarded.
+- Open telemetry partitions validate complete batches before append, roll back detected
+  partial writes, and repair only the final interrupted JSONL fragment after a crash.
 
 Administrator responsibilities:
 

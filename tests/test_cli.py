@@ -66,6 +66,33 @@ class CliTests(unittest.TestCase):
             check=False,
         )
 
+    def test_diagnostic_entrypoints_do_not_require_a_valid_shared_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            (data_dir / "config.json").write_text("{broken", encoding="utf-8")
+            skill_dir = data_dir / "installed-skill"
+
+            version = self.run_bk(["--version"], data_dir)
+            help_result = self.run_bk(["--help"], data_dir)
+            skill_show = self.run_bk(["skill", "show"], data_dir)
+            skill_install = self.run_bk(
+                ["skill", "install", "--target", str(skill_dir)],
+                data_dir,
+            )
+
+            self.assertEqual(version.returncode, 0, version.stderr)
+            self.assertRegex(version.stdout, r"^bk \d+\.\d+\.\d+")
+            self.assertEqual(help_result.returncode, 0, help_result.stderr)
+            self.assertIn("GPUbk", help_result.stdout)
+            self.assertEqual(skill_show.returncode, 0, skill_show.stderr)
+            self.assertIn("name: gpubk", skill_show.stdout)
+            self.assertEqual(skill_install.returncode, 0, skill_install.stderr)
+            self.assertTrue((skill_dir / "SKILL.md").is_file())
+
+            ordinary = self.run_bk(["doctor", "--json"], data_dir)
+            self.assertEqual(ordinary.returncode, 2)
+            self.assertIn("JSONDecodeError", ordinary.stdout)
+
     def test_default_command_starts_plain_interactive_shell(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_bk_with_input([], Path(tmp), "status\nquit\n")
@@ -1014,6 +1041,10 @@ class CliTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            today = datetime.now(timezone.utc).date()
+            partition = data_dir / f"usage/minute/{today:%Y}/{today:%m}/{today.isoformat()}.v1.jsonl"
+            partition.parent.mkdir(parents=True)
+            partition.write_bytes(b'{"interrupted"')
 
             monitor = self.run_bk(
                 ["monitor", "--once"],
@@ -1029,6 +1060,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(monitor.returncode, 0, monitor.stderr)
             self.assertIn("monitor started", monitor.stdout)
             self.assertIn("process-start", monitor.stdout)
+            self.assertIn("discarded an incomplete trailing usage record", monitor.stdout)
             self.assertEqual(events.returncode, 0, events.stderr)
             self.assertIn("unreserved", events.stdout)
             self.assertIn("train.py", events.stdout)
