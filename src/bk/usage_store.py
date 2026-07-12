@@ -327,9 +327,7 @@ class UsageAuditStore:
         seen = set()
         paths = self._partition_paths("events", start, end, newest_first)
         for path in paths:
-            raw_records = list(self._read_jsonl(path))
-            if newest_first:
-                raw_records.reverse()
+            raw_records = self._ordered_jsonl(path, newest_first)
             for raw in raw_records:
                 try:
                     if int(raw.get("v", EVENT_SCHEMA_VERSION)) > EVENT_SCHEMA_VERSION:
@@ -353,9 +351,7 @@ class UsageAuditStore:
                 if limit is not None and count >= limit:
                     return
         if self._legacy_visible() and self.events_path.exists():
-            legacy = list(self._read_jsonl(self.events_path))
-            if newest_first:
-                legacy.reverse()
+            legacy = self._ordered_jsonl(self.events_path, newest_first)
             for raw in legacy:
                 if not isinstance(raw, dict):
                     continue
@@ -395,9 +391,7 @@ class UsageAuditStore:
         seen = set()
         paths = self._partition_paths(tier, start, end, newest_first)
         for path in paths:
-            raw_records = list(self._read_jsonl(path))
-            if newest_first:
-                raw_records.reverse()
+            raw_records = self._ordered_jsonl(path, newest_first)
             for raw in raw_records:
                 try:
                     if int(raw.get("v", ROLLUP_SCHEMA_VERSION)) > ROLLUP_SCHEMA_VERSION:
@@ -421,9 +415,7 @@ class UsageAuditStore:
                 if limit is not None and count >= limit:
                     return
         if tier == "minute" and self._legacy_visible() and self.rollups_path.exists():
-            legacy = list(self._read_jsonl(self.rollups_path))
-            if newest_first:
-                legacy.reverse()
+            legacy = self._ordered_jsonl(self.rollups_path, newest_first)
             for raw in legacy:
                 try:
                     record = decode_rollup(raw, self.username_for_uid)
@@ -1046,41 +1038,76 @@ class UsageAuditStore:
             return
         fd = open_existing_regular(path)
         raw = os.fdopen(fd, "rb")
-        parsed_records = []
-        digest = hashlib.sha256()
-        line_count = 0
-        uncompressed_bytes = 0
+        compressed = path.name.endswith(".gz")
         try:
-            stream = gzip.GzipFile(fileobj=raw, mode="rb") if path.name.endswith(".gz") else raw
-            with stream:
-                for raw_line in stream:
-                    uncompressed_bytes += len(raw_line)
-                    if uncompressed_bytes > MAX_PARTITION_UNCOMPRESSED_BYTES:
-                        raise UsageFormatError(f"usage partition exceeds the 512 MiB safety limit: {path}")
-                    if len(raw_line) > MAX_USAGE_LINE_BYTES:
-                        self.last_warnings.append(f"skipped oversized usage record in {path}")
-                        continue
-                    digest.update(raw_line)
-                    line_count += 1
-                    try:
-                        value = json.loads(raw_line)
-                    except (json.JSONDecodeError, UnicodeDecodeError):
-                        self.last_warnings.append(f"skipped malformed usage record in {path}")
-                        continue
-                    if isinstance(value, dict):
-                        parsed_records.append(value)
+            if compressed:
+                metadata = self._partition_metadata(path)
+                digest, line_count = self._scan_closed_stream(raw, path)
+                self._verify_partition_metadata(path, metadata, digest, line_count)
+                raw.seek(0)
+            elif os.fstat(fd).st_size > MAX_PARTITION_UNCOMPRESSED_BYTES:
+                raise UsageFormatError(f"usage partition exceeds the 512 MiB safety limit: {path}")
+            yield from self._iter_jsonl_records(raw, path, compressed=compressed)
         finally:
             if not raw.closed:
                 raw.close()
-        if path.name.endswith(".gz"):
-            self._verify_partition_metadata(path, digest.hexdigest(), line_count)
-        yield from parsed_records
 
-    def _verify_partition_metadata(self, path: Path, digest: str, line_count: int) -> None:
+    def _ordered_jsonl(self, path: Path, newest_first: bool) -> Iterable[dict]:
+        records = self._read_jsonl(path)
+        if not newest_first:
+            return records
+        buffered = list(records)
+        buffered.reverse()
+        return buffered
+
+    def _scan_closed_stream(self, raw, path: Path) -> tuple[str, int]:
+        digest = hashlib.sha256()
+        line_count = 0
+        uncompressed_bytes = 0
+        with gzip.GzipFile(fileobj=raw, mode="rb") as stream:
+            for raw_line in stream:
+                uncompressed_bytes += len(raw_line)
+                if uncompressed_bytes > MAX_PARTITION_UNCOMPRESSED_BYTES:
+                    raise UsageFormatError(f"usage partition exceeds the 512 MiB safety limit: {path}")
+                if len(raw_line) > MAX_USAGE_LINE_BYTES:
+                    continue
+                digest.update(raw_line)
+                line_count += 1
+        return digest.hexdigest(), line_count
+
+    def _iter_jsonl_records(self, raw, path: Path, *, compressed: bool) -> Iterator[dict]:
+        uncompressed_bytes = 0
+        stream = gzip.GzipFile(fileobj=raw, mode="rb") if compressed else raw
+        with stream:
+            for raw_line in stream:
+                uncompressed_bytes += len(raw_line)
+                if uncompressed_bytes > MAX_PARTITION_UNCOMPRESSED_BYTES:
+                    raise UsageFormatError(f"usage partition exceeds the 512 MiB safety limit: {path}")
+                if len(raw_line) > MAX_USAGE_LINE_BYTES:
+                    self.last_warnings.append(f"skipped oversized usage record in {path}")
+                    continue
+                try:
+                    value = json.loads(raw_line)
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    self.last_warnings.append(f"skipped malformed usage record in {path}")
+                    continue
+                if isinstance(value, dict):
+                    yield value
+
+    def _partition_metadata(self, path: Path) -> dict:
         meta_path = _meta_path_for(path)
         if not meta_path.exists():
             raise UsageFormatError(f"closed usage partition has no metadata: {path}")
-        metadata = self._read_json(meta_path)
+        return self._read_json(meta_path)
+
+    def _verify_partition_metadata(
+        self,
+        path: Path,
+        metadata: dict,
+        digest: str,
+        line_count: int,
+    ) -> None:
+        meta_path = _meta_path_for(path)
         if metadata.get("format") != STORE_FORMAT or int(metadata.get("schema_major", -1)) != 1:
             raise UsageFormatError(f"unsupported partition metadata: {meta_path}")
         if int(metadata.get("record_count", -1)) != line_count:

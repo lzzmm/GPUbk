@@ -6,6 +6,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 - Propagate directory-fsync failures across WAL, ledger, telemetry, private job files, and systemd unit installation instead of reporting uncertain writes as durable.
 - Reject permission drift and hard-linked aliases before managed writes, validate telemetry directory modes component by component, and report both conditions read-only through `bk doctor`.
+- Stream chronological telemetry queries without materializing a daily partition, while verifying closed gzip data before parsing it from the same pinned inode.
 - Preserve a valid renamed journal for deferred idempotent recovery and surface the warning even in quiet CLI booking flows.
 - Repair interrupted telemetry and audit JSONL tails, roll back failed append batches, and reject files beyond reader limits.
 - Tail-read recent per-UID audit events with bounded memory, machine-readable output, corruption warnings, and read-only doctor checks.

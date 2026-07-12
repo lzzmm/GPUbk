@@ -98,6 +98,12 @@ an append as durable when the filesystem could not persist its directory entry.
 Per-record and per-file safety limits prevent the writer from creating data that
 the bounded reader would later refuse.
 
+Chronological queries stream open partitions and stop as soon as their record
+limit is satisfied. A closed gzip partition is scanned against its SHA-256 and
+record-count metadata, then rewound and parsed through the same open file
+descriptor, so an atomic path replacement cannot swap in unverified data between
+those steps. Reverse-order views may still buffer one daily partition.
+
 ```bash
 bk u maintain             # dry run
 bk u maintain --yes       # apply compaction and retention

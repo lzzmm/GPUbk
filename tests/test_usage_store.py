@@ -1,7 +1,9 @@
+import gzip
 import json
 import os
 import stat
 import tempfile
+import tracemalloc
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -118,6 +120,43 @@ class UsageStoreTests(unittest.TestCase):
             self.store.append_rollups([self._rollup_at(0)])
 
         self.assertFalse(self.store._partition_path("minute", self.at.date()).exists())
+
+    def test_plain_partition_reader_yields_before_parsing_the_next_record(self):
+        path = self.data_dir / "stream.v1.jsonl"
+        path.write_text('{"one":1}\n{"two":2}\n', encoding="utf-8")
+        original_loads = json.loads
+        calls = 0
+
+        def fail_on_second_record(raw):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise RuntimeError("read past the requested record")
+            return original_loads(raw)
+
+        with mock.patch("bk.usage_store.json.loads", side_effect=fail_on_second_record):
+            records = self.store._read_jsonl(path)
+            self.assertEqual(next(records), {"one": 1})
+            with self.assertRaisesRegex(RuntimeError, "read past"):
+                next(records)
+
+    def test_limited_forward_query_has_bounded_partition_memory(self):
+        self.store.append_rollups([self._rollup_at(0)])
+        path = self.store._partition_path("minute", self.at.date())
+        line = path.read_bytes()
+        with path.open("wb") as fh:
+            for _ in range(50_000):
+                fh.write(line)
+
+        tracemalloc.start()
+        try:
+            records = list(self.store.iter_rollups("minute", limit=1))
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        self.assertEqual(len(records), 1)
+        self.assertLess(peak, 8 * 1024 * 1024)
 
     def test_append_refuses_to_create_a_partition_the_reader_cannot_open(self):
         self.store.append_rollups([self._rollup_at(0)])
@@ -270,6 +309,36 @@ class UsageStoreTests(unittest.TestCase):
 
         with self.assertRaises((OSError, UsageFormatError, EOFError)):
             list(self.store.iter_rollups("minute"))
+
+    def test_closed_partition_parses_the_same_inode_that_was_verified(self):
+        self.store.append_rollups([self._rollup_at(0)])
+        self.store.maintain(UsageRetentionPolicy(minute_days=0), now=self.at + timedelta(days=1))
+        path = self.store._partition_path("minute", self.at.date()).with_suffix(".jsonl.gz")
+        with gzip.open(path, "rb") as fh:
+            replacement_record = json.loads(fh.read())
+        replacement_record["g"] = 7
+        replacement = path.with_name("replacement.jsonl.gz")
+        with gzip.open(replacement, "wb") as fh:
+            fh.write(
+                (json.dumps(replacement_record, separators=(",", ":"), sort_keys=True) + "\n").encode()
+            )
+        replacement.chmod(0o600)
+        real_scan = self.store._scan_closed_stream
+
+        def replace_path_after_verification(raw, scanned_path):
+            result = real_scan(raw, scanned_path)
+            os.replace(replacement, scanned_path)
+            return result
+
+        with mock.patch.object(
+            self.store,
+            "_scan_closed_stream",
+            side_effect=replace_path_after_verification,
+        ):
+            records = list(self.store.iter_rollups("minute"))
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["gpu"], 0)
 
     def test_corrupt_derived_partition_prevents_fine_source_deletion(self):
         workload_id = self.store.register_workload(1001, describe_workload("python train.py"))
