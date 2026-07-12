@@ -68,6 +68,20 @@ class TimeParsingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "5-minute boundary"):
             parse_friendly_start("2030-01-01T12:41:00Z", datetime(2030, 1, 1, tzinfo=timezone.utc))
 
+    def test_read_only_time_parser_can_select_aligned_past_intervals(self):
+        now = datetime(2030, 1, 1, 12, 40, tzinfo=timezone.utc)
+
+        with self.assertRaisesRegex(ValueError, "before the current"):
+            parse_friendly_start("2029-12-31T23:55:00Z", now)
+        self.assertEqual(
+            parse_friendly_start(
+                "2029-12-31T23:55:00Z",
+                now,
+                allow_past=True,
+            ),
+            datetime(2029, 12, 31, 23, 55, tzinfo=timezone.utc),
+        )
+
     def test_custom_granularity_controls_friendly_and_queued_times(self):
         now = datetime(2030, 1, 1, 12, 47, 23, tzinfo=timezone.utc)
 

@@ -27,8 +27,16 @@ from .monitor import (
     monitor_configuration_error,
     run_monitor,
 )
-from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError
+from .models import (
+    MODE_EXCLUSIVE,
+    MODE_SHARED,
+    STATUS_ACTIVE,
+    STATUS_EXPIRED,
+    Actor,
+    BookingError,
+)
 from .policy import validate_ledger_policy
+from .schedule_index import ReservationIndex
 from .scheduler import (
     find_earliest_slot,
     find_policy_violations,
@@ -2610,7 +2618,7 @@ def _status_command(
         "--from",
         dest="start",
         default="now",
-        help="window start: now, +30m, 20:00, tomorrow 09:00, or ISO",
+        help="window start: now, +30m, 20:00, tomorrow 09:00, or ISO; past times are allowed",
     )
     parser.add_argument("--window", help="display span, e.g. 2h, 8h, or 1d")
     parser.add_argument(
@@ -2632,7 +2640,11 @@ def _status_command(
     window_seconds = parse_duration_seconds(window_raw)
     step_seconds = _resolve_timeline_step(args.step, window_seconds, config.slot_seconds)
     start = _floor_timeline_start(
-        parse_friendly_start(args.start, slot_minutes=config.slot_minutes),
+        parse_friendly_start(
+            args.start,
+            slot_minutes=config.slot_minutes,
+            allow_past=True,
+        ),
         step_seconds,
     )
     if window_seconds % step_seconds:
@@ -2829,7 +2841,11 @@ def _print_timeline(
     start = _floor_timeline_start(start or utc_now(), step_seconds)
     end = start + timedelta(seconds=window_seconds)
     slots = window_seconds // step_seconds
-    active = list_active(store.load(), start)
+    visible = ReservationIndex.from_ledger(
+        store.load(),
+        start,
+        statuses=(STATUS_ACTIVE, STATUS_EXPIRED),
+    ).records()
     actor = _current_actor()
     local_start = start.astimezone()
     local_end = end.astimezone()
@@ -2852,7 +2868,7 @@ def _print_timeline(
                 slot_end = slot_start + timedelta(seconds=step_seconds)
                 overlapping = [
                     item
-                    for item in active
+                    for item in visible
                     if gpu in item.get("gpus", [])
                     and parse_iso(item["start_at"]) < slot_end
                     and slot_start < parse_iso(item["end_at"])

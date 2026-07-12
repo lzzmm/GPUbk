@@ -4,6 +4,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Let the plain CLI timeline select past intervals and render retained expired reservations,
+  matching the TUI history view while continuing to hide cancelled bookings.
 - Enforce scheduled-command reservation boundaries by sending TERM during a configurable
   pre-deadline grace window and KILL at the exact deadline, while retaining the same bounded grace
   after cancellation or worker shutdown and aligning the bundled systemd stop timeout.

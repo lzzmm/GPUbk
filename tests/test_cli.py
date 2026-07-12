@@ -1428,6 +1428,65 @@ class CliTests(unittest.TestCase):
             self.assertIn("M4", gpu_line)
             self.assertNotIn("M3", gpu_line)
 
+    def test_timeline_keeps_retained_expired_history_but_hides_cancellations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            created = self.run_bk(
+                ["1", "30m", "--start", "2030-01-01T00:00:00Z"],
+                data_dir,
+            )
+            self.assertEqual(created.returncode, 0, created.stderr)
+
+            ledger_path = data_dir / "ledger.json"
+            ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+            reservation = ledger["reservations"][0]
+            reservation.update(
+                {
+                    "start_at": "2020-01-01T00:00:00Z",
+                    "end_at": "2020-01-01T00:30:00Z",
+                    "status": "expired",
+                }
+            )
+            ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+
+            historical = self.run_bk(
+                [
+                    "tl",
+                    "--from",
+                    "2020-01-01T00:00:00Z",
+                    "--window",
+                    "30m",
+                    "--step",
+                    "5m",
+                ],
+                data_dir,
+            )
+            self.assertEqual(historical.returncode, 0, historical.stderr)
+            historical_gpu = next(
+                line for line in historical.stdout.splitlines() if line.startswith("G0")
+            )
+            self.assertIn("M1", historical_gpu)
+
+            reservation["status"] = "cancelled"
+            ledger_path.write_text(json.dumps(ledger), encoding="utf-8")
+            cancelled = self.run_bk(
+                [
+                    "tl",
+                    "--from",
+                    "2020-01-01T00:00:00Z",
+                    "--window",
+                    "30m",
+                    "--step",
+                    "5m",
+                ],
+                data_dir,
+            )
+            self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
+            cancelled_gpu = next(
+                line for line in cancelled.stdout.splitlines() if line.startswith("G0")
+            )
+            self.assertNotIn("M1", cancelled_gpu)
+
     def test_status_ignores_system_gpu_contexts_when_deciding_busy_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

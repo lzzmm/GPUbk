@@ -122,6 +122,7 @@ bk st --timeline                   # append the default timeline
 bk tl                              # current booking interval, next 2 hours
 bk tl 8h --step 15m --gpu 0,1
 bk tl --from 20:00 --window 1d --step auto
+bk tl --from "2026-07-12T09:00:00+08:00" --window 4h
 bk slots 2 1h --mem 12g            # read-only placement alternatives
 bk slots x 1 30m --limit 3
 ```
@@ -131,7 +132,8 @@ capacity used in a slice that includes one of your bookings; `S1`-`S9` is total
 shared capacity used only by others; and `MX`/`XX` are exclusive bookings.
 Narrow terminals
 wrap the timeline at whole-hour boundaries without reducing the requested
-resolution.
+resolution. A past `--from` is read-only and includes retained expired
+reservations; cancelled reservations remain hidden.
 
 When the current UID has a pending, claimed, or running scheduled command,
 `bk st` also reports the private worker's kernel-proven state and warns if the

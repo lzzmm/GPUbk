@@ -48,10 +48,13 @@ def parse_friendly_start(
     value: str,
     now: datetime | None = None,
     slot_minutes: int = DEFAULT_SLOT_MINUTES,
+    *,
+    allow_past: bool = False,
 ) -> datetime:
     slot_minutes = validate_slot_minutes(slot_minutes)
     raw = value.strip()
     current = (now if now is not None else datetime.now(timezone.utc)).astimezone(timezone.utc)
+    current_floor = floor_to_slot(current, slot_minutes)
     if not raw or raw.lower() == "now":
         return floor_to_slot(current, slot_minutes)
     if raw.startswith("+"):
@@ -78,9 +81,15 @@ def parse_friendly_start(
         candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if day_offset is not None:
             candidate += timedelta(days=day_offset)
-            if candidate.astimezone(timezone.utc) < floor_to_slot(current, slot_minutes):
+            if (
+                not allow_past
+                and candidate.astimezone(timezone.utc) < current_floor
+            ):
                 raise ValueError(f"start time is before the current {slot_phrase(slot_minutes)} interval")
-        elif candidate.astimezone(timezone.utc) < floor_to_slot(current, slot_minutes):
+        elif (
+            not allow_past
+            and candidate.astimezone(timezone.utc) < current_floor
+        ):
             candidate += timedelta(days=1)
         return _validate_friendly_boundary(candidate, slot_minutes)
 
@@ -96,7 +105,10 @@ def parse_friendly_start(
                 minute,
                 tzinfo=local_zone,
             )
-            if candidate.astimezone(timezone.utc) < floor_to_slot(current, slot_minutes):
+            if (
+                not allow_past
+                and candidate.astimezone(timezone.utc) < current_floor
+            ):
                 candidate = candidate.replace(year=local_now.year + 1)
         except ValueError as exc:
             raise ValueError("invalid calendar date") from exc
@@ -111,7 +123,10 @@ def parse_friendly_start(
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=local_zone)
     parsed = _validate_friendly_boundary(parsed, slot_minutes)
-    if parsed.astimezone(timezone.utc) < floor_to_slot(current, slot_minutes):
+    if (
+        not allow_past
+        and parsed.astimezone(timezone.utc) < current_floor
+    ):
         raise ValueError(f"start time is before the current {slot_phrase(slot_minutes)} interval")
     return parsed
 
