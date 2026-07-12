@@ -547,7 +547,7 @@ def find_earliest_slot(
     search_until = search_start + timedelta(hours=config.queue_search_hours)
     index = ReservationIndex.from_ledger(ledger, min(search_start, now))
     candidate_starts = _candidate_starts_from_index(
-        index, search_start, search_until, now, config.slot_minutes
+        index, search_start, search_until, config.slot_minutes
     )
     if not allow_queue:
         candidate_starts = [earliest_start]
@@ -1401,20 +1401,17 @@ def _candidate_starts(
 ) -> List[datetime]:
     now = utc_now()
     index = ReservationIndex.from_ledger(ledger, min(earliest_start, now))
-    return _candidate_starts_from_index(index, earliest_start, search_until, now, slot_minutes)
+    return _candidate_starts_from_index(index, earliest_start, search_until, slot_minutes)
 
 
 def _candidate_starts_from_index(
     index: ReservationIndex,
     earliest_start: datetime,
     search_until: datetime,
-    now: datetime,
     slot_minutes: int,
 ) -> List[datetime]:
     candidates = {ceil_to_slot(earliest_start, slot_minutes)}
     for reservation in index.spans:
-        if reservation.end <= now:
-            continue
         end = ceil_to_slot(reservation.end, slot_minutes)
         if earliest_start <= end <= search_until:
             candidates.add(end)

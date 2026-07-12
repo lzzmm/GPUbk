@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Preserve implicit active-slice scheduling while still queueing to the next configured
+  boundary when a non-aligned legacy reservation ended earlier inside the current slice,
+  instead of incorrectly reporting no future slot.
 - Make contextual CLI help side-effect free, add an explicit `bk book` alias and
   `bk help COMMAND`, and expose the usage-command overview instead of accidentally
   entering guided, TUI, MCP, or default-query execution paths.

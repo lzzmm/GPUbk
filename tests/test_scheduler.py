@@ -594,6 +594,40 @@ class SchedulerModeTests(unittest.TestCase):
         self.assertEqual(parse_iso(result.reservation["start_at"]), self.start)
         self.assertEqual(parse_iso(result.reservation["end_at"]), self.start + timedelta(hours=1))
 
+    def test_implicit_now_queues_after_legacy_end_inside_the_current_slot(self):
+        now = self.start + timedelta(minutes=1, seconds=17)
+        legacy_end = self.start + timedelta(seconds=30)
+        ledger = {
+            "version": 1,
+            "reservations": [
+                {
+                    "id": "legacy-sub-slot-end",
+                    "uid": 1009,
+                    "username": "legacy",
+                    "gpus": [0],
+                    "mode": MODE_EXCLUSIVE,
+                    "start_at": (self.start - timedelta(hours=1)).isoformat(),
+                    "end_at": legacy_end.isoformat(),
+                    "status": "active",
+                }
+            ],
+        }
+
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            slot = find_earliest_slot(
+                ledger,
+                self.config,
+                1,
+                now,
+                timedelta(hours=1),
+                MODE_EXCLUSIVE,
+                1001,
+                allow_queue=True,
+            )
+
+        self.assertIsNotNone(slot)
+        self.assertEqual(slot[0], self.start + timedelta(minutes=5))
+
     def test_future_unaligned_queue_start_is_still_rounded_up(self):
         now = self.start - timedelta(minutes=30)
         requested = self.start + timedelta(minutes=1)
