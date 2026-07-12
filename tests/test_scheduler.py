@@ -131,6 +131,27 @@ class SchedulerModeTests(unittest.TestCase):
         self.assertEqual(retried.reservation["id"], first.reservation["id"])
         self.assertEqual(len(self.store.load()["reservations"]), 1)
 
+    def test_create_operation_retry_remains_idempotent_after_its_start(self):
+        request = self.request(
+            1001,
+            MODE_EXCLUSIVE,
+            op_id="agent-create-before-start",
+        )
+        with mock.patch(
+            "bk.scheduler.utc_now",
+            return_value=self.start - timedelta(hours=1),
+        ):
+            first = add_booking(self.store, self.config, request)
+        with mock.patch(
+            "bk.scheduler.utc_now",
+            return_value=self.start + timedelta(minutes=5),
+        ):
+            retried = add_booking(self.store, self.config, request)
+
+        self.assertTrue(first.created)
+        self.assertFalse(retried.created)
+        self.assertEqual(first.reservation["id"], retried.reservation["id"])
+
     def test_operation_id_signature_includes_share_units(self):
         config = replace(self.config, max_shared_users=4)
         add_booking(
@@ -594,7 +615,7 @@ class SchedulerModeTests(unittest.TestCase):
         self.assertEqual(parse_iso(result.reservation["start_at"]), self.start)
         self.assertEqual(parse_iso(result.reservation["end_at"]), self.start + timedelta(hours=1))
 
-    def test_implicit_now_queues_after_legacy_end_inside_the_current_slot(self):
+    def test_implicit_now_ignores_legacy_end_before_now_inside_the_current_slot(self):
         now = self.start + timedelta(minutes=1, seconds=17)
         legacy_end = self.start + timedelta(seconds=30)
         ledger = {
@@ -626,7 +647,66 @@ class SchedulerModeTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(slot)
+        self.assertEqual(slot[0], self.start)
+
+    def test_implicit_now_queues_while_legacy_record_is_still_active(self):
+        now = self.start + timedelta(minutes=1, seconds=17)
+        legacy_end = self.start + timedelta(minutes=2)
+        ledger = {
+            "version": 1,
+            "reservations": [
+                {
+                    "id": "legacy-still-active",
+                    "uid": 1009,
+                    "username": "legacy",
+                    "gpus": [0],
+                    "mode": MODE_EXCLUSIVE,
+                    "start_at": (self.start - timedelta(hours=1)).isoformat(),
+                    "end_at": legacy_end.isoformat(),
+                    "status": "active",
+                }
+            ],
+        }
+
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            slot = find_earliest_slot(
+                ledger,
+                self.config,
+                1,
+                now,
+                timedelta(hours=1),
+                MODE_EXCLUSIVE,
+                1001,
+                allow_queue=True,
+            )
+
+        self.assertIsNotNone(slot)
         self.assertEqual(slot[0], self.start + timedelta(minutes=5))
+
+    def test_exact_create_rejects_before_but_allows_the_current_slot(self):
+        now = self.start + timedelta(minutes=1, seconds=17)
+        before = self.store.load()
+
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            with self.assertRaisesRegex(BookingError, "current booking slice"):
+                add_booking(
+                    self.store,
+                    self.config,
+                    self.request(
+                        1001,
+                        MODE_EXCLUSIVE,
+                        start=self.start - timedelta(minutes=5),
+                    ),
+                )
+
+        self.assertEqual(self.store.load(), before)
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            created = add_booking(
+                self.store,
+                self.config,
+                self.request(1001, MODE_EXCLUSIVE, start=self.start),
+            )
+        self.assertEqual(parse_iso(created.reservation["start_at"]), self.start)
 
     def test_future_unaligned_queue_start_is_still_rounded_up(self):
         now = self.start - timedelta(minutes=30)

@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Sequence
 from .advisor import GpuAdvice, build_gpu_advice
 from .allocator import AllocatorDecision, apply_external_allocator
 from .config import Config
-from .granularity import is_slot_aligned, slot_phrase
+from .granularity import floor_to_slot, is_slot_aligned, slot_phrase
 from .ledger_schema import MAX_EDIT_OPERATIONS_PER_RESERVATION
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, BookingResult, EditRequest
 from .policy import validate_ledger_policy
@@ -422,6 +422,8 @@ def recommend_booking(
         if allow_queue
         else start_at
     )
+    if effective_start < floor_to_slot(generated_at, config.slot_minutes):
+        raise BookingError("booking start must not be before the current booking slice")
     effective_share_units = _validate_recommendation_request(
         config,
         count,

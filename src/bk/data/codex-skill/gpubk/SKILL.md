@@ -37,7 +37,8 @@ Read [references/protocol.md](references/protocol.md) when implementing an integ
 3. If expected VRAM is unknown, state that GPUbk derives it from the requested share. Share units constrain admission; they do not physically enforce GPU compute bandwidth without MIG/MPS.
 4. Inspect context immediately before recommending. Current processes can change quickly.
 5. Run a read-only recommendation. Explain queued start, selected GPUs, confidence, live-busy warnings, and projected memory headroom.
-6. Treat explicit start as exact. Do not silently convert it to queueing.
+6. Treat explicit start as exact. It may use the active slice boundary or a future boundary,
+   never an older historical slice. Do not silently convert it to queueing.
 7. Let GPUbk enforce conflicts and memory limits. Never infer that an unsafe placement is acceptable.
 
 Use shared mode for workloads that can coexist within both capacity-unit and VRAM limits. Use exclusive mode when the experiment needs the whole device, has unpredictable memory behavior, or must avoid interference.

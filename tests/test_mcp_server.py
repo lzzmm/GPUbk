@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stdout
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from unittest import mock
@@ -80,6 +80,25 @@ class McpBackendTests(unittest.TestCase):
         self.assertEqual(first["allocation"]["selected"][0]["gpu"], 0)
         self.assertEqual(first["reservation"]["id"], second["reservation"]["id"])
         self.assertEqual(len(self.store.load()["reservations"]), 1)
+
+    def test_booking_rejects_a_historical_exact_start_without_writing(self):
+        now = datetime.now(timezone.utc)
+        current_slice = now.replace(
+            minute=now.minute - (now.minute % self.config.slot_minutes),
+            second=0,
+            microsecond=0,
+        )
+        past = current_slice - timedelta(minutes=self.config.slot_minutes)
+
+        with self.assertRaisesRegex(BookingError, "current booking slice"):
+            self.backend.book(
+                1,
+                "30m",
+                "mcp-historical-create",
+                start=past.isoformat(),
+            )
+
+        self.assertEqual(self.store.load()["reservations"], [])
 
     def test_weighted_share_is_available_to_mcp_clients(self):
         first = self.backend.book(1, "30m", "mcp-weighted-1", gpus=[0], share="2")

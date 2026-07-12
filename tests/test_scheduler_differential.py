@@ -58,6 +58,7 @@ def _gpu_available(records, gpu, start, end, mode, capacity, requested_units):
 
 
 def _oracle_start(records, config, count, earliest, duration, mode, preferred, units):
+    records = [record for record in records if record["_end"] > NOW]
     step = config.slot_seconds
     candidate = (
         _aligned(NOW, step, floor=True)
@@ -152,8 +153,9 @@ class SchedulerDifferentialTests(unittest.TestCase):
                 if rng.random() < 0.3
                 else None
             )
+            active_records = [record for record in records if record["_end"] > NOW]
             expected = _oracle_start(
-                records,
+                active_records,
                 config,
                 count,
                 earliest,
@@ -187,7 +189,7 @@ class SchedulerDifferentialTests(unittest.TestCase):
                 self.assertTrue(
                     all(
                         _gpu_available(
-                            records,
+                            active_records,
                             gpu,
                             actual[0],
                             actual[0] + duration,

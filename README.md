@@ -93,6 +93,9 @@ Scheduling rules are intentionally small:
 - `--at` accepts `+30m`, `20:00`, `tomorrow 09:00`, or `07-13 20:00`.
   `--start` keeps exact ISO 8601 input for scripts and Agents. Either is exact;
   a conflict returns an error instead of silently moving the reservation.
+- An exact new booking may use the current slice boundary or a future boundary. An
+  earlier historical slice is rejected; retrying an already-applied operation ID still
+  returns the original reservation.
 - Each GPU has `max_shared_users` capacity units. A shared booking uses one unit
   by default; `--share 3/4`, `--share 3`, and an exact percentage select a
   larger portion. `--share-with 1` reserves all but one unit. Capacity is checked

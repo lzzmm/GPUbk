@@ -1667,7 +1667,7 @@ def _find_add_slot(
         minutes=max(1, state.add_duration_steps) * state.booking_slot_minutes
     )
     mode = state.add_booking_mode if state.add_booking_mode in {MODE_SHARED, MODE_EXCLUSIVE} else MODE_SHARED
-    ledger = _availability_ledger(store.load(), state)
+    ledger = _availability_ledger(store.load(), state, at=now)
     advice = build_gpu_advice(config)
     if advice.memory_capacities_mb:
         state.gpu_memory_capacity_mb = advice.memory_capacities_mb
@@ -1850,14 +1850,20 @@ def _frame_editor_window(
     )
 
 
-def _availability_ledger(ledger: dict, state: TuiState) -> dict:
+def _availability_ledger(
+    ledger: dict,
+    state: TuiState,
+    *,
+    at: Optional[datetime] = None,
+) -> dict:
+    active = list_active(ledger, at or utc_now())
     if not state.edit_mode or not state.edit_reservation_id:
-        return ledger
+        return {**ledger, "reservations": active}
     return {
         **ledger,
         "reservations": [
             item
-            for item in ledger.get("reservations", [])
+            for item in active
             if item.get("id") != state.edit_reservation_id
         ],
     }
@@ -2089,7 +2095,7 @@ def _build_add_preview(ledger: dict, config: Config, state: TuiState, view_start
             share_units=state.add_share_units,
             share_capacity=config.max_shared_users,
         )
-    availability_ledger = _availability_ledger(ledger, state)
+    availability_ledger = _availability_ledger(ledger, state, at=now)
     for gpu in selected:
         ok, reason = availability_detail(
             availability_ledger,

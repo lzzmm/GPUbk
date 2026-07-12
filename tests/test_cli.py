@@ -1643,6 +1643,34 @@ class CliTests(unittest.TestCase):
             self.assertTrue(result.stdout.startswith("created:"), result.stdout)
             self.assertIn("mode=shared", result.stdout)
 
+    def test_exact_create_and_agent_recommend_reject_a_historical_slot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            past = floor_5m(datetime.now(timezone.utc)) - timedelta(minutes=5)
+            start = iso(past)
+
+            create = self.run_bk(["1", "30m", "--start", start], data_dir)
+            recommend = self.run_bk(
+                [
+                    "agent",
+                    "recommend",
+                    "1",
+                    "30m",
+                    "--start",
+                    start,
+                    "--compact",
+                ],
+                data_dir,
+            )
+
+            self.assertEqual(create.returncode, 2)
+            self.assertIn("current booking slice", create.stderr)
+            self.assertEqual(recommend.returncode, 2)
+            payload = json.loads(recommend.stdout)
+            self.assertEqual(payload["kind"], "error")
+            self.assertIn("current booking slice", payload["error"]["message"])
+            self.assertFalse((data_dir / "ledger.json").exists())
+
     def test_unknown_command_uses_the_default_english_interface(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_bk(["not-a-command"], Path(tmp))

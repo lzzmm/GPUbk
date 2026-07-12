@@ -290,6 +290,119 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(submission.result.reservation["start_at"], "2030-01-01T12:40:00Z")
         self.assertFalse(submission.result.queued)
 
+    def test_recommendation_and_create_ignore_the_same_expired_legacy_record(self):
+        active_slice = self.start + timedelta(minutes=40)
+        now = active_slice + timedelta(minutes=1, seconds=23)
+        legacy = add_booking(
+            self.store,
+            self.config,
+            BookingRequest(
+                actor=Actor(1002, "legacy"),
+                count=1,
+                duration_seconds=60 * 60,
+                start_at=active_slice - timedelta(hours=1),
+                mode=MODE_EXCLUSIVE,
+                preferred_gpus=[0],
+            ),
+        )
+
+        def make_sub_slot_legacy(ledger):
+            reservation = next(
+                item for item in ledger["reservations"] if item["id"] == legacy.reservation["id"]
+            )
+            reservation["end_at"] = (active_slice + timedelta(seconds=30)).isoformat()
+            return ledger, None, [], True
+
+        self.store.transaction(make_sub_slot_legacy)
+        with (
+            mock.patch("bk.service.utc_now", return_value=now),
+            mock.patch("bk.scheduler.utc_now", return_value=now),
+        ):
+            recommendation = recommend_booking(
+                self.config,
+                self.store,
+                self.actor,
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=now,
+                mode=MODE_EXCLUSIVE,
+                preferred_gpus=[0],
+                allow_queue=True,
+                advice=self.advice,
+            )
+            submission = submit_booking(
+                self.config,
+                self.store,
+                self.actor,
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=now,
+                mode=MODE_EXCLUSIVE,
+                preferred_gpus=[0],
+                allow_queue=True,
+                advice=self.advice,
+            )
+
+        self.assertEqual(recommendation["recommendation"]["start_at"], "2030-01-01T12:40:00Z")
+        self.assertEqual(submission.result.reservation["start_at"], "2030-01-01T12:40:00Z")
+        stored_legacy = next(
+            item
+            for item in self.store.load()["reservations"]
+            if item["id"] == legacy.reservation["id"]
+        )
+        self.assertEqual(stored_legacy["status"], "expired")
+
+    def test_exact_recommendation_and_create_reject_before_the_current_slot(self):
+        now = self.start + timedelta(minutes=41, seconds=23)
+        current_start = self.start + timedelta(minutes=40)
+        past_start = self.start + timedelta(minutes=35)
+        before = self.store.load()
+
+        with (
+            mock.patch("bk.service.utc_now", return_value=now),
+            mock.patch("bk.scheduler.utc_now", return_value=now),
+        ):
+            with self.assertRaisesRegex(BookingError, "current booking slice"):
+                recommend_booking(
+                    self.config,
+                    self.store,
+                    self.actor,
+                    count=1,
+                    duration_seconds=30 * 60,
+                    start_at=past_start,
+                    mode=MODE_SHARED,
+                    allow_queue=False,
+                    advice=self.advice,
+                )
+            with self.assertRaisesRegex(BookingError, "current booking slice"):
+                submit_booking(
+                    self.config,
+                    self.store,
+                    self.actor,
+                    count=1,
+                    duration_seconds=30 * 60,
+                    start_at=past_start,
+                    mode=MODE_SHARED,
+                    allow_queue=False,
+                    advice=self.advice,
+                )
+            current = recommend_booking(
+                self.config,
+                self.store,
+                self.actor,
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=current_start,
+                mode=MODE_SHARED,
+                preferred_gpus=[1],
+                allow_queue=False,
+                advice=self.advice,
+            )
+
+        self.assertEqual(self.store.load(), before)
+        self.assertTrue(current["available"])
+        self.assertEqual(current["recommendation"]["start_at"], "2030-01-01T12:40:00Z")
+
     def test_weighted_share_is_exposed_in_recommendation_and_public_result(self):
         config = Config(data_dir=self.data_dir, gpu_count=2, max_shared_users=4)
         advice = build_gpu_advice(config, snapshots=self.snapshots, history={}, at=self.start)

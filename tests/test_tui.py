@@ -514,6 +514,44 @@ class TuiAddPreviewTests(unittest.TestCase):
         expected = now.replace(minute=0, second=0).astimezone().strftime("%m-%d %H:%M")
         self.assertIn(f"at or after {expected}", preview.reason)
 
+    def test_preview_ignores_ended_legacy_record_but_blocks_a_live_one(self):
+        now = self.start + timedelta(minutes=1, seconds=17)
+        ended = reservation(
+            "ended",
+            os.getuid() + 1,
+            MODE_EXCLUSIVE,
+            [0],
+            self.start - timedelta(hours=1),
+            self.start + timedelta(seconds=30),
+        )
+        live = reservation(
+            "live",
+            os.getuid() + 1,
+            MODE_EXCLUSIVE,
+            [0],
+            self.start - timedelta(hours=1),
+            self.start + timedelta(minutes=2),
+        )
+        state = self.state(mode=MODE_EXCLUSIVE, gpus={0})
+
+        with mock.patch("bk.tui.utc_now", return_value=now):
+            ended_preview = _build_add_preview(
+                self.ledger([ended]),
+                self.config,
+                state,
+                self.start,
+            )
+            live_preview = _build_add_preview(
+                self.ledger([live]),
+                self.config,
+                state,
+                self.start,
+            )
+
+        self.assertTrue(ended_preview.valid, ended_preview.reason)
+        self.assertFalse(live_preview.valid)
+        self.assertIn("exclusive conflict", live_preview.reason)
+
     def test_preview_rejects_shared_memory_oversubscription(self):
         existing = reservation("one", os.getuid(), MODE_SHARED, [0], self.start, self.end)
         existing["expected_memory_mb"] = 16 * 1024

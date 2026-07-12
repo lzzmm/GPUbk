@@ -21,7 +21,7 @@ bk usage me --since 24h --json --compact
 bk usage samples --since 2d --resolution 5m --json --compact
 ```
 
-Omitting `--start` uses the active configured booking interval when possible, then permits earliest-slot queueing. Providing `--start` means exact placement. Read `policy.granularity_minutes` from context instead of assuming five minutes. Human CLI users may use `--at`; Agents should keep using explicit ISO 8601 and structured fields.
+Omitting `--start` uses the active configured booking interval when possible, then permits earliest-slot queueing. Providing `--start` means exact placement at the active slice boundary or a future boundary; a new write to an older historical slice is rejected. Read `policy.granularity_minutes` from context instead of assuming five minutes. Human CLI users may use `--at`; Agents should keep using explicit ISO 8601 and structured fields.
 The ledger binds its scheduling and storage policy on first write. Agents must surface policy-mismatch errors instead of retrying with altered local limits.
 
 Recommendation fields:
@@ -108,7 +108,7 @@ read-only; create and edit are idempotent writes because they require operation 
 destructive and non-idempotent; private-spec cleanup is destructive but idempotent; all tools are
 closed-world local operations.
 
-An operation ID identifies one immutable write intent for the current UID. Exact retries return `status=exists`; reusing that ID with another reservation or different fields returns a structured error. Started reservations and explicit edit starts in the past are rejected. A valid edit start remains exact unless `allow_queue=true` is explicitly supplied to resolve a resource conflict.
+An operation ID identifies one immutable write intent for the current UID. Exact retries return `status=exists`, including confirmation after the original start; reusing that ID with another reservation or different fields returns a structured error. New exact starts before the active booking slice, started reservation edits, and explicit edit starts in the past are rejected. A valid edit start remains exact unless `allow_queue=true` is explicitly supplied to resolve a resource conflict.
 Each retained reservation keeps at most 256 idempotent edit intents so malformed automation cannot grow one hot record without bound. Recreate an unusually long-lived reservation before exceeding that limit.
 
 ## External Allocator

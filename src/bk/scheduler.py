@@ -9,7 +9,13 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .config import Config
-from .granularity import DEFAULT_SLOT_MINUTES, ceil_to_slot, is_slot_aligned, slot_phrase
+from .granularity import (
+    DEFAULT_SLOT_MINUTES,
+    ceil_to_slot,
+    floor_to_slot,
+    is_slot_aligned,
+    slot_phrase,
+)
 from .ledger_schema import MAX_EDIT_OPERATIONS_PER_RESERVATION
 from .models import (
     MODE_EXCLUSIVE,
@@ -120,6 +126,13 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
                 )
                 if duplicate is not None:
                     return ledger, BookingResult(duplicate, False, "duplicate request ignored"), [], changed
+
+        current_slice_start = floor_to_slot(now, config.slot_minutes)
+        if start < current_slice_start:
+            raise BookingError(
+                "booking start must not be before the current booking slice "
+                f"({to_iso(current_slice_start)})"
+            )
 
         slot = find_earliest_slot(
             ledger,
@@ -545,7 +558,7 @@ def find_earliest_slot(
         else earliest_start
     )
     search_until = search_start + timedelta(hours=config.queue_search_hours)
-    index = ReservationIndex.from_ledger(ledger, min(search_start, now))
+    index = ReservationIndex.from_ledger(ledger, now)
     candidate_starts = _candidate_starts_from_index(
         index, search_start, search_until, config.slot_minutes
     )
@@ -1400,7 +1413,7 @@ def _candidate_starts(
     slot_minutes: int = DEFAULT_SLOT_MINUTES,
 ) -> List[datetime]:
     now = utc_now()
-    index = ReservationIndex.from_ledger(ledger, min(earliest_start, now))
+    index = ReservationIndex.from_ledger(ledger, now)
     return _candidate_starts_from_index(index, earliest_start, search_until, slot_minutes)
 
 
