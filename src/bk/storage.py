@@ -262,6 +262,7 @@ class LedgerStore:
                     "actual": f"{actual:04o}",
                 }
             )
+        managed_gid = metadata.st_gid if self.dir_mode & stat.S_ISGID else None
 
         backup_dir_safe = False
         if os.path.lexists(self.backup_dir):
@@ -288,6 +289,14 @@ class LedgerStore:
                     )
                 else:
                     backup_dir_safe = True
+                    group_issue = _managed_gid_issue(
+                        self.backup_dir,
+                        metadata,
+                        managed_gid,
+                        path_type="directory",
+                    )
+                    if group_issue is not None:
+                        issues.append(group_issue)
                     actual = metadata.st_mode & 0o7777
                     if actual != self.dir_mode:
                         issues.append(
@@ -337,6 +346,14 @@ class LedgerStore:
                         "message": "a durable transaction is waiting for recovery",
                     }
                 )
+            group_issue = _managed_gid_issue(
+                path,
+                metadata,
+                managed_gid,
+                path_type="file",
+            )
+            if group_issue is not None:
+                issues.append(group_issue)
             actual = metadata.st_mode & 0o777
             if actual != self.file_mode:
                 issues.append(
@@ -393,6 +410,14 @@ class LedgerStore:
                         )
                         continue
                     actual_mode = metadata.st_mode & 0o777
+                    group_issue = _managed_gid_issue(
+                        path,
+                        metadata,
+                        managed_gid,
+                        path_type="file",
+                    )
+                    if group_issue is not None:
+                        issues.append(group_issue)
                     if actual_mode != self.file_mode:
                         issues.append(
                             {
@@ -798,6 +823,24 @@ def _audit_event_view(item: dict, uid: int) -> dict:
         else None
     )
     return view
+
+
+def _managed_gid_issue(
+    path: Path,
+    metadata: os.stat_result,
+    expected_gid: Optional[int],
+    *,
+    path_type: str,
+) -> Optional[dict]:
+    if expected_gid is None or metadata.st_gid == expected_gid:
+        return None
+    return {
+        "type": f"{path_type}-gid",
+        "path": str(path),
+        "expected_gid": expected_gid,
+        "actual_gid": metadata.st_gid,
+        "message": "path did not inherit the setgid data-directory group",
+    }
 
 
 def _atomic_write_json(

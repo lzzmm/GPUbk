@@ -115,6 +115,12 @@ def _probe_atomic_replace(config: Config) -> dict:
     message = "same-directory replace, file fsync, and directory fsync succeeded"
     details = {}
     try:
+        directory_metadata = config.data_dir.lstat()
+        expected_gid = (
+            directory_metadata.st_gid
+            if config.dir_mode & stat.S_ISGID
+            else None
+        )
         fd = open_or_create_regular(source, os.O_WRONLY, config.file_mode)
         if os.write(fd, payload) != len(payload):
             raise OSError("short write during atomic replace probe")
@@ -133,7 +139,15 @@ def _probe_atomic_replace(config: Config) -> dict:
             raise OSError(
                 f"probe file mode {actual_mode:04o} does not match configured {config.file_mode:04o}"
             )
+        if expected_gid is not None and metadata.st_gid != expected_gid:
+            raise OSError(
+                f"probe file GID {metadata.st_gid} did not inherit setgid data-directory "
+                f"GID {expected_gid}"
+            )
         details["mode"] = f"{actual_mode:04o}"
+        details["directory_gid"] = directory_metadata.st_gid
+        details["file_gid"] = metadata.st_gid
+        details["setgid_inheritance_checked"] = expected_gid is not None
     except OSError as exc:
         status = "fail"
         message = str(exc)

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from bk.config import Config
@@ -169,6 +170,72 @@ class DeploymentDiagnosticsTests(unittest.TestCase):
             self.assertEqual(checks[0]["status"], "fail")
             self.assertEqual(checks[0]["actual_mode"], "0755")
             self.assertEqual(checks[1]["message"], "data directory is not ready")
+
+    def test_atomic_probe_rejects_missing_setgid_group_inheritance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "shared"
+            config = Config(
+                data_dir=data_dir,
+                gpu_count=1,
+                file_mode=0o660,
+                dir_mode=0o2770,
+            )
+            device = GpuSnapshot(
+                0,
+                "gpu0",
+                memory_total_mb=24000,
+                source="nvml",
+                device_uuid="GPU-00000000-0000-0000-0000-000000000000",
+            )
+            original_lstat = Path.lstat
+
+            def drifted_lstat(path):
+                metadata = original_lstat(path)
+                if path == data_dir:
+                    return SimpleNamespace(
+                        st_mode=metadata.st_mode,
+                        st_uid=metadata.st_uid,
+                        st_gid=metadata.st_gid + 1,
+                    )
+                return metadata
+
+            with (
+                mock.patch.object(Path, "lstat", autospec=True, side_effect=drifted_lstat),
+                mock.patch("bk.diagnostics.snapshot", return_value=[device]),
+            ):
+                checks = run_deployment_probes(config)
+
+            atomic = next(item for item in checks if item["name"] == "atomic-replace")
+            self.assertEqual(atomic["status"], "fail")
+            self.assertIn("did not inherit setgid data-directory GID", atomic["message"])
+            self.assertFalse(probes_ready(checks))
+            self.assertEqual(list(data_dir.glob(".gpubk-probe-*")), [])
+
+    def test_atomic_probe_confirms_setgid_group_inheritance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "shared"
+            config = Config(
+                data_dir=data_dir,
+                gpu_count=1,
+                file_mode=0o660,
+                dir_mode=0o2770,
+            )
+            device = GpuSnapshot(
+                0,
+                "gpu0",
+                memory_total_mb=24000,
+                source="nvml",
+                device_uuid="GPU-00000000-0000-0000-0000-000000000000",
+            )
+
+            with mock.patch("bk.diagnostics.snapshot", return_value=[device]):
+                checks = run_deployment_probes(config)
+
+            atomic = next(item for item in checks if item["name"] == "atomic-replace")
+            self.assertEqual(atomic["status"], "pass")
+            self.assertTrue(atomic["setgid_inheritance_checked"])
+            self.assertEqual(atomic["directory_gid"], atomic["file_gid"])
+            self.assertTrue(probes_ready(checks), checks)
 
 
 if __name__ == "__main__":

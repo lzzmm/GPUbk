@@ -5,6 +5,7 @@ import stat
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from bk.config import Config
@@ -279,6 +280,37 @@ class LedgerStorageTests(unittest.TestCase):
             self.assertEqual(stat.S_IMODE(store.lock_path.stat().st_mode), 0o660)
             backup = next(store.backup_dir.glob("ledger-*.json"))
             self.assertEqual(stat.S_IMODE(backup.stat().st_mode), 0o660)
+
+    def test_health_reports_managed_file_gid_drift_in_setgid_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "shared"
+            store = LedgerStore(data_dir, file_mode=0o660, dir_mode=0o2770)
+
+            def mutate(ledger):
+                ledger["reservations"].append(_reservation("gid-drift"))
+                return ledger, None, [{"action": "test"}], True
+
+            store.transaction(mutate)
+            expected_gid = data_dir.stat().st_gid
+            original_lstat = Path.lstat
+
+            def drifted_lstat(path):
+                metadata = original_lstat(path)
+                if path == store.log_path:
+                    return SimpleNamespace(
+                        st_mode=metadata.st_mode,
+                        st_nlink=metadata.st_nlink,
+                        st_gid=expected_gid + 1,
+                    )
+                return metadata
+
+            with mock.patch.object(Path, "lstat", autospec=True, side_effect=drifted_lstat):
+                issues = store.health_issues()
+
+            issue = next(item for item in issues if item.get("path") == str(store.log_path))
+            self.assertEqual(issue["type"], "file-gid")
+            self.assertEqual(issue["expected_gid"], expected_gid)
+            self.assertEqual(issue["actual_gid"], expected_gid + 1)
 
     def test_durable_journal_recovers_after_apply_failure(self):
         with tempfile.TemporaryDirectory() as tmp:

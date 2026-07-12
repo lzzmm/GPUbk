@@ -585,8 +585,9 @@ for private and disposable simulation directories.
 
 The probe creates randomly named temporary files, verifies same-directory atomic
 replace and directory fsync, checks same-host cross-process `flock`, confirms
-configured modes and free space, probes the real GPU telemetry source, and then
-removes its files. GPU indices must exactly match `0..gpu_count-1`; every NVML
+configured modes, setgid GID inheritance, and free space, probes the real GPU
+telemetry source, and then removes its files. GPU indices must exactly match
+`0..gpu_count-1`; every NVML
 device must report usable memory, a process list, a stable CUDA-compatible GPU
 identifier, and per-process utilization.
 A topology mismatch or missing process list fails the probe. Missing per-process
@@ -595,8 +596,9 @@ In JSON, `healthy` covers read-only ledger checks; `ready` remains `null` until
 `--probe` supplies deployment evidence.
 Plain `doctor` never initializes storage, acquires a lock, recovers a pending
 transaction, or follows a symbolic link or hard-linked alias at a managed path.
-It also reports permission drift; write commands fail closed instead of silently
-changing modes. Only explicit `--probe` writes temporary files.
+It also reports permission and GID drift across the ledger, backups, and telemetry
+tree. Configured mode drift makes write commands fail closed instead of silently
+running `chmod`; only explicit `--probe` writes temporary files.
 For NFS/FUSE used by multiple hosts, additionally verify locking from a second
 host because one machine cannot prove cross-host lock propagation. Every writer
 must use GPUbk.

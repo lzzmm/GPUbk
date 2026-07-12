@@ -665,10 +665,12 @@ class UsageAuditStore:
 
     def health_issues(self) -> List[dict]:
         issues = []
+        managed_gid = _setgid_directory_gid(self.data_dir, self.dir_mode)
         usage_issue, usage_dir_safe = _usage_path_health(
             self.usage_dir,
             "directory",
             self.dir_mode,
+            expected_gid=managed_gid,
         )
         if usage_issue is not None:
             issues.append(usage_issue)
@@ -687,6 +689,7 @@ class UsageAuditStore:
                         root_path / name,
                         "directory",
                         self.dir_mode,
+                        expected_gid=managed_gid,
                     )
                     usage_tree_safe = usage_tree_safe and safe
                     if issue is not None:
@@ -698,6 +701,7 @@ class UsageAuditStore:
                         path,
                         "regular-file",
                         expected_mode,
+                        expected_gid=managed_gid,
                     )
                     usage_tree_safe = usage_tree_safe and safe
                     if issue is not None:
@@ -719,7 +723,12 @@ class UsageAuditStore:
             self.rollups_path,
             self.legacy_load_path,
         ):
-            issue, _safe = _usage_path_health(path, "regular-file", self.file_mode)
+            issue, _safe = _usage_path_health(
+                path,
+                "regular-file",
+                self.file_mode,
+                expected_gid=managed_gid,
+            )
             if issue is not None:
                 issues.append(issue)
 
@@ -1626,6 +1635,8 @@ def _usage_path_health(
     path: Path,
     expected_type: str,
     expected_mode: int,
+    *,
+    expected_gid: Optional[int] = None,
 ) -> Tuple[Optional[dict], bool]:
     if not os.path.lexists(path):
         return None, False
@@ -1677,7 +1688,32 @@ def _usage_path_health(
             },
             True,
         )
+    if expected_gid is not None and metadata.st_gid != expected_gid:
+        return (
+            {
+                "type": "usage-directory-gid"
+                if expected_type == "directory"
+                else "usage-file-gid",
+                "path": str(path),
+                "expected_gid": expected_gid,
+                "actual_gid": metadata.st_gid,
+                "message": "path did not inherit the setgid data-directory group",
+            },
+            True,
+        )
     return None, True
+
+
+def _setgid_directory_gid(path: Path, dir_mode: int) -> Optional[int]:
+    if not dir_mode & stat.S_ISGID or not os.path.lexists(path):
+        return None
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return None
+    if not stat.S_ISDIR(metadata.st_mode):
+        return None
+    return metadata.st_gid
 
 
 def _line_count(path: Path) -> int:

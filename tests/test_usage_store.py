@@ -7,6 +7,7 @@ import tracemalloc
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from bk.collector_status import CollectorStatusError, collector_document
@@ -366,6 +367,36 @@ class UsageStoreTests(unittest.TestCase):
                 self.assertEqual(stat.S_IMODE(cursor.stat().st_mode), 0o2770)
                 cursor = cursor.parent
             self.assertEqual(store.health_issues(), [])
+
+    def test_shared_mode_health_reports_partition_gid_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = UsageAuditStore(
+                Path(tmp) / "shared",
+                file_mode=0o660,
+                dir_mode=0o2770,
+            )
+            store.append_rollups([self._rollup_at(0)])
+            partition = store._partition_path("minute", self.at.date())
+            expected_gid = store.data_dir.stat().st_gid
+            original_lstat = Path.lstat
+
+            def drifted_lstat(path):
+                metadata = original_lstat(path)
+                if path == partition:
+                    return SimpleNamespace(
+                        st_mode=metadata.st_mode,
+                        st_nlink=metadata.st_nlink,
+                        st_gid=expected_gid + 1,
+                    )
+                return metadata
+
+            with mock.patch.object(Path, "lstat", autospec=True, side_effect=drifted_lstat):
+                issues = store.health_issues()
+
+            issue = next(item for item in issues if item.get("path") == str(partition))
+            self.assertEqual(issue["type"], "usage-file-gid")
+            self.assertEqual(issue["expected_gid"], expected_gid)
+            self.assertEqual(issue["actual_gid"], expected_gid + 1)
 
     def test_maintenance_builds_all_resolutions_before_removing_old_minutes(self):
         workload_id = self.store.register_workload(1001, describe_workload("python train.py"))

@@ -4,6 +4,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Verify setgid GID inheritance during deployment preflight and report numeric group drift across
+  existing ledger, backup, and telemetry paths before it strands data under one user's group.
 - Require production release tags to be annotated and point exactly at the current `main` tip,
   preventing a valid-looking version from being published from an older main-history commit.
 - Keep collector crash evidence honest: fatal sampling failures attempt a partial rollup flush
