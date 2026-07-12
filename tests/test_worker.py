@@ -12,13 +12,14 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+import bk.worker as worker_module
 from bk.config import Config
 from bk.gpu import GpuProcessSnapshot, GpuSnapshot
 from bk.joblogs import MIB, job_log_paths, read_job_log_tail
 from bk.models import Actor, BookingError, BookingRequest
 from bk.scheduler import add_booking, cancel_booking
 from bk.storage import LedgerStore
-from bk.timeparse import to_iso, utc_now
+from bk.timeparse import utc_now
 from bk.worker import (
     cleanup_job_specs,
     claim_due_jobs,
@@ -394,14 +395,28 @@ class ScheduledJobTests(unittest.TestCase):
 
     def test_running_job_is_terminated_at_reservation_deadline(self):
         reservation = self.booking(command=[sys.executable, "-c", "import time; time.sleep(30)"])
+        clock = {"now": utc_now()}
+        deadline = datetime.fromisoformat(reservation["end_at"].replace("Z", "+00:00"))
+        mark_running = worker_module._mark_running
 
-        def shorten(ledger):
-            item = next(value for value in ledger["reservations"] if value["id"] == reservation["id"])
-            item["end_at"] = to_iso(utc_now() + timedelta(seconds=1))
-            return ledger, None, [], True
+        def mark_running_then_cross_deadline(*args, **kwargs):
+            marked = mark_running(*args, **kwargs)
+            if marked:
+                clock["now"] = deadline + timedelta(seconds=1)
+            return marked
 
-        self.store.transaction(shorten)
-        summary = run_worker(self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True)
+        with (
+            mock.patch("bk.worker.utc_now", side_effect=lambda: clock["now"]),
+            mock.patch("bk.worker._mark_running", side_effect=mark_running_then_cross_deadline),
+        ):
+            summary = run_worker(
+                self.config,
+                self.store,
+                self.actor,
+                once=True,
+                poll_seconds=0.1,
+                quiet=True,
+            )
 
         stored = next(item for item in self.store.load()["reservations"] if item["id"] == reservation["id"])
         self.assertEqual(summary.failed, 1)
