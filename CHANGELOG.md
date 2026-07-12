@@ -7,6 +7,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Publish an atomic, versioned collector heartbeat with capability-aware degraded states,
   crash staleness and policy-topology detection, graceful-stop reporting, and consistent
   Usage API, Agent, doctor, CLI, and TUI visibility.
+- Add an explicit read-only `bk doctor --require-monitor` post-start check so deployment
+  acceptance cannot pass before the long-running collector has produced a healthy heartbeat.
 - Recover NVML after transient initialization or stale-handle failures, parse `nvidia-smi` as bounded CSV, preserve UID attribution when process commands are restricted, and prevent fallback telemetry gaps from creating false process lifecycle events.
 - Require deployment probes to match the complete configured GPU topology and expose independent process-list and per-process-utilization capabilities to operators and Agents.
 - Exercise the optional `nvidia-ml-py` dependency and no-GPU degradation path in a dedicated CI job so hardware-adapter API drift cannot hide behind core-only tests.

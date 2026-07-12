@@ -955,6 +955,7 @@ def _service_command(argv: List[str], config: Config) -> int:
     print("not enabled or started; review it, then run systemctl --user daemon-reload")
     if args.kind == "monitor":
         print("shared server note: run exactly one trusted monitor writer; do not enable one per user")
+        print("after starting it, verify: bk doctor --require-monitor --strict")
     username = shlex.quote(_current_actor().username)
     print(
         "Linux boot/logout persistence (optional, admin): "
@@ -1816,6 +1817,11 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     )
     parser.add_argument("--json", action="store_true", help="emit a stable machine-readable report")
     parser.add_argument("--strict", action="store_true", help="return nonzero for any issue or warning")
+    parser.add_argument(
+        "--require-monitor",
+        action="store_true",
+        help="require a fresh, complete monitor heartbeat for post-start verification",
+    )
     args = parser.parse_args(argv)
     usage_store = UsageAuditStore(
         config.data_dir,
@@ -1921,6 +1927,15 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             }
         )
     collector_state = collector.get("state")
+    if args.require_monitor and collector_state == "not-seen":
+        issues.append(
+            {
+                "type": "monitor-health",
+                "message": (
+                    "collector heartbeat has not been recorded; start the monitor and retry"
+                ),
+            }
+        )
     if collector_state in {
         "degraded",
         "stale",
@@ -1994,6 +2009,7 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         "configured_gpu_count": config.gpu_count,
         "booking_slot_minutes": config.slot_minutes,
         "monitor_uid": config.monitor_uid,
+        "monitor_required": args.require_monitor,
         "collector": collector,
         "file_mode": f"{config.file_mode:04o}",
         "dir_mode": f"{config.dir_mode:04o}",
@@ -2006,7 +2022,10 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         print(json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2))
         return 0 if not args.strict or strict_ok else 2
     if healthy and not probes:
-        print("No policy issues found.")
+        if args.require_monitor:
+            print("Monitor is running with fresh, complete telemetry.")
+        else:
+            print("No policy issues found.")
         return 0
     if probes:
         print(f"Deployment preflight: {'ready' if ready else 'not ready'}")

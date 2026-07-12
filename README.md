@@ -314,6 +314,7 @@ The monitor also has a user service:
 bk service install monitor
 systemctl --user daemon-reload
 systemctl --user enable --now bk-monitor.service
+bk doctor --require-monitor --strict
 ```
 
 For boot and logout persistence, enable linger only for the selected monitor
@@ -331,6 +332,8 @@ path. Sampling and rollup values are reloaded from that config whenever the
 service starts. A duplicate writer (`75`) or role mismatch (`77`) is not
 restarted. Other failures retry at most three times in 60 seconds, allowing a
 short transient recovery without an endless log loop.
+The final command above is a read-only post-start check. Unlike deployment
+preflight, it fails when no collector heartbeat has ever been recorded.
 
 ## Agents and MCP
 
@@ -492,6 +495,13 @@ login environment before enabling services:
 bk config
 bk doctor --probe --strict
 bk doctor --probe --json --strict
+```
+
+After enabling the monitor, verify the long-running writer separately:
+
+```bash
+bk doctor --require-monitor --strict
+bk doctor --require-monitor --json --strict
 ```
 
 `bk reset` is intentionally disabled for a shared data-directory mode. To retire

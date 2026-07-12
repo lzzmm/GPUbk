@@ -97,3 +97,5 @@ holds the lease; do not loop or start a second worker.
 - Do not enable a worker, monitor, or service on a shared server without the user's or administrator's approval.
 - Do not disable `worker_live_guard` merely to make a scheduled command start sooner.
 - Before an approved service deployment, run `bk doctor --probe --json --strict`; do not treat a simulation or single-host NFS lock check as proof of the complete production boundary.
+- After starting the monitor service, run `bk doctor --require-monitor --json --strict`; a
+  preflight without a heartbeat does not prove the long-running collector is alive.

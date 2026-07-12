@@ -642,6 +642,10 @@ class CliTests(unittest.TestCase):
             data_dir = Path(tmp) / "not-created"
 
             result = self.run_bk(["doctor", "--json"], data_dir)
+            required = self.run_bk(
+                ["doctor", "--require-monitor", "--json", "--strict"],
+                data_dir,
+            )
 
             self.assertEqual(result.returncode, 0, result.stderr)
             payload = json.loads(result.stdout)
@@ -649,6 +653,22 @@ class CliTests(unittest.TestCase):
             self.assertEqual(payload["probes"], [])
             self.assertTrue(payload["healthy"])
             self.assertIsNone(payload["ready"])
+            self.assertFalse(payload["monitor_required"])
+            self.assertEqual(required.returncode, 2, required.stderr)
+            required_payload = json.loads(required.stdout)
+            self.assertTrue(required_payload["monitor_required"])
+            self.assertEqual(required_payload["collector"]["state"], "not-seen")
+            self.assertEqual(
+                required_payload["policy_issues"],
+                [
+                    {
+                        "type": "monitor-health",
+                        "message": (
+                            "collector heartbeat has not been recorded; start the monitor and retry"
+                        ),
+                    }
+                ],
+            )
             self.assertFalse(data_dir.exists())
 
     def test_doctor_probe_is_machine_readable_and_strict_rejects_simulation(self):
@@ -740,6 +760,54 @@ class CliTests(unittest.TestCase):
             )
             self.assertIn("heartbeat is stale", issue["message"])
             self.assertFalse(payload["healthy"])
+
+    def test_doctor_post_start_verification_accepts_a_fresh_complete_monitor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            UsageAuditStore(data_dir).save_collector_status(
+                collector_document(
+                    monitor_id="monitor-running",
+                    status="running",
+                    uid=os.getuid(),
+                    pid=4321,
+                    hostname="gpu-host",
+                    heartbeat_interval_seconds=60.0,
+                    sample_interval_seconds=2.0,
+                    rollup_seconds=60,
+                    started_at=now - timedelta(minutes=1),
+                    sampled_at=now,
+                    written_at=now,
+                    devices=[
+                        {
+                            "gpu": 0,
+                            "source": "nvml",
+                            "device_telemetry": True,
+                            "process_telemetry": True,
+                            "process_utilization": True,
+                        }
+                    ],
+                    process_telemetry_gap=[],
+                    process_utilization_gap=[],
+                )
+            )
+
+            result = self.run_bk(
+                ["doctor", "--require-monitor", "--json", "--strict"],
+                data_dir,
+            )
+            human = self.run_bk(
+                ["doctor", "--require-monitor", "--strict"],
+                data_dir,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertTrue(payload["healthy"])
+            self.assertTrue(payload["monitor_required"])
+            self.assertEqual(payload["collector"]["state"], "running")
+            self.assertEqual(human.returncode, 0, human.stderr)
+            self.assertIn("fresh, complete telemetry", human.stdout)
 
     def test_doctor_rejects_a_fresh_collector_for_the_wrong_gpu_topology(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1644,6 +1712,7 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("--interval", unit)
             self.assertNotIn("--rollup", unit)
             self.assertIn(f"captured config file: {config_path.resolve()}", installed.stdout)
+            self.assertIn("bk doctor --require-monitor --strict", installed.stdout)
             self.assertIn("sudo loginctl enable-linger", installed.stdout)
 
     def test_shared_monitor_policy_fails_before_runtime_or_service_writes(self):

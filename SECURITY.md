@@ -91,6 +91,9 @@ Administrator responsibilities:
   and accepts collisions with activity that appeared after booking.
 - Run `bk doctor --probe --strict` on the target mount before enabling services. Its lock check is
   cross-process on one host; shared NFS/FUSE deployments still require a second-host lock test.
+- After enabling the monitor, run `bk doctor --require-monitor --strict`. Preflight intentionally
+  permits a missing heartbeat because the service may not have started yet; post-start verification
+  must not.
 - Use plain `bk doctor --json --strict` for side-effect-free inspection. It does not recover a
   pending transaction or follow symbolic links at managed paths; `--probe` is the explicit
   temporary-write mode.

@@ -17,6 +17,7 @@ class BundledSkillTests(unittest.TestCase):
         self.assertIn("edit_my_gpu_booking", text)
         self.assertIn("bk agent edit", text)
         self.assertIn("collector.fresh", text)
+        self.assertIn("--require-monitor", text)
 
     def test_install_is_complete_and_refuses_accidental_overwrite(self):
         with tempfile.TemporaryDirectory() as tmp:
