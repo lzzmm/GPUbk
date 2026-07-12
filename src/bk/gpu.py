@@ -8,7 +8,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .config import MAX_GPU_COUNT, MAX_UID, Config
 
@@ -37,6 +37,7 @@ class GpuSnapshot:
     source: str = "none"
     process_telemetry_available: Optional[bool] = None
     process_utilization_available: Optional[bool] = None
+    device_uuid: str = ""
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ MAX_PROCESS_COMMAND_BYTES = 4096
 MAX_IDENTITY_CACHE_ENTRIES = 4096
 MAX_SIMULATION_FILE_BYTES = 4 * 1024 * 1024
 MAX_SIMULATION_PROCESSES_PER_GPU = 100_000
+MAX_CUDA_DEVICE_IDENTIFIER_BYTES = 256
 
 
 def snapshot(config: Config) -> List[GpuSnapshot]:
@@ -123,6 +125,28 @@ def has_process_utilization(device: GpuSnapshot) -> bool:
     return device.source in {"nvml", "simulation"}
 
 
+def has_stable_device_identifier(device: GpuSnapshot) -> bool:
+    try:
+        return _cuda_device_identifier(device.device_uuid) == device.device_uuid
+    except ValueError:
+        return False
+
+
+def cuda_visible_device_tokens(
+    selected_gpus: Sequence[int],
+    devices: Sequence[GpuSnapshot],
+) -> Tuple[str, ...]:
+    indices = tuple(int(item) for item in selected_gpus)
+    by_index = {item.index: item for item in devices}
+    stable = []
+    for index in indices:
+        device = by_index.get(index)
+        if device is None or not has_stable_device_identifier(device):
+            return tuple(str(item) for item in indices)
+        stable.append(device.device_uuid)
+    return tuple(stable)
+
+
 def _nvml_sampler() -> Optional["_NvmlSampler"]:
     global _NVML_SAMPLER, _NVML_UNAVAILABLE, _NVML_RETRY_AT
     if _NVML_SAMPLER is not None:
@@ -167,6 +191,7 @@ class _NvmlSampler:
                 self.nvml.nvmlDeviceGetHandleByIndex(index)
                 for index in range(device_count)
             ]
+            self.device_uuids = [""] * len(self.handles)
         except Exception:
             self.close()
             raise
@@ -207,7 +232,19 @@ class _NvmlSampler:
             source="nvml",
             process_telemetry_available=process_telemetry_available,
             process_utilization_available=utilization_available,
+            device_uuid=self._device_uuid(index, handle),
         )
+
+    def _device_uuid(self, index: int, handle) -> str:
+        cached = self.device_uuids[index]
+        if cached:
+            return cached
+        try:
+            value = _cuda_device_identifier(self.nvml.nvmlDeviceGetUUID(handle))
+        except Exception:
+            return ""
+        self.device_uuids[index] = value
+        return value
 
     def _optional_temperature(self, handle) -> Optional[int]:
         try:
@@ -400,6 +437,7 @@ def _simulation_snapshot(path: Path) -> List[GpuSnapshot]:
                 source="simulation",
                 process_telemetry_available=True,
                 process_utilization_available=True,
+                device_uuid=_optional_cuda_device_identifier(raw_gpu.get("uuid")),
             )
         )
     snapshots.sort(key=lambda item: item.index)
@@ -455,7 +493,7 @@ def _bounded_int(
 def _nvidia_smi_snapshot() -> List[GpuSnapshot]:
     cmd = [
         "nvidia-smi",
-        "--query-gpu=index,name,memory.used,memory.total,utilization.gpu,temperature.gpu",
+        "--query-gpu=index,uuid,name,memory.used,memory.total,utilization.gpu,temperature.gpu",
         "--format=csv,noheader,nounits",
     ]
     output = subprocess.check_output(cmd, text=True, stderr=subprocess.DEVNULL, timeout=2)
@@ -463,9 +501,11 @@ def _nvidia_smi_snapshot() -> List[GpuSnapshot]:
     for row in csv.reader(output.splitlines(), skipinitialspace=True):
         if not row:
             continue
-        if len(row) != 6:
+        if len(row) != 7:
             raise ValueError(f"unexpected nvidia-smi CSV field count: {len(row)}")
-        index, name, used, total, utilization, temperature = [part.strip() for part in row]
+        index, device_uuid, name, used, total, utilization, temperature = [
+            part.strip() for part in row
+        ]
         items.append(
             GpuSnapshot(
                 index=_bounded_int(index, "nvidia-smi GPU index", 0, MAX_GPU_COUNT - 1),
@@ -479,6 +519,7 @@ def _nvidia_smi_snapshot() -> List[GpuSnapshot]:
                     temperature, minimum=-100, maximum=250
                 ),
                 source="nvidia-smi",
+                device_uuid=_optional_cuda_device_identifier(device_uuid),
             )
         )
     items.sort(key=lambda item: item.index)
@@ -497,3 +538,43 @@ def _nvidia_smi_optional_int(
     if normalized in {"", "n/a", "[n/a]", "not supported", "[not supported]"}:
         return None
     return _bounded_int(value, "nvidia-smi value", minimum, maximum)
+
+
+def _optional_cuda_device_identifier(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str) and value.strip().lower() in {
+        "",
+        "n/a",
+        "[n/a]",
+        "not supported",
+        "[not supported]",
+    }:
+        return ""
+    return _cuda_device_identifier(value)
+
+
+def _cuda_device_identifier(value: object) -> str:
+    if isinstance(value, bytes):
+        try:
+            text = value.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError("GPU UUID must be ASCII") from exc
+    elif isinstance(value, str):
+        text = value
+    else:
+        raise ValueError("GPU UUID must be text")
+    if not text.startswith(("GPU-", "MIG-")):
+        raise ValueError("GPU UUID must start with GPU- or MIG-")
+    try:
+        encoded = text.encode("ascii")
+    except UnicodeEncodeError as exc:
+        raise ValueError("GPU UUID must be ASCII") from exc
+    if len(encoded) > MAX_CUDA_DEVICE_IDENTIFIER_BYTES:
+        raise ValueError("GPU UUID is too long")
+    if any(
+        not (character.isascii() and (character.isalnum() or character in "-_/.:"))
+        for character in text
+    ):
+        raise ValueError("GPU UUID contains an unsafe character")
+    return text

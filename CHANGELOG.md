@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Bind scheduled commands to stable CUDA-compatible GPU UUIDs from the same NVML snapshot that
+  passed the live launch guard, fail closed when real devices lack an identifier or process list,
+  and expose the capability to deployment checks and Agents instead of assuming NVML indices equal
+  CUDA ordinals.
 - Preserve known zero VRAM usage in Agent context instead of collapsing it into unavailable
   telemetry, and document the stable zero-versus-null contract.
 - Surface per-UID worker readiness in plain status and the TUI only while a scheduled command may

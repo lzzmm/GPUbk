@@ -2,10 +2,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Sequence
+from typing import Sequence, Tuple
 
 from .config import Config
-from .gpu import GpuSnapshot
+from .gpu import (
+    GpuSnapshot,
+    cuda_visible_device_tokens,
+    has_process_telemetry,
+    has_stable_device_identifier,
+)
 from .models import MODE_EXCLUSIVE
 from .sharing import inferred_share_memory_mb, reservation_share_units
 from .timeparse import utc_now
@@ -24,6 +29,7 @@ class LaunchGuardDecision:
     ready: bool
     reason: str = ""
     key: str = ""
+    cuda_visible_devices: Tuple[str, ...] = ()
 
 
 def assess_job_launch(
@@ -53,6 +59,18 @@ def assess_job_launch(
                 False,
                 f"GPU {index} live telemetry is unavailable",
                 f"gpu:{index}:telemetry",
+            )
+        if not has_process_telemetry(device):
+            return LaunchGuardDecision(
+                False,
+                f"GPU {index} process telemetry is unavailable",
+                f"gpu:{index}:process-telemetry",
+            )
+        if device.source == "nvml" and not has_stable_device_identifier(device):
+            return LaunchGuardDecision(
+                False,
+                f"GPU {index} stable identifier is unavailable",
+                f"gpu:{index}:stable-identifier",
             )
 
         rows = [item for item in usage.get(index, []) if item.status != USAGE_SYSTEM]
@@ -117,7 +135,10 @@ def assess_job_launch(
                 f"gpu:{index}:busy",
             )
 
-    return LaunchGuardDecision(True)
+    return LaunchGuardDecision(
+        True,
+        cuda_visible_devices=cuda_visible_device_tokens(selected_gpus, snapshots),
+    )
 
 
 def _inferred_share_memory(

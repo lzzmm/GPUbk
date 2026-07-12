@@ -42,7 +42,15 @@ class JobLaunchGuardTests(unittest.TestCase):
             item["share_units"] = share_units
         return item
 
-    def gpu(self, *, used=0, processes=(), source="nvml", utilization=0):
+    def gpu(
+        self,
+        *,
+        used=0,
+        processes=(),
+        source="nvml",
+        utilization=0,
+        device_uuid="GPU-00000000-0000-0000-0000-000000000000",
+    ):
         return GpuSnapshot(
             0,
             "gpu0",
@@ -51,6 +59,7 @@ class JobLaunchGuardTests(unittest.TestCase):
             utilization_percent=utilization,
             processes=tuple(processes),
             source=source,
+            device_uuid=device_uuid,
         )
 
     def test_unreserved_process_blocks_shared_job(self):
@@ -126,6 +135,34 @@ class JobLaunchGuardTests(unittest.TestCase):
         self.assertFalse(decision.ready)
         self.assertIn("telemetry is unavailable", decision.reason)
 
+    def test_device_metrics_without_process_telemetry_fail_closed(self):
+        target = self.reservation(expected_memory_mb=4096)
+
+        decision = assess_job_launch(
+            self.config,
+            target,
+            [self.gpu(source="nvidia-smi")],
+            [target],
+            at=self.now,
+        )
+
+        self.assertFalse(decision.ready)
+        self.assertIn("process telemetry is unavailable", decision.reason)
+
+    def test_nvml_without_stable_identifier_fails_closed(self):
+        target = self.reservation(expected_memory_mb=4096)
+
+        decision = assess_job_launch(
+            self.config,
+            target,
+            [self.gpu(device_uuid="")],
+            [target],
+            at=self.now,
+        )
+
+        self.assertFalse(decision.ready)
+        self.assertIn("stable identifier is unavailable", decision.reason)
+
     def test_omitted_memory_uses_weighted_share_at_launch_time(self):
         config = Config(
             data_dir=Path("unused"),
@@ -145,6 +182,27 @@ class JobLaunchGuardTests(unittest.TestCase):
 
         self.assertFalse(decision.ready)
         self.assertIn("18000MiB is required", decision.reason)
+
+    def test_ready_decision_carries_the_exact_checked_gpu_identifier(self):
+        target = self.reservation(expected_memory_mb=4096)
+
+        decision = assess_job_launch(
+            self.config,
+            target,
+            [
+                self.gpu(
+                    device_uuid="GPU-00000000-0000-0000-0000-000000000123"
+                )
+            ],
+            [target],
+            at=self.now,
+        )
+
+        self.assertTrue(decision.ready, decision.reason)
+        self.assertEqual(
+            decision.cuda_visible_devices,
+            ("GPU-00000000-0000-0000-0000-000000000123",),
+        )
 
 
 if __name__ == "__main__":

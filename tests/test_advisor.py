@@ -24,7 +24,15 @@ class GpuAdvisorTests(unittest.TestCase):
                 processes=(GpuProcessSnapshot(42, 1001, "alice", "python train.py"),),
                 source="simulation",
             ),
-            GpuSnapshot(1, "idle-model", memory_total_mb=24000, utilization_percent=2, temperature_c=47, source="simulation"),
+            GpuSnapshot(
+                1,
+                "idle-model",
+                memory_total_mb=24000,
+                utilization_percent=2,
+                temperature_c=47,
+                source="simulation",
+                device_uuid="GPU-00000000-0000-0000-0000-000000000123",
+            ),
             GpuSnapshot(2, "sim", memory_total_mb=24000, utilization_percent=4, source="simulation"),
         ]
 
@@ -39,7 +47,11 @@ class GpuAdvisorTests(unittest.TestCase):
         self.assertEqual(idle["temperature_c"], 47)
         self.assertEqual(
             idle["capabilities"],
-            {"process_telemetry": True, "process_utilization": True},
+            {
+                "stable_device_identifier": True,
+                "process_telemetry": True,
+                "process_utilization": True,
+            },
         )
         self.assertEqual(
             idle["memory"],
@@ -61,7 +73,11 @@ class GpuAdvisorTests(unittest.TestCase):
 
         self.assertEqual(
             advice.as_dict()["gpus"][0]["capabilities"],
-            {"process_telemetry": True, "process_utilization": False},
+            {
+                "stable_device_identifier": False,
+                "process_telemetry": True,
+                "process_utilization": False,
+            },
         )
 
     def test_recent_history_breaks_tie_between_currently_idle_gpus(self):

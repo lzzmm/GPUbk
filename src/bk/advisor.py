@@ -5,7 +5,13 @@ from datetime import datetime
 from typing import Dict, List, Optional, Sequence
 
 from .config import Config
-from .gpu import GpuSnapshot, has_process_telemetry, has_process_utilization, snapshot
+from .gpu import (
+    GpuSnapshot,
+    has_process_telemetry,
+    has_process_utilization,
+    has_stable_device_identifier,
+    snapshot,
+)
 from .monitor import UsageAuditStore
 from .timeparse import to_iso, utc_now
 from .usage import (
@@ -123,6 +129,10 @@ def _gpu_advice_dict(
         },
         "source": snapshot_item.source if snapshot_item is not None else "none",
         "capabilities": {
+            "stable_device_identifier": bool(
+                snapshot_item is not None
+                and has_stable_device_identifier(snapshot_item)
+            ),
             "process_telemetry": bool(
                 snapshot_item is not None and has_process_telemetry(snapshot_item)
             ),

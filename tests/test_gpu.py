@@ -9,7 +9,13 @@ from unittest.mock import Mock, patch
 
 from bk.config import Config
 from bk import gpu
-from bk.gpu import GpuSnapshot, detect_gpu_count, snapshot
+from bk.gpu import (
+    GpuSnapshot,
+    cuda_visible_device_tokens,
+    detect_gpu_count,
+    has_stable_device_identifier,
+    snapshot,
+)
 
 
 class GpuSnapshotTests(unittest.TestCase):
@@ -62,6 +68,7 @@ class GpuSnapshotTests(unittest.TestCase):
                         "gpus": [
                             {
                                 "index": 0,
+                                "uuid": "GPU-00000000-0000-0000-0000-000000000001",
                                 "name": "Sim Pro 6000",
                                 "memory_used_mb": 4096,
                                 "memory_total_mb": 98304,
@@ -94,6 +101,7 @@ class GpuSnapshotTests(unittest.TestCase):
             self.assertEqual(devices[0].utilization_percent, 72)
             self.assertEqual(devices[0].processes[0].uid, 1001)
             self.assertEqual(devices[0].processes[0].sm_utilization_percent, 68)
+            self.assertTrue(has_stable_device_identifier(devices[0]))
 
     def test_invalid_simulation_file_falls_back_without_crashing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -221,6 +229,9 @@ class GpuSnapshotTests(unittest.TestCase):
             nvmlDeviceGetCount=Mock(return_value=1),
             nvmlDeviceGetHandleByIndex=Mock(return_value=handle),
             nvmlDeviceGetName=Mock(return_value=b"GPU Test"),
+            nvmlDeviceGetUUID=Mock(
+                return_value=b"GPU-00000000-0000-0000-0000-000000000123"
+            ),
             nvmlDeviceGetMemoryInfo=Mock(
                 return_value=SimpleNamespace(used=1024**3, total=24 * 1024**3)
             ),
@@ -242,14 +253,21 @@ class GpuSnapshotTests(unittest.TestCase):
             sampler = gpu._NvmlSampler()
             try:
                 devices = sampler.snapshots(1)
+                repeated = sampler.snapshots(1)
             finally:
                 sampler.close()
 
         self.assertEqual(len(devices), 1)
         self.assertTrue(devices[0].process_telemetry_available)
         self.assertTrue(devices[0].process_utilization_available)
+        self.assertEqual(
+            devices[0].device_uuid,
+            "GPU-00000000-0000-0000-0000-000000000123",
+        )
         self.assertEqual(devices[0].processes[0].sm_utilization_percent, 37)
         self.assertEqual(devices[0].processes[0].gpu_memory_mb, 2048)
+        self.assertEqual(repeated[0].device_uuid, devices[0].device_uuid)
+        fake_nvml.nvmlDeviceGetUUID.assert_called_once_with(handle)
 
     def test_nvml_snapshot_marks_failed_process_queries_as_unavailable(self):
         fake_nvml = SimpleNamespace(
@@ -280,8 +298,34 @@ class GpuSnapshotTests(unittest.TestCase):
         self.assertFalse(device.process_utilization_available)
         self.assertEqual(device.processes, ())
 
+    def test_nvml_uuid_cache_retries_failure_then_reuses_success(self):
+        handle = object()
+        query = Mock(
+            side_effect=[
+                RuntimeError("temporary failure"),
+                "GPU-00000000-0000-0000-0000-000000000123",
+            ]
+        )
+        sampler = object.__new__(gpu._NvmlSampler)
+        sampler.nvml = SimpleNamespace(nvmlDeviceGetUUID=query)
+        sampler.device_uuids = [""]
+
+        self.assertEqual(sampler._device_uuid(0, handle), "")
+        self.assertEqual(
+            sampler._device_uuid(0, handle),
+            "GPU-00000000-0000-0000-0000-000000000123",
+        )
+        self.assertEqual(
+            sampler._device_uuid(0, handle),
+            "GPU-00000000-0000-0000-0000-000000000123",
+        )
+        self.assertEqual(query.call_count, 2)
+
     def test_nvidia_smi_csv_handles_quoted_names_and_unsupported_metrics(self):
-        output = '0, "NVIDIA, Special", 1024, 24576, N/A, [Not Supported]\n'
+        output = (
+            '0, GPU-00000000-0000-0000-0000-000000000123, "NVIDIA, Special", '
+            "1024, 24576, N/A, [Not Supported]\n"
+        )
 
         with patch("bk.gpu.subprocess.check_output", return_value=output):
             devices = gpu._nvidia_smi_snapshot()
@@ -291,13 +335,23 @@ class GpuSnapshotTests(unittest.TestCase):
         self.assertEqual(devices[0].memory_used_mb, 1024)
         self.assertIsNone(devices[0].utilization_percent)
         self.assertIsNone(devices[0].temperature_c)
+        self.assertTrue(has_stable_device_identifier(devices[0]))
 
     def test_nvidia_smi_rejects_non_contiguous_indices(self):
-        output = "1, GPU, 0, 24576, 0, 30\n"
+        output = "1, GPU-00000000-0000-0000-0000-000000000123, GPU, 0, 24576, 0, 30\n"
 
         with patch("bk.gpu.subprocess.check_output", return_value=output):
             with self.assertRaisesRegex(ValueError, "contiguous"):
                 gpu._nvidia_smi_snapshot()
+
+    def test_nvidia_smi_missing_uuid_keeps_degraded_device_metrics(self):
+        output = "0, N/A, GPU, 1024, 24576, 10, 40\n"
+
+        with patch("bk.gpu.subprocess.check_output", return_value=output):
+            devices = gpu._nvidia_smi_snapshot()
+
+        self.assertEqual(devices[0].memory_total_mb, 24576)
+        self.assertFalse(has_stable_device_identifier(devices[0]))
 
     def test_nvidia_smi_rejects_an_empty_success_response(self):
         with patch("bk.gpu.subprocess.check_output", return_value=""):
@@ -325,6 +379,23 @@ class GpuSnapshotTests(unittest.TestCase):
             command = gpu._read_process_command(proc_dir)
 
         self.assertEqual(len(command.encode("utf-8")), gpu.MAX_PROCESS_COMMAND_BYTES)
+
+    def test_cuda_visible_tokens_use_stable_ids_only_when_every_gpu_has_one(self):
+        devices = [
+            GpuSnapshot(0, "gpu0", device_uuid="GPU-aaaaaaaa-0000-0000-0000-000000000000"),
+            GpuSnapshot(1, "gpu1", device_uuid="GPU-bbbbbbbb-0000-0000-0000-000000000000"),
+        ]
+
+        self.assertEqual(
+            cuda_visible_device_tokens([1, 0], devices),
+            (
+                "GPU-bbbbbbbb-0000-0000-0000-000000000000",
+                "GPU-aaaaaaaa-0000-0000-0000-000000000000",
+            ),
+        )
+
+        devices[0] = GpuSnapshot(0, "gpu0", device_uuid="unsafe,device")
+        self.assertEqual(cuda_visible_device_tokens([1, 0], devices), ("1", "0"))
 
 
 if __name__ == "__main__":

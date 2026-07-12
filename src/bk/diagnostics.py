@@ -16,7 +16,12 @@ from .fileio import (
     open_existing_regular,
     open_or_create_regular,
 )
-from .gpu import has_process_telemetry, has_process_utilization, snapshot
+from .gpu import (
+    has_process_telemetry,
+    has_process_utilization,
+    has_stable_device_identifier,
+    snapshot,
+)
 from .storage import FileLock
 
 
@@ -209,6 +214,9 @@ def _probe_gpu(config: Config) -> dict:
         "configured_device_count": config.gpu_count,
         "indices": indices,
         "sources": sources,
+        "stable_device_identifiers": [
+            has_stable_device_identifier(device) for device in devices
+        ],
     }
     if not devices or sources == ["none"]:
         return _result("gpu-telemetry", "fail", "no usable GPU telemetry source", **details)
@@ -248,6 +256,17 @@ def _probe_gpu(config: Config) -> dict:
                 "fail",
                 "NVML process telemetry is unavailable for configured GPUs",
                 process_telemetry_unavailable_indices=process_gap,
+                **details,
+            )
+        identifier_gap = [
+            device.index for device in devices if not has_stable_device_identifier(device)
+        ]
+        if identifier_gap:
+            return _result(
+                "gpu-telemetry",
+                "fail",
+                "NVML stable GPU identifiers are unavailable for scheduled command binding",
+                stable_identifier_unavailable_indices=identifier_gap,
                 **details,
             )
         utilization_gap = [

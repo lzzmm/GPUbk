@@ -63,7 +63,7 @@ replacing an uploaded file.
    ```
 
 7. Install the wheel into a fresh environment. Verify `bk --version`, core zero-dependency installation, `bk skill install`, and `bk-mcp` with the MCP extra.
-8. Run bounded read-only NVML/context/recommendation checks on a real multi-GPU host with an isolated `BK_DATA_DIR`. Do not start workloads or services during release validation.
+8. Run bounded read-only NVML/context/recommendation checks on a real multi-GPU host with an isolated `BK_DATA_DIR`. Confirm every GPU reports `capabilities.stable_device_identifier=true`; do not start workloads or services during release validation.
 9. Commit and push the release metadata through a pull request, wait for `CI` to pass, and merge it to `main`. Create the annotated tag from that exact `main` commit:
 
    ```bash

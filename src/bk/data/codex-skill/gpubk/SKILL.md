@@ -58,6 +58,9 @@ bk 2 1h30m --mem 12g --op-id <stable-id> -- python train.py --config exp.yaml
 ```
 
 GPUbk sets `CUDA_VISIBLE_DEVICES`; do not add physical GPU IDs to the training command.
+For unattended work, require `capabilities.stable_device_identifier=true` on every recommended
+GPU. The default live guard uses those stable identifiers and leaves the job pending if a real
+NVML device cannot be bound safely.
 
 ## Handle Results
 

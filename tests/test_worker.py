@@ -327,6 +327,80 @@ class ScheduledJobTests(unittest.TestCase):
         self.assertNotIn("launch_guard_state", stored["job"])
         self.assertTrue(marker.exists())
 
+    def test_live_guard_binds_the_command_to_the_checked_gpu_uuid(self):
+        command = [
+            sys.executable,
+            "-c",
+            "import json,os; print(json.dumps({'cuda': os.environ['CUDA_VISIBLE_DEVICES'], "
+            "'reserved': os.environ['BK_RESERVED_GPUS']}))",
+        ]
+        reservation = self.booking(command=command)
+        guarded = replace(self.config, worker_live_guard=True)
+        idle = [
+            GpuSnapshot(
+                0,
+                "gpu0",
+                memory_total_mb=24000,
+                utilization_percent=0,
+                source="simulation",
+                device_uuid="GPU-00000000-0000-0000-0000-000000000123",
+            )
+        ]
+
+        summary = run_worker(
+            guarded,
+            self.store,
+            self.actor,
+            once=True,
+            poll_seconds=0.1,
+            quiet=True,
+            snapshot_provider=lambda _config: idle,
+        )
+
+        self.assertEqual(summary.succeeded, 1)
+        log = job_log_path(self.config, reservation["id"]).read_text(encoding="utf-8")
+        output = json.loads(log.splitlines()[-1])
+        self.assertEqual(
+            output["cuda"],
+            "GPU-00000000-0000-0000-0000-000000000123",
+        )
+        self.assertEqual(output["reserved"], "0")
+
+    def test_live_guard_never_falls_back_when_checked_binding_is_lost(self):
+        marker = self.work_dir / "must-not-run-with-guessed-gpu"
+        reservation = self.booking(
+            command=[
+                sys.executable,
+                "-c",
+                f"open({str(marker)!r}, 'w').write('unsafe')",
+            ]
+        )
+        guarded = replace(self.config, worker_live_guard=True)
+
+        with mock.patch.object(
+            worker_module,
+            "_launch_guard_eligibility",
+            return_value=({reservation["id"]}, 0, [], {}),
+        ):
+            summary = run_worker(
+                guarded,
+                self.store,
+                self.actor,
+                once=True,
+                poll_seconds=0.1,
+                quiet=True,
+            )
+
+        stored = next(
+            item
+            for item in self.store.load()["reservations"]
+            if item["id"] == reservation["id"]
+        )
+        self.assertEqual(summary.failed, 1)
+        self.assertEqual(stored["job"]["status"], "failed")
+        self.assertEqual(stored["job"]["message"], "scheduled command validation failed")
+        self.assertFalse(marker.exists())
+
     def test_launch_failure_is_persisted_without_shell_fallback(self):
         marker = self.work_dir / "must-not-exist"
         reservation = self.booking(command=[f"missing-command;touch {marker}"])

@@ -202,8 +202,18 @@ bk jr ID --accept-duplicate-risk  # retry only after checking an uncertain job
 ```
 
 The worker sets `CUDA_VISIBLE_DEVICES`, `CUDA_DEVICE_ORDER`,
-`BK_RESERVATION_ID`, and `BK_RESERVED_GPUS`. Commands and working directories
-stay in UID-owned `0600` job specs; they are not written to the shared ledger.
+`BK_RESERVATION_ID`, and `BK_RESERVED_GPUS`. With the default live guard,
+`CUDA_VISIBLE_DEVICES` uses the stable GPU UUIDs from the exact NVML snapshot
+that passed launch validation; `BK_RESERVED_GPUS` keeps the user-facing numeric
+GPU slots. This avoids assuming that NVML indices equal CUDA ordinals. A real
+NVML device without a valid stable identifier remains pending instead of being
+launched on a guessed device. Numeric launch tokens remain only for simulation
+and the explicitly unsafe `worker_live_guard=false` compatibility path.
+Commands and working directories stay in UID-owned `0600` job specs; they are
+not written to the shared ledger.
+On a real GPU host, guarded scheduled commands require the `gpu` extra: the
+`nvidia-smi` fallback has no trustworthy process list and therefore stays
+pending rather than guessing that a device is free.
 The worker uses `shell=False` and supervises the command's process group until
 it exits or the reservation ends. Commands must not daemonize or create a new
 session. Use an explicit shell only when shell syntax is required:
@@ -537,7 +547,8 @@ The probe creates randomly named temporary files, verifies same-directory atomic
 replace and directory fsync, checks same-host cross-process `flock`, confirms
 configured modes and free space, probes the real GPU telemetry source, and then
 removes its files. GPU indices must exactly match `0..gpu_count-1`; every NVML
-device must report usable memory, a process list, and per-process utilization.
+device must report usable memory, a process list, a stable CUDA-compatible GPU
+identifier, and per-process utilization.
 A topology mismatch or missing process list fails the probe. Missing per-process
 utilization, simulation, or an `nvidia-smi` fallback is a strict-mode warning.
 In JSON, `healthy` covers read-only ledger checks; `ready` remains `null` until

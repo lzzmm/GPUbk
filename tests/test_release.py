@@ -70,6 +70,20 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("TelemetrySink", telemetry)
         self.assertIn("TELEMETRY.md", readme)
 
+    def test_release_docs_require_stable_scheduled_job_device_binding(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
+        releasing = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
+        protocol = (
+            ROOT / "src" / "bk" / "data" / "codex-skill" / "gpubk"
+            / "references" / "protocol.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("NVML indices equal CUDA ordinals", readme)
+        self.assertIn("stable UUIDs", security)
+        self.assertIn("capabilities.stable_device_identifier=true", releasing)
+        self.assertIn("capabilities.stable_device_identifier", protocol)
+
     def test_upgrade_guide_is_packaged_and_linked(self):
         guide = (ROOT / "UPGRADING.md").read_text(encoding="utf-8")
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")

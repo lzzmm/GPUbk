@@ -29,9 +29,10 @@ Recommendation fields:
 - `available`: whether the requested semantics have a legal slot.
 - `recommendation.gpus`, `start_at`, `end_at`, `queued`, `confidence`.
 - Context GPU entries include model name, temperature, live status, physical VRAM, recent load
-  history, and additive `capabilities.process_telemetry` /
-  `capabilities.process_utilization` booleans. Treat missing process capability as unknown state,
-  never as proof that a GPU has no processes.
+  history, and additive `capabilities.stable_device_identifier`,
+  `capabilities.process_telemetry`, and `capabilities.process_utilization` booleans. Stable device
+  identifiers let the worker bind the exact NVML-checked GPUs to CUDA without trusting ordinal
+  equality. Treat any missing capability as degraded evidence, never as proof that launch is safe.
 - Context VRAM fields preserve zero: `memory.used_mb=0` is a known empty reading, while `null`
   means physical memory telemetry is unavailable. Consumers must not merge these states.
 - Context `policy.monitoring` reports the effective sample and rollup cadence; consumers must

@@ -185,9 +185,15 @@ bk jr ID --accept-duplicate-risk  # 检查 uncertain 任务后再确认重试
 ```
 
 worker 会设置 `CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、
-`BK_RESERVATION_ID` 和 `BK_RESERVED_GPUS`。命令和工作目录保存在当前 UID 所有的
+`BK_RESERVATION_ID` 和 `BK_RESERVED_GPUS`。默认 live guard 会把同一轮 NVML 启动校验
+通过的稳定 GPU UUID 写入 `CUDA_VISIBLE_DEVICES`，而 `BK_RESERVED_GPUS` 继续保留用户
+看到的数字卡位，从而不假设 NVML 编号与 CUDA ordinal 一致。真实 NVML 设备若缺少合法
+稳定标识，任务会继续等待而不会猜一张卡启动；数字启动标识只保留给模拟环境和显式接受
+风险的 `worker_live_guard=false` 兼容路径。命令和工作目录保存在当前 UID 所有的
 `0600` 私有文件里，不会写入共享台账。worker 使用 `shell=False`，并持续监管命令
 所在的进程组，直到它退出或预约结束；任务脚本不应自行 daemonize 或创建新 session。
+真实 GPU 主机上的受保护定时任务需要安装 `gpu` extra；`nvidia-smi` 回退没有可信的
+进程列表，因此任务会保持等待，而不会猜测设备为空闲。
 确实需要 shell 语法时应明确调用 shell：
 
 ```bash
@@ -467,7 +473,8 @@ bk doctor --require-monitor --json --strict
 预检会创建随机命名的临时文件，验证同目录原子替换与目录 fsync、同机跨进程
 `flock`、配置权限、剩余空间和真实 GPU 探测，随后删除所有临时文件。探测到的 GPU
 编号必须严格等于 `0..gpu_count-1`；每张 NVML 设备都必须返回有效显存、进程列表和
-进程级利用率。拓扑不匹配或缺少进程列表会失败；缺少进程级利用率、模拟环境或
+CUDA 可用的稳定 GPU 标识及进程级利用率。拓扑不匹配、缺少稳定标识或缺少进程列表
+会失败；缺少进程级利用率、模拟环境或
 `nvidia-smi` 回退会在 strict 模式下作为警告失败。JSON 中的 `healthy` 只表示只读
 台账检查，未运行 `--probe` 时 `ready` 保持为 `null`。
 普通 `doctor` 不会初始化存储、加锁、恢复待处理事务，也不会跟随受管路径上的符号

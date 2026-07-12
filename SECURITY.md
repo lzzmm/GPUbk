@@ -31,6 +31,10 @@ Supported security boundaries:
   liveness evidence.
 - Scheduled jobs re-check live process authorization and physical VRAM immediately before
   launch; this reduces races but cannot replace kernel device access control.
+- The default launch guard passes the stable UUIDs from that same NVML snapshot to
+  `CUDA_VISIBLE_DEVICES`, because NVML indices are not guaranteed to match CUDA ordinals.
+  Missing identifiers fail closed on real NVML devices; disabling the guard explicitly accepts
+  numeric-device compatibility risk.
 - Shared capacity units enforce ledger admission and inferred memory budgets only. They do
   not enforce proportional SM time, memory isolation, or performance without MIG/MPS or
   another administrator-controlled GPU partitioning mechanism.

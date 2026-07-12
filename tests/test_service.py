@@ -76,6 +76,11 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(context["gpu_advice"]["order"], [1, 0])
         self.assertEqual(context["gpu_advice"]["gpus"][1]["name"], "idle")
         self.assertEqual(context["gpu_advice"]["gpus"][1]["temperature_c"], 47)
+        self.assertFalse(
+            context["gpu_advice"]["gpus"][1]["capabilities"][
+                "stable_device_identifier"
+            ]
+        )
         self.assertTrue(context["capabilities"]["idempotent_edit"])
         self.assertEqual(context["capabilities"]["idempotent_edit_history_limit"], 256)
         self.assertTrue(context["capabilities"]["structured_cancel"])

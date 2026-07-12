@@ -395,8 +395,9 @@ def run_worker(
                         continue
                 capacity = max(0, parallel - len(running))
                 eligible_ids = None
+                launch_devices: Dict[str, Tuple[str, ...]] = {}
                 if config.worker_live_guard:
-                    eligible_ids, waiting, notices = _launch_guard_eligibility(
+                    eligible_ids, waiting, notices, launch_devices = _launch_guard_eligibility(
                         config,
                         store,
                         actor,
@@ -421,7 +422,17 @@ def run_worker(
                 )
                 counts["claimed"] += len(claimed)
                 for reservation in claimed:
-                    started = _start_claimed_job(config, store, actor, reservation, log_dir)
+                    started = _start_claimed_job(
+                        config,
+                        store,
+                        actor,
+                        reservation,
+                        log_dir,
+                        cuda_visible_devices=launch_devices.get(
+                            str(reservation.get("id", ""))
+                        ),
+                        require_validated_devices=config.worker_live_guard,
+                    )
                     if started is None:
                         if _stored_job_status(store, str(reservation.get("id", ""))) == JOB_CANCELLED:
                             counts["cancelled"] += 1
@@ -568,11 +579,11 @@ def _launch_guard_eligibility(
     actor: Actor,
     now: datetime,
     snapshot_provider: SnapshotProvider,
-) -> tuple[Set[str], int, List[str]]:
+) -> tuple[Set[str], int, List[str], Dict[str, Tuple[str, ...]]]:
     ledger = store.load()
     due = _due_pending_jobs(ledger, actor, now)
     if not due:
-        return set(), 0, []
+        return set(), 0, [], {}
     devices = list(snapshot_provider(config))
     active = list_active(ledger, now)
     decisions = {
@@ -591,7 +602,12 @@ def _launch_guard_eligibility(
         for reservation_id, decision in decisions.items()
         if decision.ready
     }
-    return eligible, len(decisions) - len(eligible), notices
+    launch_devices = {
+        reservation_id: decision.cuda_visible_devices
+        for reservation_id, decision in decisions.items()
+        if decision.ready and decision.cuda_visible_devices
+    }
+    return eligible, len(decisions) - len(eligible), notices, launch_devices
 
 
 def _due_pending_jobs(ledger: dict, actor: Actor, now: datetime) -> List[dict]:
@@ -724,6 +740,9 @@ def _start_claimed_job(
     actor: Actor,
     reservation: dict,
     log_dir: Path,
+    cuda_visible_devices: Optional[Sequence[str]] = None,
+    *,
+    require_validated_devices: bool = False,
 ) -> Optional[RunningJob]:
     job = reservation.get("job", {})
     claim_token = str(job.get("claim_token", ""))
@@ -752,11 +771,16 @@ def _start_claimed_job(
         )
 
         env = os.environ.copy()
-        physical_gpus = ",".join(str(item) for item in reservation.get("gpus", []))
-        env["CUDA_VISIBLE_DEVICES"] = physical_gpus
+        reserved_gpus = tuple(str(item) for item in reservation.get("gpus", []))
+        launch_devices = tuple(cuda_visible_devices or ())
+        if len(launch_devices) != len(reserved_gpus):
+            if require_validated_devices:
+                raise BookingError("validated GPU launch binding is unavailable")
+            launch_devices = reserved_gpus
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(launch_devices)
         env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
         env["BK_RESERVATION_ID"] = reservation_id
-        env["BK_RESERVED_GPUS"] = physical_gpus
+        env["BK_RESERVED_GPUS"] = ",".join(reserved_gpus)
         if reservation.get("expected_memory_mb") is not None:
             env["BK_EXPECTED_GPU_MEMORY_MB"] = str(reservation["expected_memory_mb"])
         if not _claim_is_launchable(store, actor, reservation_id, claim_token):

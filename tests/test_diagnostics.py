@@ -14,8 +14,20 @@ class DeploymentDiagnosticsTests(unittest.TestCase):
             data_dir = Path(tmp) / "shared"
             config = Config(data_dir=data_dir, gpu_count=2)
             devices = [
-                GpuSnapshot(0, "gpu0", memory_total_mb=24000, source="nvml"),
-                GpuSnapshot(1, "gpu1", memory_total_mb=24000, source="nvml"),
+                GpuSnapshot(
+                    0,
+                    "gpu0",
+                    memory_total_mb=24000,
+                    source="nvml",
+                    device_uuid="GPU-00000000-0000-0000-0000-000000000000",
+                ),
+                GpuSnapshot(
+                    1,
+                    "gpu1",
+                    memory_total_mb=24000,
+                    source="nvml",
+                    device_uuid="GPU-00000000-0000-0000-0000-000000000001",
+                ),
             ]
 
             with mock.patch("bk.diagnostics.snapshot", return_value=devices):
@@ -99,6 +111,7 @@ class DeploymentDiagnosticsTests(unittest.TestCase):
                     source="nvml",
                     process_telemetry_available=True,
                     process_utilization_available=False,
+                    device_uuid="GPU-00000000-0000-0000-0000-000000000000",
                 )
             ]
 
@@ -108,6 +121,22 @@ class DeploymentDiagnosticsTests(unittest.TestCase):
             gpu = next(item for item in checks if item["name"] == "gpu-telemetry")
             self.assertEqual(gpu["status"], "warn")
             self.assertEqual(gpu["process_utilization_unavailable_indices"], [0])
+            self.assertFalse(probes_ready(checks))
+
+    def test_nvml_requires_stable_identifiers_for_scheduled_command_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(data_dir=Path(tmp) / "data", gpu_count=1)
+            devices = [
+                GpuSnapshot(0, "gpu0", memory_total_mb=24000, source="nvml")
+            ]
+
+            with mock.patch("bk.diagnostics.snapshot", return_value=devices):
+                checks = run_deployment_probes(config)
+
+            gpu = next(item for item in checks if item["name"] == "gpu-telemetry")
+            self.assertEqual(gpu["status"], "fail")
+            self.assertEqual(gpu["stable_identifier_unavailable_indices"], [0])
+            self.assertEqual(gpu["stable_device_identifiers"], [False])
             self.assertFalse(probes_ready(checks))
 
     def test_nvidia_smi_fallback_with_matching_topology_remains_a_warning(self):
