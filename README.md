@@ -297,8 +297,9 @@ still separate. The monitor service above is intended for a private server or
 for the account whose numeric UID is selected by `monitor_uid`. Its generated
 unit captures the absolute shared data directory and explicit trusted config
 path. Sampling and rollup values are reloaded from that config whenever the
-service starts. A second monitor fails with exit status 75; systemd does not
-restart that duplicate instance in a loop.
+service starts. A duplicate writer (`75`) or role mismatch (`77`) is not
+restarted. Other failures retry at most three times in 60 seconds, allowing a
+short transient recovery without an endless log loop.
 
 ## Agents and MCP
 

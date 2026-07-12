@@ -1,6 +1,8 @@
 [Unit]
 Description=GPUbk usage monitor
 After=default.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple

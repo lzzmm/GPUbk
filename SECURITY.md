@@ -66,6 +66,8 @@ Administrator responsibilities:
   unauthenticated network write endpoint or allow users to submit records for arbitrary UIDs.
 - Put the selected telemetry account's numeric UID in `monitor_uid`; do not reuse a username
   as an identity. Exit status 77 is a persistent role/configuration error, not a retry signal.
+- The bundled monitor service bounds other failure restarts to three attempts per 60 seconds,
+  allowing brief I/O recovery without retrying a persistent failure indefinitely.
 - Review generated user units before enabling them. `bk service install` captures absolute data
   and private job-log paths plus an explicit trusted config path; reinstall the unit after
   those paths change.

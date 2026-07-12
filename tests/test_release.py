@@ -93,6 +93,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertNotIn("--interval", unit)
         self.assertNotIn("--rollup", unit)
         self.assertIn("RestartPreventExitStatus=75 77", unit)
+        self.assertIn("StartLimitIntervalSec=60", unit)
+        self.assertIn("StartLimitBurst=3", unit)
 
     def test_prerelease_targets_a_documented_final_version(self):
         init = (ROOT / "src" / "bk" / "__init__.py").read_text(encoding="utf-8")
