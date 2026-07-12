@@ -1,5 +1,6 @@
 import hashlib
 import re
+import runpy
 import unittest
 from pathlib import Path
 
@@ -11,6 +12,17 @@ APACHE_2_NORMALIZED_SHA256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f79621
 
 
 class ReleaseConfigurationTests(unittest.TestCase):
+    def test_source_build_guard_rejects_an_ignored_build_isolation(self):
+        setup_namespace = runpy.run_path(str(ROOT / "setup.py"))
+        require_setuptools = setup_namespace["_require_setuptools"]
+
+        require_setuptools("77.0.0")
+        require_setuptools("83.0.0")
+        with self.assertRaisesRegex(RuntimeError, "Upgrade pip.*published GPUbk wheel"):
+            require_setuptools("59.6.0")
+        with self.assertRaisesRegex(RuntimeError, "cannot verify"):
+            require_setuptools("unknown")
+
     def test_public_distribution_is_gpubk_and_cli_stays_bk(self):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 

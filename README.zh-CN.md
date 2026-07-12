@@ -39,6 +39,17 @@ bk --version
 bk --help
 ```
 
+通过 PyPI 发布的 wheel 可直接使用系统自带 installer。若从 Git 源码目录或 sdist
+安装，请先升级当前环境里的 pip：
+
+```bash
+python3 -m pip install --upgrade pip
+python3 -m pip install .
+```
+
+部分旧版 Debian/Ubuntu pip 会忽略 `pyproject.toml` 请求的隔离 setuptools，并静默
+生成不可用的 `UNKNOWN` 包。GPUbk 会识别这种情况并明确提示升级，不再假装安装成功。
+
 ## 预约 GPU
 
 默认使用 shared 模式：

@@ -40,6 +40,18 @@ bk --version
 bk --help
 ```
 
+Published wheels work with distribution-provided installers. Before installing
+from a source checkout or source archive, upgrade pip in that environment:
+
+```bash
+python3 -m pip install --upgrade pip
+python3 -m pip install .
+```
+
+Some older Debian/Ubuntu pip builds ignore the isolated setuptools requested by
+`pyproject.toml` and silently create an unusable `UNKNOWN` package. GPUbk detects
+that condition and fails with an upgrade hint instead.
+
 ## Book GPUs
 
 Shared mode is the default:
