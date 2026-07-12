@@ -207,6 +207,9 @@ worker 会在预约窗口内持续重试；`bk worker --once` 有等待任务时
 或不安全/不可用状态。只有内核锁能证明 `running`；文件里的 PID、主机名和获取时间仅供
 诊断。加 `--json` 可得到 `gpubk.worker.v1`，加 `--require-running` 则在租约未被持有时
 返回状态码 2。`bk jobs --json` 与 Agent/MCP 上下文也会暴露同一份当前 UID 状态。
+新增或编辑带脚本的预约时也会立即检查该租约；未证明 worker 在线时，普通 CLI 会明确
+告警，JSON/MCP 的 `booking_result.worker` 则返回同一份 `gpubk.worker.v1`（不带脚本的
+预约为 `null`）。预约创建成功本身不代表脚本能够无人值守启动。
 
 预约取消、任务成功、超时或可重试窗口结束后，私有命令 spec 会被清理。worker 会在
 启动、退出以及持续运行时最多每 5 分钟检查一次。没有台账引用的规范 spec 会保留

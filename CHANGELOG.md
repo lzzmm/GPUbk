@@ -4,6 +4,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Bind scheduled-command create/edit results to an immediate per-UID worker liveness check, with
+  actionable human warnings and the same structured evidence in JSON CLI and MCP responses.
 - Add a read-only, versioned per-UID worker liveness probe backed by the existing kernel lease,
   with strict post-start verification and consistent CLI, jobs, Agent/MCP, Skill, and service
   installation visibility.

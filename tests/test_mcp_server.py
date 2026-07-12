@@ -136,6 +136,8 @@ class McpBackendTests(unittest.TestCase):
         self.assertEqual(result["status"], "created")
         self.assertNotIn(secret, self.store.ledger_path.read_text(encoding="utf-8"))
         self.assertEqual(result["reservation"]["job"]["summary"], "python -c (+1 args)")
+        self.assertEqual(result["worker"]["state"], "not-seen")
+        self.assertTrue(any("start `bk w`" in warning for warning in result["warnings"]))
         self.assertEqual(len(list((self.config.job_log_dir / "specs").glob("*.json"))), 1)
 
         cancelled = self.backend.cancel(result["reservation"]["short_id"])

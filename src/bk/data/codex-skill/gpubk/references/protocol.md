@@ -61,7 +61,9 @@ Recommendation fields:
 
 Create and edit return the same `kind=booking_result` shape through JSON CLI and MCP: `status`, a
 privacy-safe `reservation`, per-GPU `allocation.selected` explanations, allocator source/reason,
-and warnings. Status is `created`, `updated`, `queued`, or retry-safe `exists`.
+`worker`, and warnings. `worker` is the current `gpubk.worker.v1` result for a scheduled command
+and `null` when the reservation has no command. Only `worker.running=true` proves that unattended
+launch is currently available. Status is `created`, `updated`, `queued`, or retry-safe `exists`.
 
 Cancellation returns `kind=cancellation_result`, the cancelled reservation, and
 `private_job_cleanup`. A non-null cleanup warning means cancellation committed but the owning UID

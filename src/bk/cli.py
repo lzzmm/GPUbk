@@ -27,10 +27,9 @@ from .monitor import (
     monitor_configuration_error,
     run_monitor,
 )
-from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, EditRequest
+from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError
 from .policy import validate_ledger_policy
 from .scheduler import (
-    edit_booking,
     find_earliest_slot,
     find_policy_violations,
     list_active,
@@ -46,10 +45,12 @@ from .sharing import (
 )
 from .service import (
     AGENT_SCHEMA_VERSION,
+    BookingSubmission,
     booking_result_payload,
     build_agent_context,
     public_reservation,
     recommend_booking,
+    scheduled_job_worker_warning,
     submit_booking,
     submit_cancellation,
     submit_edit,
@@ -417,12 +418,13 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
             print(f"allocator: external{f' ({allocator.reason})' if allocator.reason else ''}")
         elif allocator.warning:
             print(f"warning: {allocator.warning}", file=sys.stderr)
-        if isinstance(reservation.get("job"), dict):
+    if isinstance(reservation.get("job"), dict):
+        if not args.quiet:
             print(
                 f"job: {reservation['job'].get('status')} "
                 f"command={reservation['job'].get('summary', 'private command')}"
             )
-            print("worker: keep `bk w` running before the scheduled start")
+        _print_scheduled_job_worker(submission, quiet=args.quiet)
     if store.last_warning:
         print(f"warning: {store.last_warning}", file=sys.stderr)
     return 0
@@ -1014,9 +1016,24 @@ def _worker_status_line(status: dict) -> str:
         suffix = f": {status['warning']}" if status.get("warning") else ""
         return f"worker: stopped{suffix}"
     if state == "not-seen":
-        return "worker: not seen (start `bk w` before a scheduled command is due)"
+        return "worker: not seen (start `bk w` to launch scheduled commands)"
     warning = str(status.get("warning") or "status unavailable")
     return f"worker: {state}: {warning}"
+
+
+def _print_scheduled_job_worker(
+    submission: BookingSubmission,
+    *,
+    quiet: bool = False,
+) -> None:
+    status = submission.worker_status
+    if status is None:
+        return
+    if not quiet:
+        print(_worker_status_line(status))
+    warning = scheduled_job_worker_warning(status)
+    if warning:
+        print(f"warning: {warning}", file=sys.stderr)
 
 
 def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
@@ -1237,7 +1254,7 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
     _print_booking_advice(config, store, reservation, advice, expected_memory_mb)
     if isinstance(reservation.get("job"), dict):
         print(f"job: pending command={reservation['job'].get('summary', 'private command')}")
-        print("worker: keep `bk w` running before the scheduled start")
+        _print_scheduled_job_worker(submission)
     if store.last_warning:
         print(f"warning: {store.last_warning}", file=sys.stderr)
     return 0
@@ -1597,7 +1614,7 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             args.start,
             args.at,
             args.gpu,
-            args.count,
+            args.count is not None,
             args.mode,
             args.mem,
             args.share,
@@ -1608,7 +1625,6 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         return _edit_interactive(config, store, reservation_id, actor)
 
     preferred = _parse_gpu_list(args.gpu) if args.gpu else None
-    advice = build_gpu_advice(config)
     expected_memory_mb = None if args.mem == "-" else (parse_memory_mb(args.mem) if args.mem else None)
     edit_mode = MODE_EXCLUSIVE if args.mode == "x" else (MODE_SHARED if args.mode == "s" else args.mode)
     share_units = _share_units_from_args(args, config, edit_mode)
@@ -1617,28 +1633,25 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         if args.at
         else (parse_start(args.start) if args.start else None)
     )
-    result = edit_booking(
-        store,
+    submission = submit_edit(
         config,
-        EditRequest(
-            actor=actor,
-            reservation_id=reservation_id,
-            start_at=start_at,
-            duration_seconds=parse_duration_seconds(args.duration) if args.duration else None,
-            mode=edit_mode,
-            preferred_gpus=preferred,
-            gpu_order=advice.order,
-            gpu_scores=advice.scores,
-            count=args.count,
-            allow_queue=args.queue,
-            expected_memory_mb=expected_memory_mb,
-            update_expected_memory=args.mem is not None,
-            gpu_memory_capacity_mb=advice.memory_capacities_mb,
-            share_units=share_units,
-            update_share_units=args.share is not None or args.share_with is not None,
-        ),
+        store,
+        actor,
+        reservation_id,
+        start_at=start_at,
+        duration_seconds=parse_duration_seconds(args.duration) if args.duration else None,
+        mode=edit_mode,
+        preferred_gpus=preferred,
+        count=args.count,
+        allow_queue=args.queue,
+        expected_memory_mb=expected_memory_mb,
+        update_expected_memory=args.mem is not None,
+        share_units=share_units,
+        update_share_units=args.share is not None or args.share_with is not None,
     )
+    result = submission.result
     _print_edit_result(config, result.reservation, result)
+    _print_scheduled_job_worker(submission)
     if store.last_warning:
         print(f"warning: {store.last_warning}", file=sys.stderr)
     return 0
@@ -1702,29 +1715,25 @@ def _edit_interactive(config: Config, store: LedgerStore, reservation_id: str, a
         print("cancelled")
         return 0
 
-    advice = build_gpu_advice(config)
-    result = edit_booking(
-        store,
+    submission = submit_edit(
         config,
-        EditRequest(
-            actor=actor,
-            reservation_id=reservation_id,
-            start_at=start,
-            duration_seconds=duration,
-            mode=mode,
-            preferred_gpus=preferred,
-            gpu_order=advice.order,
-            gpu_scores=advice.scores,
-            count=count,
-            allow_queue=allow_queue,
-            expected_memory_mb=expected_memory_mb,
-            update_expected_memory=update_expected_memory,
-            gpu_memory_capacity_mb=advice.memory_capacities_mb,
-            share_units=share_units,
-            update_share_units=update_share_units,
-        ),
+        store,
+        actor,
+        reservation_id,
+        start_at=start,
+        duration_seconds=duration,
+        mode=mode,
+        preferred_gpus=preferred,
+        count=count,
+        allow_queue=allow_queue,
+        expected_memory_mb=expected_memory_mb,
+        update_expected_memory=update_expected_memory,
+        share_units=share_units,
+        update_share_units=update_share_units,
     )
+    result = submission.result
     _print_edit_result(config, result.reservation, result)
+    _print_scheduled_job_worker(submission)
     if store.last_warning:
         print(f"warning: {store.last_warning}", file=sys.stderr)
     return 0

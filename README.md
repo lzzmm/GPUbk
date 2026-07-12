@@ -230,6 +230,11 @@ proved by the kernel lock; the recorded PID, hostname, and acquisition time are
 diagnostic metadata only. Add `--json` for `gpubk.worker.v1`, or
 `--require-running` to return status 2 unless the lease is actively held.
 `bk jobs --json` and Agent/MCP context expose the same current-UID status.
+Creating or editing a reservation with a scheduled command also checks this
+lease immediately. Human output warns when no worker is proven running;
+JSON/MCP `booking_result.worker` carries the same `gpubk.worker.v1` document
+(`null` for reservations without a command). A successful reservation alone
+does not prove that its command can launch unattended.
 
 Private command specs are removed after cancellation, success, timeout, or an
 expired retry window. The worker checks them at startup, after shutdown, and at

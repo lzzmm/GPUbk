@@ -1153,6 +1153,23 @@ class CliTests(unittest.TestCase):
             self.assertEqual(ledger["reservations"][0]["start_at"], "2030-01-01T00:00:00Z")
             self.assertEqual(ledger["reservations"][0]["end_at"], "2030-01-01T01:00:00Z")
 
+    def test_direct_edit_rejects_zero_gpu_count_without_entering_guided_mode(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            create = self.run_bk(
+                ["1", "30m", "--start", "2030-01-01T00:00:00Z"],
+                data_dir,
+            )
+            before = (data_dir / "ledger.json").read_bytes()
+
+            edit = self.run_bk(["edit", "1", "--count", "0"], data_dir)
+
+            self.assertEqual(create.returncode, 0, create.stderr)
+            self.assertEqual(edit.returncode, 2)
+            self.assertIn("GPU count must be >= 1", edit.stderr)
+            self.assertNotIn("Guided edit", edit.stdout)
+            self.assertEqual((data_dir / "ledger.json").read_bytes(), before)
+
     def test_edit_accepts_short_mode_and_can_clear_memory_declaration(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
@@ -1885,6 +1902,8 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(create.returncode, 0, create.stderr)
             self.assertIn("job: pending", create.stdout)
+            self.assertIn("worker: not seen", create.stdout)
+            self.assertIn("scheduled command worker is not-seen", create.stderr)
             self.assertEqual(worker.returncode, 0, worker.stderr)
             self.assertEqual(jobs.returncode, 0, jobs.stderr)
             self.assertIn("succeeded", jobs.stdout)
@@ -1899,6 +1918,35 @@ class CliTests(unittest.TestCase):
                 0,
             )
             self.assertEqual(list((log_dir / "specs").glob("*.json")), [])
+
+    def test_json_scheduled_booking_reports_worker_liveness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            log_dir = root / "job-logs"
+            start = iso(ceil_5m(datetime.now(timezone.utc) + timedelta(hours=1)))
+            result = self.run_bk(
+                [
+                    "1",
+                    "10m",
+                    "--start",
+                    start,
+                    "--json",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "print('scheduled')",
+                ],
+                data_dir,
+                {"BK_JOB_LOG_DIR": str(log_dir)},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["worker"]["state"], "not-seen")
+            self.assertTrue(
+                any("start `bk w`" in warning for warning in payload["warnings"])
+            )
 
     def test_cli_cancellation_removes_a_pending_private_job_spec(self):
         with tempfile.TemporaryDirectory() as tmp:

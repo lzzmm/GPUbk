@@ -46,6 +46,7 @@ class BookingSubmission:
     advice: GpuAdvice
     allocator: AllocatorDecision
     share_capacity_units: int
+    worker_status: Optional[dict] = None
 
 
 @dataclass(frozen=True)
@@ -141,7 +142,13 @@ def submit_booking(
         not result.created or result.reservation.get("job", {}).get("spec_id") != job_spec.spec_id
     ):
         delete_job_spec(config, job_spec.spec_id)
-    return BookingSubmission(result, gpu_advice, allocator, config.max_shared_users)
+    return BookingSubmission(
+        result,
+        gpu_advice,
+        allocator,
+        config.max_shared_users,
+        _scheduled_job_worker_status(config, actor, result.reservation),
+    )
 
 
 def submit_edit(
@@ -172,12 +179,22 @@ def submit_edit(
         raise BookingError("reservation not found")
     if int(reservation.get("uid", -1)) != actor.uid:
         raise BookingError("permission denied: reservation belongs to another UID")
+    if count is not None and count < 1:
+        raise BookingError("GPU count must be >= 1")
+    if duration_seconds is not None and duration_seconds <= 0:
+        raise BookingError("duration must be positive")
 
     current_start = _reservation_datetime(reservation, "start_at")
     current_end = _reservation_datetime(reservation, "end_at")
-    effective_duration = duration_seconds or int((current_end - current_start).total_seconds())
-    effective_start = start_at or current_start
-    effective_mode = mode or str(reservation.get("mode", MODE_SHARED))
+    effective_duration = (
+        int((current_end - current_start).total_seconds())
+        if duration_seconds is None
+        else duration_seconds
+    )
+    effective_start = current_start if start_at is None else start_at
+    effective_mode = (
+        str(reservation.get("mode", MODE_SHARED)) if mode is None else mode
+    )
     effective_memory = (
         expected_memory_mb
         if update_expected_memory
@@ -198,10 +215,14 @@ def submit_edit(
     effective_preferred = preferred_gpus
     if effective_preferred is None and count is None:
         effective_preferred = [int(gpu) for gpu in reservation.get("gpus", [])]
-    effective_count = count or (
-        len(effective_preferred)
-        if effective_preferred is not None
-        else len(reservation.get("gpus", []))
+    effective_count = (
+        count
+        if count is not None
+        else (
+            len(effective_preferred)
+            if effective_preferred is not None
+            else len(reservation.get("gpus", []))
+        )
     )
     normalized_share_units = _validate_recommendation_request(
         config,
@@ -250,7 +271,13 @@ def submit_edit(
             update_share_units=update_share_units,
         ),
     )
-    return BookingSubmission(result, gpu_advice, allocator, config.max_shared_users)
+    return BookingSubmission(
+        result,
+        gpu_advice,
+        allocator,
+        config.max_shared_users,
+        _scheduled_job_worker_status(config, actor, result.reservation),
+    )
 
 
 def submit_cancellation(
@@ -616,6 +643,16 @@ def public_reservation(
     return _public_reservation(reservation, actor, share_capacity_units)
 
 
+def _scheduled_job_worker_status(
+    config: Config,
+    actor: Actor,
+    reservation: dict,
+) -> Optional[dict]:
+    if not isinstance(reservation.get("job"), dict):
+        return None
+    return inspect_worker_status(config, actor)
+
+
 def booking_result_payload(
     status: str,
     submission: BookingSubmission,
@@ -643,6 +680,9 @@ def booking_result_payload(
         warnings.append(submission.allocator.warning)
     if any(item["live_status"] == "busy" for item in selected):
         warnings.append("selected GPU is currently busy; live task end time is unknown")
+    worker_warning = scheduled_job_worker_warning(submission.worker_status)
+    if worker_warning:
+        warnings.append(worker_warning)
     return {
         "schema_version": AGENT_SCHEMA_VERSION,
         "kind": "booking_result",
@@ -655,8 +695,29 @@ def booking_result_payload(
             "source": submission.allocator.source,
             "reason": submission.allocator.reason,
         },
-        "warnings": warnings,
+        "worker": submission.worker_status,
+        "warnings": list(dict.fromkeys(warnings)),
     }
+
+
+def scheduled_job_worker_warning(status: Optional[dict]) -> Optional[str]:
+    if status is None or status.get("running") is True:
+        return None
+    state = str(status.get("state", "invalid"))
+    if state in {"not-seen", "stopped"}:
+        return (
+            f"scheduled command worker is {state}; start `bk w` now or enable "
+            "bk-worker.service, otherwise the command cannot launch"
+        )
+    if state == "invalid":
+        return (
+            "scheduled command worker status is invalid; run `bk w --status --json` "
+            "and repair the private job directory before relying on automatic launch"
+        )
+    return (
+        f"scheduled command worker status is {state}; verify `bk w --status --json` "
+        "before relying on automatic launch"
+    )
 
 
 def _public_reservation(
