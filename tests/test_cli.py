@@ -382,6 +382,175 @@ class CliTests(unittest.TestCase):
             self.assertFalse(payload["ready"])
             self.assertEqual(list(data_dir.glob(".gpubk-probe-*")), [])
 
+    def test_doctor_reports_ledger_symlink_as_json_without_following_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            data_dir.mkdir(mode=0o700)
+            target = Path(tmp) / "outside-ledger.json"
+            target.write_text(json.dumps({"version": 1, "reservations": []}), encoding="utf-8")
+            original = target.read_bytes()
+            (data_dir / "ledger.json").symlink_to(target)
+
+            result = self.run_bk(["doctor", "--json", "--strict"], data_dir)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            payload = json.loads(result.stdout)
+            issue_types = {item["type"] for item in payload["storage_issues"]}
+            self.assertIn("file-type", issue_types)
+            self.assertIn("ledger-read", issue_types)
+            self.assertFalse(payload["healthy"])
+            self.assertEqual(target.read_bytes(), original)
+
+    def test_doctor_reports_usage_directory_symlink_as_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            data_dir.mkdir(mode=0o700)
+            outside = Path(tmp) / "outside-usage"
+            outside.mkdir()
+            (data_dir / "usage").symlink_to(outside, target_is_directory=True)
+
+            result = self.run_bk(["doctor", "--json", "--strict"], data_dir)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            payload = json.loads(result.stdout)
+            issue = next(
+                item
+                for item in payload["storage_issues"]
+                if item["type"] == "usage-directory-type"
+            )
+            self.assertEqual(issue["actual"], "symbolic-link")
+            self.assertFalse(payload["healthy"])
+            self.assertEqual(list(outside.iterdir()), [])
+
+    def test_doctor_never_reads_through_a_symlink_data_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outside = Path(tmp) / "outside-data"
+            outside.mkdir()
+            ledger = outside / "ledger.json"
+            ledger.write_text("private outside content", encoding="utf-8")
+            usage = outside / "usage"
+            usage.mkdir()
+            usage_meta = usage / "store.json"
+            usage_meta.write_text("private usage content", encoding="utf-8")
+            original = ledger.read_bytes()
+            original_usage = usage_meta.read_bytes()
+            data_dir = Path(tmp) / "linked-data"
+            data_dir.symlink_to(outside, target_is_directory=True)
+
+            result = self.run_bk(["doctor", "--json", "--strict"], data_dir)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            payload = json.loads(result.stdout)
+            issue_types = {item["type"] for item in payload["storage_issues"]}
+            self.assertIn("directory-type", issue_types)
+            ledger_read = next(
+                item for item in payload["storage_issues"] if item["type"] == "ledger-read"
+            )
+            usage_health = next(
+                item for item in payload["storage_issues"] if item["type"] == "usage-health"
+            )
+            self.assertIn("skipped", ledger_read["message"])
+            self.assertIn("skipped", usage_health["message"])
+            self.assertNotIn("usage-format", issue_types)
+            self.assertEqual(ledger.read_bytes(), original)
+            self.assertEqual(usage_meta.read_bytes(), original_usage)
+
+    def test_doctor_does_not_recover_a_pending_journal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            transaction = {
+                "version": 1,
+                "transaction_id": "doctor-read-only",
+                "created_at": "2030-01-01T00:00:00Z",
+                "ledger": {
+                    "version": 1,
+                    "last_transaction_id": "doctor-read-only",
+                    "reservations": [{"id": "pending"}],
+                },
+                "logs": [],
+            }
+            journal = data_dir / "transaction.json"
+            journal.write_text(json.dumps(transaction), encoding="utf-8")
+            journal.chmod(0o600)
+            original = journal.read_bytes()
+
+            result = self.run_bk(["doctor", "--json", "--strict"], data_dir)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertIn(
+                "pending-journal",
+                {item["type"] for item in payload["storage_issues"]},
+            )
+            self.assertEqual(journal.read_bytes(), original)
+            self.assertFalse((data_dir / "ledger.json").exists())
+            self.assertFalse((data_dir / "ops.log").exists())
+
+    def test_doctor_reports_malformed_reservation_records_as_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            ledger = data_dir / "ledger.json"
+            ledger.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "reservations": [{"id": "broken", "status": "active"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            ledger.chmod(0o600)
+
+            result = self.run_bk(["doctor", "--json", "--strict"], data_dir)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["policy_issues"][0]["type"], "invalid-ledger-record")
+            self.assertIn("end_at", payload["policy_issues"][0]["message"])
+            self.assertFalse(payload["healthy"])
+
+    def test_doctor_reports_non_object_reservation_records_as_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            ledger = data_dir / "ledger.json"
+            ledger.write_text(
+                json.dumps({"version": 1, "reservations": ["broken"]}),
+                encoding="utf-8",
+            )
+            ledger.chmod(0o600)
+
+            result = self.run_bk(["doctor", "--json", "--strict"], data_dir)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["policy_issues"][0]["type"], "invalid-ledger-record")
+            self.assertFalse(payload["healthy"])
+
+    def test_doctor_reports_read_only_backup_fallback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            backup_dir = data_dir / "backups"
+            backup_dir.mkdir(mode=0o700)
+            ledger = data_dir / "ledger.json"
+            ledger.write_text("broken", encoding="utf-8")
+            ledger.chmod(0o600)
+            backup = backup_dir / "ledger-20300101T000000000000Z.json"
+            backup.write_text(
+                json.dumps({"version": 1, "reservations": []}),
+                encoding="utf-8",
+            )
+            backup.chmod(0o600)
+
+            result = self.run_bk(["doctor", "--json", "--strict"], data_dir)
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            payload = json.loads(result.stdout)
+            fallback = next(
+                item for item in payload["storage_issues"] if item["type"] == "ledger-fallback"
+            )
+            self.assertIn("latest valid backup", fallback["message"])
+            self.assertEqual(ledger.read_text(encoding="utf-8"), "broken")
+
     def test_booking_output_uses_local_time_not_utc_z_suffix(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_bk(["1", "30m"], Path(tmp))

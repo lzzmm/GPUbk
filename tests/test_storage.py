@@ -150,6 +150,37 @@ class LedgerStorageTests(unittest.TestCase):
 
             self.assertEqual(list(target.iterdir()), [])
 
+    def test_health_reports_symbolic_links_without_following_targets(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "data"
+            data_dir.mkdir(mode=0o700)
+            outside_file = Path(tmp) / "outside-ledger"
+            outside_file.write_text("keep", encoding="utf-8")
+            outside_dir = Path(tmp) / "outside-backups"
+            outside_dir.mkdir()
+            (data_dir / "ledger.json").symlink_to(outside_file)
+            (data_dir / "backups").symlink_to(outside_dir, target_is_directory=True)
+
+            issues = LedgerStore(data_dir).health_issues()
+            by_path = {item["path"]: item for item in issues if "path" in item}
+
+            self.assertEqual(by_path[str(data_dir / "ledger.json")]["type"], "file-type")
+            self.assertEqual(
+                by_path[str(data_dir / "ledger.json")]["actual"],
+                "symbolic-link",
+            )
+            self.assertEqual(by_path[str(data_dir / "backups")]["type"], "directory-type")
+            self.assertEqual(outside_file.read_text(encoding="utf-8"), "keep")
+            self.assertEqual(list(outside_dir.iterdir()), [])
+
+    def test_read_only_load_clears_a_stale_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+            store.last_warning = "stale warning from an earlier operation"
+
+            self.assertEqual(store.load_read_only()["reservations"], [])
+            self.assertIsNone(store.last_warning)
+
     def test_atomic_files_keep_configured_shared_modes(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "shared"

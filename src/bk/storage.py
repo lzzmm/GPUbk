@@ -12,7 +12,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterable, List, Optional, Tuple, TypeVar
 
-from .fileio import ensure_directory, open_existing_regular, open_or_create_regular
+from .fileio import (
+    ensure_directory,
+    file_type_name,
+    open_existing_regular,
+    open_or_create_regular,
+)
 from .models import BookingError
 from .policy import ledger_storage_modes
 
@@ -111,9 +116,15 @@ class LedgerStore:
         ensure_directory(self.backup_dir, self.dir_mode)
 
     def load(self) -> dict:
+        self.last_warning = None
         if self.journal_path.exists():
             with self._lock():
                 self._recover_journal_unlocked()
+        return self._load_unlocked()
+
+    def load_read_only(self) -> dict:
+        """Read the committed ledger snapshot without recovering pending writes."""
+        self.last_warning = None
         return self._load_unlocked()
 
     def transaction(self, mutator: Callable[[dict], Tuple[dict, T, Iterable[dict], bool]]) -> T:
@@ -173,31 +184,111 @@ class LedgerStore:
 
     def health_issues(self) -> List[dict]:
         issues = []
-        if self.journal_path.exists():
+        if not os.path.lexists(self.data_dir):
+            return issues
+        try:
+            metadata = self.data_dir.lstat()
+        except OSError as exc:
+            return [
+                {
+                    "type": "path-stat",
+                    "path": str(self.data_dir),
+                    "message": str(exc),
+                }
+            ]
+        if file_type_name(metadata.st_mode) != "directory":
+            return [
+                {
+                    "type": "directory-type",
+                    "path": str(self.data_dir),
+                    "expected": "directory",
+                    "actual": file_type_name(metadata.st_mode),
+                }
+            ]
+        actual = metadata.st_mode & 0o7777
+        if actual != self.dir_mode:
             issues.append(
                 {
-                    "type": "pending-journal",
-                    "path": str(self.journal_path),
-                    "message": "a durable transaction is waiting for recovery",
+                    "type": "directory-mode",
+                    "path": str(self.data_dir),
+                    "expected": f"{self.dir_mode:04o}",
+                    "actual": f"{actual:04o}",
                 }
             )
-        for path in (self.data_dir, self.backup_dir):
-            if not path.exists():
-                continue
-            actual = path.stat().st_mode & 0o7777
-            if actual != self.dir_mode:
+
+        if os.path.lexists(self.backup_dir):
+            try:
+                metadata = self.backup_dir.lstat()
+            except OSError as exc:
                 issues.append(
                     {
-                        "type": "directory-mode",
-                        "path": str(path),
-                        "expected": f"{self.dir_mode:04o}",
-                        "actual": f"{actual:04o}",
+                        "type": "path-stat",
+                        "path": str(self.backup_dir),
+                        "message": str(exc),
                     }
                 )
-        for path in (self.ledger_path, self.lock_path, self.log_path):
-            if not path.exists():
+            else:
+                actual_type = file_type_name(metadata.st_mode)
+                if actual_type != "directory":
+                    issues.append(
+                        {
+                            "type": "directory-type",
+                            "path": str(self.backup_dir),
+                            "expected": "directory",
+                            "actual": actual_type,
+                        }
+                    )
+                else:
+                    actual = metadata.st_mode & 0o7777
+                    if actual != self.dir_mode:
+                        issues.append(
+                            {
+                                "type": "directory-mode",
+                                "path": str(self.backup_dir),
+                                "expected": f"{self.dir_mode:04o}",
+                                "actual": f"{actual:04o}",
+                            }
+                        )
+
+        for path in (
+            self.ledger_path,
+            self.lock_path,
+            self.log_path,
+            self.journal_path,
+        ):
+            if not os.path.lexists(path):
                 continue
-            actual = path.stat().st_mode & 0o777
+            try:
+                metadata = path.lstat()
+            except OSError as exc:
+                issues.append(
+                    {
+                        "type": "path-stat",
+                        "path": str(path),
+                        "message": str(exc),
+                    }
+                )
+                continue
+            actual_type = file_type_name(metadata.st_mode)
+            if actual_type != "regular-file":
+                issues.append(
+                    {
+                        "type": "file-type",
+                        "path": str(path),
+                        "expected": "regular-file",
+                        "actual": actual_type,
+                    }
+                )
+                continue
+            if path == self.journal_path:
+                issues.append(
+                    {
+                        "type": "pending-journal",
+                        "path": str(path),
+                        "message": "a durable transaction is waiting for recovery",
+                    }
+                )
+            actual = metadata.st_mode & 0o777
             if actual != self.file_mode:
                 issues.append(
                     {

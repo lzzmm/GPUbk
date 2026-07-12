@@ -14,7 +14,12 @@ from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional, Protocol, Sequence, Tuple
 
-from .fileio import ensure_directory, open_existing_regular, open_or_create_regular
+from .fileio import (
+    ensure_directory,
+    file_type_name,
+    open_existing_regular,
+    open_or_create_regular,
+)
 from .storage import FileLock
 from .timeparse import parse_iso, to_iso, utc_now
 from .usage_schema import (
@@ -639,7 +644,67 @@ class UsageAuditStore:
 
     def health_issues(self) -> List[dict]:
         issues = []
-        if self.transition_journal_path.exists():
+        usage_issue, usage_dir_safe = _usage_path_health(
+            self.usage_dir,
+            "directory",
+            self.dir_mode,
+        )
+        if usage_issue is not None:
+            issues.append(usage_issue)
+        usage_tree_safe = usage_dir_safe
+        if usage_dir_safe:
+            walk_errors = []
+            for root, directories, files in os.walk(
+                self.usage_dir,
+                topdown=True,
+                onerror=walk_errors.append,
+                followlinks=False,
+            ):
+                root_path = Path(root)
+                for name in directories:
+                    issue, safe = _usage_path_health(
+                        root_path / name,
+                        "directory",
+                        self.dir_mode,
+                    )
+                    usage_tree_safe = usage_tree_safe and safe
+                    if issue is not None:
+                        issues.append(issue)
+                for name in files:
+                    path = root_path / name
+                    expected_mode = 0o600 if path == self.key_path else self.file_mode
+                    issue, safe = _usage_path_health(
+                        path,
+                        "regular-file",
+                        expected_mode,
+                    )
+                    usage_tree_safe = usage_tree_safe and safe
+                    if issue is not None:
+                        issues.append(issue)
+            for exc in walk_errors:
+                usage_tree_safe = False
+                issues.append(
+                    {
+                        "type": "usage-path-scan",
+                        "path": str(getattr(exc, "filename", self.usage_dir)),
+                        "message": str(exc),
+                    }
+                )
+
+        for path in (
+            self.lock_path,
+            self.legacy_state_path,
+            self.events_path,
+            self.rollups_path,
+            self.legacy_load_path,
+        ):
+            issue, _safe = _usage_path_health(path, "regular-file", self.file_mode)
+            if issue is not None:
+                issues.append(issue)
+
+        if not usage_tree_safe:
+            return issues
+        if os.path.lexists(self.transition_journal_path):
             issues.append(
                 {
                     "type": "usage-pending-journal",
@@ -647,12 +712,12 @@ class UsageAuditStore:
                     "message": "the monitor will recover this state transition while holding usage.lock",
                 }
             )
-        if self.meta_path.exists():
+        if os.path.lexists(self.meta_path):
             try:
                 self._validate_meta(self._read_json(self.meta_path))
             except (OSError, ValueError, json.JSONDecodeError) as exc:
                 issues.append({"type": "usage-format", "path": str(self.meta_path), "message": str(exc)})
-        if self.workloads_path.exists() and not self.key_path.exists():
+        if os.path.lexists(self.workloads_path) and not os.path.lexists(self.key_path):
             issues.append(
                 {
                     "type": "usage-key-missing",
@@ -1347,6 +1412,54 @@ def _partition_record_count(path: Path) -> int:
             if not raw.closed:
                 raw.close()
     return _line_count(path)
+
+
+def _usage_path_health(
+    path: Path,
+    expected_type: str,
+    expected_mode: int,
+) -> Tuple[Optional[dict], bool]:
+    if not os.path.lexists(path):
+        return None, False
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        return (
+            {
+                "type": "usage-path-stat",
+                "path": str(path),
+                "message": str(exc),
+            },
+            False,
+        )
+    actual_type = file_type_name(metadata.st_mode)
+    if actual_type != expected_type:
+        return (
+            {
+                "type": "usage-directory-type"
+                if expected_type == "directory"
+                else "usage-file-type",
+                "path": str(path),
+                "expected": expected_type,
+                "actual": actual_type,
+            },
+            False,
+        )
+    mode_mask = 0o7777 if expected_type == "directory" else 0o777
+    actual_mode = metadata.st_mode & mode_mask
+    if actual_mode != expected_mode:
+        return (
+            {
+                "type": "usage-directory-mode"
+                if expected_type == "directory"
+                else "usage-file-mode",
+                "path": str(path),
+                "expected": f"{expected_mode:04o}",
+                "actual": f"{actual_mode:04o}",
+            },
+            True,
+        )
+    return None, True
 
 
 def _line_count(path: Path) -> int:

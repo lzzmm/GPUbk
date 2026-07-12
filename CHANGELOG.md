@@ -23,6 +23,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Use adaptive six-character reservation prefixes in the TUI, preserve booking links in narrow process tables, and distinguish per-booking Share from current GPU capacity use.
 - Show total occupied capacity in CLI timeline slices, mark current exclusive use in the aligned TUI GPU metrics, and keep the `NOW` label from leaving partial minute ticks on narrow terminals.
 - Fail closed without crashing Agent context when a legacy reservation contains malformed shared-capacity metadata.
+- Keep plain `bk doctor` strictly read-only: do not recover pending transactions or follow unsafe managed paths, and report malformed records and backup fallback as structured issues.
 
 ## 0.1.0 - 2026-07-12
 

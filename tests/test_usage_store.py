@@ -50,6 +50,45 @@ class UsageStoreTests(unittest.TestCase):
         self.assertNotIn("private", text)
         self.assertNotIn("secret", text)
 
+    def test_health_rejects_symlink_usage_root_without_reading_target(self):
+        outside = self.data_dir / "outside-usage"
+        outside.mkdir()
+        sentinel = outside / "store.json"
+        sentinel.write_text("not a gpubk store", encoding="utf-8")
+        original = sentinel.read_bytes()
+        self.store.usage_dir.symlink_to(outside, target_is_directory=True)
+
+        issues = self.store.health_issues()
+
+        self.assertEqual(issues[0]["type"], "usage-directory-type")
+        self.assertEqual(issues[0]["actual"], "symbolic-link")
+        self.assertNotIn("usage-format", {item["type"] for item in issues})
+        self.assertEqual(sentinel.read_bytes(), original)
+
+    def test_health_rejects_nested_usage_symlink(self):
+        self.store.usage_dir.mkdir(mode=0o700)
+        target = self.data_dir / "outside-meta"
+        target.write_text("keep", encoding="utf-8")
+        self.store.meta_path.symlink_to(target)
+
+        issues = self.store.health_issues()
+
+        by_path = {item.get("path"): item for item in issues}
+        self.assertEqual(by_path[str(self.store.meta_path)]["type"], "usage-file-type")
+        self.assertEqual(by_path[str(self.store.meta_path)]["actual"], "symbolic-link")
+        self.assertEqual(target.read_text(encoding="utf-8"), "keep")
+
+    def test_shared_mode_health_accepts_private_workload_key(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = UsageAuditStore(
+                Path(tmp) / "shared",
+                file_mode=0o660,
+                dir_mode=0o2770,
+            )
+            store.register_workload(1001, describe_workload("python train.py"))
+
+            self.assertEqual(store.health_issues(), [])
+
     def test_maintenance_builds_all_resolutions_before_removing_old_minutes(self):
         workload_id = self.store.register_workload(1001, describe_workload("python train.py"))
         self.store.append_rollups([self._rollup(workload_id)])

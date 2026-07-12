@@ -1470,9 +1470,95 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         config.file_mode,
         config.dir_mode,
     )
-    storage_issues = [*store.health_issues(), *usage_store.health_issues()]
-    ledger = store.load()
-    issues = find_policy_violations(ledger, config.max_shared_users)
+    storage_issues = []
+    try:
+        storage_issues.extend(store.health_issues())
+    except Exception as exc:
+        storage_issues.append(
+            {
+                "type": "ledger-health",
+                "path": str(store.data_dir),
+                "message": f"{type(exc).__name__}: {exc}",
+            }
+        )
+
+    unsafe_data_root = any(
+        item.get("type") in {"directory-type", "path-stat"}
+        and item.get("path") == str(store.data_dir)
+        for item in storage_issues
+    )
+    if unsafe_data_root:
+        storage_issues.append(
+            {
+                "type": "usage-health",
+                "path": str(usage_store.usage_dir),
+                "message": "skipped because the data root is unsafe",
+            }
+        )
+    else:
+        try:
+            storage_issues.extend(usage_store.health_issues())
+        except Exception as exc:
+            storage_issues.append(
+                {
+                    "type": "usage-health",
+                    "path": str(usage_store.usage_dir),
+                    "message": f"{type(exc).__name__}: {exc}",
+                }
+            )
+
+    ledger = {"version": 1, "reservations": []}
+    managed_ledger_paths = {
+        str(store.data_dir),
+        str(store.backup_dir),
+        str(store.ledger_path),
+    }
+    unsafe_ledger_path = any(
+        item.get("type") in {"directory-type", "file-type", "path-stat"}
+        and item.get("path") in managed_ledger_paths
+        for item in storage_issues
+    )
+    ledger_readable = not unsafe_ledger_path
+    if unsafe_ledger_path:
+        storage_issues.append(
+            {
+                "type": "ledger-read",
+                "path": str(store.ledger_path),
+                "message": "skipped because an unsafe managed path was detected",
+            }
+        )
+    else:
+        try:
+            ledger = store.load_read_only()
+            if store.last_warning:
+                storage_issues.append(
+                    {
+                        "type": "ledger-fallback",
+                        "path": str(store.ledger_path),
+                        "message": store.last_warning,
+                    }
+                )
+        except Exception as exc:
+            ledger_readable = False
+            storage_issues.append(
+                {
+                    "type": "ledger-read",
+                    "path": str(store.ledger_path),
+                    "message": f"{type(exc).__name__}: {exc}",
+                }
+            )
+
+    issues = []
+    if ledger_readable:
+        try:
+            issues = find_policy_violations(ledger, config.max_shared_users)
+        except Exception as exc:
+            issues.append(
+                {
+                    "type": "invalid-ledger-record",
+                    "message": f"{type(exc).__name__}: {exc}",
+                }
+            )
     privacy_issues = [
         {
             "type": "legacy-inline-job-command",
@@ -1480,7 +1566,9 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             "message": "full argv is visible in the shared ledger; recreate this pending job",
         }
         for item in ledger.get("reservations", [])
-        if isinstance(item.get("job"), dict) and "argv" in item["job"]
+        if isinstance(item, dict)
+        and isinstance(item.get("job"), dict)
+        and "argv" in item["job"]
     ]
     probes = run_deployment_probes(config) if args.probe else []
     healthy = not issues and not storage_issues and not privacy_issues
@@ -1555,6 +1643,8 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                 f"invalid-share-units id={str(issue['reservation_id'])[:8]} "
                 f"value={issue.get('share_units')!r} {issue.get('message', '')}"
             )
+        else:
+            print(f"{issue.get('type', 'policy-issue')} {issue.get('message', '')}".rstrip())
     return 0 if not args.strict or strict_ok else 2
 
 

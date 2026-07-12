@@ -328,6 +328,10 @@ configured modes and free space, probes the real GPU telemetry source, and then
 removes its files. A simulation or `nvidia-smi` fallback is a strict-mode warning.
 In JSON, `healthy` covers read-only ledger checks; `ready` remains `null` until
 `--probe` supplies deployment evidence.
+Plain `doctor` never initializes storage, acquires a lock, recovers a pending
+transaction, or follows a symbolic link at a managed path. It reports those
+conditions for an administrator to resolve. Only explicit `--probe` writes
+temporary files.
 For NFS/FUSE used by multiple hosts, additionally verify locking from a second
 host because one machine cannot prove cross-host lock propagation. Every writer
 must use GPUbk.

@@ -52,6 +52,24 @@ def ensure_directory(path: Path, mode: int) -> None:
     path.chmod(mode)
 
 
+def file_type_name(mode: int) -> str:
+    if stat.S_ISLNK(mode):
+        return "symbolic-link"
+    if stat.S_ISDIR(mode):
+        return "directory"
+    if stat.S_ISREG(mode):
+        return "regular-file"
+    if stat.S_ISFIFO(mode):
+        return "fifo"
+    if stat.S_ISSOCK(mode):
+        return "socket"
+    if stat.S_ISCHR(mode):
+        return "character-device"
+    if stat.S_ISBLK(mode):
+        return "block-device"
+    return "other"
+
+
 def _secure_flags(flags: int) -> int:
     for name in ("O_CLOEXEC", "O_NOFOLLOW", "O_NONBLOCK"):
         flags |= getattr(os, name, 0)

@@ -302,6 +302,8 @@ BK_DATA_DIR=/data2/shared/bk bk doctor --probe --json --strict
 `flock`、配置权限、剩余空间和真实 GPU 探测，随后删除所有临时文件。模拟环境或
 `nvidia-smi` 回退在 strict 模式下会作为警告失败。JSON 中的 `healthy` 只表示只读
 台账检查，未运行 `--probe` 时 `ready` 保持为 `null`。
+普通 `doctor` 不会初始化存储、加锁、恢复待处理事务，也不会跟随受管路径上的符号
+链接；这些情况只会作为问题报告给管理员。只有显式指定 `--probe` 才会写入临时文件。
 若 NFS/FUSE 被多台机器共同挂载，
 仍需从第二台机器验证跨主机锁传播，因为单机测试无法证明这一点。所有写入者都必须
 通过 GPUbk。
