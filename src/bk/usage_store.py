@@ -12,7 +12,7 @@ import tempfile
 from dataclasses import dataclass
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, List, Optional, Protocol, Sequence, Tuple
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Protocol, Sequence, Tuple
 
 from .fileio import (
     ensure_directory,
@@ -325,48 +325,26 @@ class UsageAuditStore:
         self._check_readable()
         count = 0
         seen = set()
-        paths = self._partition_paths("events", start, end, newest_first)
-        for path in paths:
-            raw_records = self._ordered_jsonl(path, newest_first)
-            for raw in raw_records:
-                try:
-                    if int(raw.get("v", EVENT_SCHEMA_VERSION)) > EVENT_SCHEMA_VERSION:
-                        self.last_warnings.append(f"skipped newer event schema in {path}")
-                        continue
-                    record = decode_event(raw, self.username_for_uid)
-                except (TypeError, ValueError, KeyError) as exc:
-                    self.last_warnings.append(f"skipped invalid event in {path}: {exc}")
-                    continue
-                timestamp = parse_iso(str(record["timestamp"]))
-                if not _in_range(timestamp, start, end) or (uid is not None and record.get("uid") != uid):
-                    continue
-                if gpu is not None and record.get("gpu") != gpu:
-                    continue
-                key = _public_event_key(record)
-                if key in seen:
-                    continue
-                seen.add(key)
-                yield record
-                count += 1
-                if limit is not None and count >= limit:
-                    return
+        sources = [(path, True) for path in self._partition_paths("events", start, end, newest_first)]
         if self._legacy_visible() and self.events_path.exists():
-            legacy = self._ordered_jsonl(self.events_path, newest_first)
-            for raw in legacy:
-                if not isinstance(raw, dict):
-                    continue
-                try:
-                    record = decode_event(raw, self.username_for_uid)
-                    timestamp = parse_iso(str(record["timestamp"]))
-                except (TypeError, ValueError, KeyError):
-                    continue
-                if not _in_range(timestamp, start, end) or (uid is not None and record.get("uid") != uid):
-                    continue
-                if gpu is not None and record.get("gpu") != gpu:
-                    continue
-                key = _public_event_key(record)
-                if key in seen:
-                    continue
+            sources.append((self.events_path, False))
+        for path, versioned in sources:
+            remaining = None if limit is None else limit - count
+            if remaining is not None and remaining <= 0:
+                return
+
+            def decoder(raw: dict) -> Optional[Tuple[tuple, dict]]:
+                return self._event_candidate(
+                    raw, path, start=start, end=end, uid=uid, gpu=gpu, versioned=versioned
+                )
+
+            for key, record in self._ordered_candidates(
+                path,
+                newest_first=newest_first,
+                max_records=remaining,
+                seen=seen,
+                decoder=decoder,
+            ):
                 seen.add(key)
                 yield record
                 count += 1
@@ -389,46 +367,26 @@ class UsageAuditStore:
         self._check_readable()
         count = 0
         seen = set()
-        paths = self._partition_paths(tier, start, end, newest_first)
-        for path in paths:
-            raw_records = self._ordered_jsonl(path, newest_first)
-            for raw in raw_records:
-                try:
-                    if int(raw.get("v", ROLLUP_SCHEMA_VERSION)) > ROLLUP_SCHEMA_VERSION:
-                        self.last_warnings.append(f"skipped newer rollup schema in {path}")
-                        continue
-                    record = decode_rollup(raw, self.username_for_uid)
-                except (TypeError, ValueError, KeyError) as exc:
-                    self.last_warnings.append(f"skipped invalid rollup in {path}: {exc}")
-                    continue
-                timestamp = parse_iso(str(record["window_start"]))
-                if not _in_range(timestamp, start, end) or (uid is not None and record.get("uid") != uid):
-                    continue
-                if gpu is not None and record.get("gpu") != gpu:
-                    continue
-                key = _public_rollup_key(record)
-                if key in seen:
-                    continue
-                seen.add(key)
-                yield record
-                count += 1
-                if limit is not None and count >= limit:
-                    return
+        sources = [(path, True) for path in self._partition_paths(tier, start, end, newest_first)]
         if tier == "minute" and self._legacy_visible() and self.rollups_path.exists():
-            legacy = self._ordered_jsonl(self.rollups_path, newest_first)
-            for raw in legacy:
-                try:
-                    record = decode_rollup(raw, self.username_for_uid)
-                    timestamp = parse_iso(str(record["window_start"]))
-                except (TypeError, ValueError, KeyError):
-                    continue
-                if not _in_range(timestamp, start, end) or (uid is not None and record.get("uid") != uid):
-                    continue
-                if gpu is not None and record.get("gpu") != gpu:
-                    continue
-                key = _public_rollup_key(record)
-                if key in seen:
-                    continue
+            sources.append((self.rollups_path, False))
+        for path, versioned in sources:
+            remaining = None if limit is None else limit - count
+            if remaining is not None and remaining <= 0:
+                return
+
+            def decoder(raw: dict) -> Optional[Tuple[tuple, dict]]:
+                return self._rollup_candidate(
+                    raw, path, start=start, end=end, uid=uid, gpu=gpu, versioned=versioned
+                )
+
+            for key, record in self._ordered_candidates(
+                path,
+                newest_first=newest_first,
+                max_records=remaining,
+                seen=seen,
+                decoder=decoder,
+            ):
                 seen.add(key)
                 yield record
                 count += 1
@@ -1052,13 +1010,95 @@ class UsageAuditStore:
             if not raw.closed:
                 raw.close()
 
-    def _ordered_jsonl(self, path: Path, newest_first: bool) -> Iterable[dict]:
-        records = self._read_jsonl(path)
-        if not newest_first:
-            return records
-        buffered = list(records)
-        buffered.reverse()
-        return buffered
+    def _ordered_candidates(
+        self,
+        path: Path,
+        *,
+        newest_first: bool,
+        max_records: Optional[int],
+        seen: set,
+        decoder: Callable[[dict], Optional[Tuple[tuple, dict]]],
+    ) -> Iterator[Tuple[tuple, dict]]:
+        raw_records = self._read_jsonl(path)
+        try:
+            if not newest_first:
+                for raw in raw_records:
+                    candidate = decoder(raw)
+                    if candidate is None or candidate[0] in seen:
+                        continue
+                    yield candidate
+                return
+
+            latest = {}
+            for raw in raw_records:
+                candidate = decoder(raw)
+                if candidate is None or candidate[0] in seen:
+                    continue
+                key, record = candidate
+                latest.pop(key, None)
+                latest[key] = record
+                if max_records is not None and len(latest) > max_records:
+                    del latest[next(iter(latest))]
+            for key in reversed(latest):
+                yield key, latest[key]
+        finally:
+            close = getattr(raw_records, "close", None)
+            if close is not None:
+                close()
+
+    def _event_candidate(
+        self,
+        raw: dict,
+        path: Path,
+        *,
+        start: Optional[datetime],
+        end: Optional[datetime],
+        uid: Optional[int],
+        gpu: Optional[int],
+        versioned: bool,
+    ) -> Optional[Tuple[tuple, dict]]:
+        try:
+            if versioned and int(raw.get("v", EVENT_SCHEMA_VERSION)) > EVENT_SCHEMA_VERSION:
+                self.last_warnings.append(f"skipped newer event schema in {path}")
+                return None
+            record = decode_event(raw, self.username_for_uid)
+            timestamp = parse_iso(str(record["timestamp"]))
+        except (KeyError, OSError, OverflowError, TypeError, ValueError) as exc:
+            if versioned:
+                self.last_warnings.append(f"skipped invalid event in {path}: {exc}")
+            return None
+        if not _in_range(timestamp, start, end) or (uid is not None and record.get("uid") != uid):
+            return None
+        if gpu is not None and record.get("gpu") != gpu:
+            return None
+        return _public_event_key(record), record
+
+    def _rollup_candidate(
+        self,
+        raw: dict,
+        path: Path,
+        *,
+        start: Optional[datetime],
+        end: Optional[datetime],
+        uid: Optional[int],
+        gpu: Optional[int],
+        versioned: bool,
+    ) -> Optional[Tuple[tuple, dict]]:
+        try:
+            if versioned and int(raw.get("v", ROLLUP_SCHEMA_VERSION)) > ROLLUP_SCHEMA_VERSION:
+                self.last_warnings.append(f"skipped newer rollup schema in {path}")
+                return None
+            record = decode_rollup(raw, self.username_for_uid)
+            timestamp = parse_iso(str(record["window_start"]))
+        except (KeyError, OSError, OverflowError, TypeError, ValueError) as exc:
+            if versioned:
+                self.last_warnings.append(f"skipped invalid rollup in {path}: {exc}")
+            return None
+        if not _in_range(timestamp, start, end) or (uid is not None and record.get("uid") != uid):
+            return None
+        if gpu is not None and record.get("gpu") != gpu:
+            return None
+        return _public_rollup_key(record), record
 
     def _scan_closed_stream(self, raw, path: Path) -> tuple[str, int]:
         digest = hashlib.sha256()

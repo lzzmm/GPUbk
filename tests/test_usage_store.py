@@ -158,6 +158,58 @@ class UsageStoreTests(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertLess(peak, 8 * 1024 * 1024)
 
+    def test_limited_reverse_query_has_bounded_partition_memory(self):
+        self.store.append_rollups([self._rollup_at(0)])
+        path = self.store._partition_path("minute", self.at.date())
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        first_timestamp = int(self.at.timestamp())
+        with path.open("w", encoding="utf-8") as fh:
+            for offset in range(50_000):
+                raw["id"] = f"rollup-{offset}"
+                raw["t"] = first_timestamp + offset * 60
+                fh.write(json.dumps(raw, separators=(",", ":"), sort_keys=True) + "\n")
+
+        tracemalloc.start()
+        try:
+            records = list(self.store.iter_rollups("minute", newest_first=True, limit=3))
+            _current, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        self.assertEqual(
+            [record["record_id"] for record in records],
+            ["rollup-49999", "rollup-49998", "rollup-49997"],
+        )
+        self.assertLess(peak, 8 * 1024 * 1024)
+
+    def test_reverse_query_keeps_latest_duplicate_position(self):
+        retry = self._rollup_at(1)
+        self.store.append_rollups([self._rollup_at(0), retry, self._rollup_at(2), retry])
+
+        records = list(self.store.iter_rollups("minute", newest_first=True, limit=3))
+
+        self.assertEqual(
+            [record["window_start"] for record in records],
+            [
+                (self.at + timedelta(minutes=1)).isoformat().replace("+00:00", "Z"),
+                (self.at + timedelta(minutes=2)).isoformat().replace("+00:00", "Z"),
+                self.at.isoformat().replace("+00:00", "Z"),
+            ],
+        )
+
+    def test_query_skips_invalid_versioned_timestamp_with_warning(self):
+        self.store.append_rollups([self._rollup_at(0)])
+        path = self.store._partition_path("minute", self.at.date())
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        invalid = dict(raw, id="invalid", t="not-a-timestamp")
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(invalid) + "\n")
+
+        records = list(self.store.iter_rollups("minute", newest_first=True, limit=2))
+
+        self.assertEqual(len(records), 1)
+        self.assertTrue(any("skipped invalid rollup" in item for item in self.store.last_warnings))
+
     def test_append_refuses_to_create_a_partition_the_reader_cannot_open(self):
         self.store.append_rollups([self._rollup_at(0)])
         path = self.store._partition_path("minute", self.at.date())
