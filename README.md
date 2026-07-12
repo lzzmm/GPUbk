@@ -187,6 +187,7 @@ bk 2 1h30m --mem 12g -- python train.py --config exp.yaml
 bk j                    # list scheduled jobs
 bk j --cleanup          # inspect and prune private job files
 bk w                    # run this user's due jobs
+bk w --status           # read-only worker liveness check
 bk jr ID --accept-duplicate-risk  # retry only after checking an uncertain job
 ```
 
@@ -223,6 +224,13 @@ worker exits with status `75`; the bundled systemd unit does not restart-loop on
 that status. During an upgrade, active jobs created by a pre-lease worker are
 left untouched and block new claims until they finish or their reservation ends.
 
+`bk worker --status` reports `running`, `stopped`, `not-seen`, or an unsafe/
+unavailable state without creating or modifying private storage. `running` is
+proved by the kernel lock; the recorded PID, hostname, and acquisition time are
+diagnostic metadata only. Add `--json` for `gpubk.worker.v1`, or
+`--require-running` to return status 2 unless the lease is actively held.
+`bk jobs --json` and Agent/MCP context expose the same current-UID status.
+
 Private command specs are removed after cancellation, success, timeout, or an
 expired retry window. The worker checks them at startup, after shutdown, and at
 most every five minutes while running. A spec with no ledger reference gets a
@@ -244,6 +252,7 @@ For unattended jobs, each user can install the bundled systemd user unit:
 bk service install worker
 systemctl --user daemon-reload
 systemctl --user enable --now bk-worker.service
+bk worker --status --require-running
 ```
 
 On systemd Linux, the user manager may stop at logout and may not start at boot.

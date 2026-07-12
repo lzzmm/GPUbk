@@ -85,6 +85,10 @@ resource conflict. Keep `bk worker` running for scheduled commands. Use `list_gp
 quota excess to the user.
 Only one worker may hold a UID's private job directory. Exit `75` means another worker already
 holds the lease; do not loop or start a second worker.
+Before promising unattended execution, check `context.worker.running` or run
+`bk worker --status --json`. Only `state=running` with `running=true` proves that the kernel lease
+is held; PID, hostname, and acquisition time are diagnostic metadata. `stopped`, `not-seen`,
+`invalid`, and `unavailable` do not prove that a scheduled command will launch.
 
 ## Respect Safety Boundaries
 
@@ -99,3 +103,4 @@ holds the lease; do not loop or start a second worker.
 - Before an approved service deployment, run `bk doctor --probe --json --strict`; do not treat a simulation or single-host NFS lock check as proof of the complete production boundary.
 - After starting the monitor service, run `bk doctor --require-monitor --json --strict`; a
   preflight without a heartbeat does not prove the long-running collector is alive.
+- After starting a per-user worker service, run `bk worker --status --require-running --json`.

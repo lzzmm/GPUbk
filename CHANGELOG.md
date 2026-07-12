@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Add a read-only, versioned per-UID worker liveness probe backed by the existing kernel lease,
+  with strict post-start verification and consistent CLI, jobs, Agent/MCP, Skill, and service
+  installation visibility.
 - Publish an atomic, versioned collector heartbeat with capability-aware degraded states,
   crash staleness and policy-topology detection, graceful-stop reporting, and consistent
   Usage API, Agent, doctor, CLI, and TUI visibility.

@@ -34,6 +34,8 @@ class McpBackendTests(unittest.TestCase):
 
         self.assertEqual(context["schema_version"], "bk.agent.v1")
         self.assertEqual(context["actor"]["uid"], os.getuid())
+        self.assertEqual(context["worker"]["state"], "not-seen")
+        self.assertFalse(self.config.job_log_dir.exists())
         self.assertTrue(recommendation["available"])
 
     def test_mcp_uses_the_configured_booking_granularity(self):

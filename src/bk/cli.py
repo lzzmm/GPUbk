@@ -77,6 +77,7 @@ from .worker import (
     retry_job,
     run_worker,
 )
+from .worker_status import inspect_worker_status
 
 try:
     import readline  # noqa: F401
@@ -606,7 +607,30 @@ def _worker_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser.add_argument("--poll", type=float, help="poll interval in seconds")
     parser.add_argument("--max-parallel", type=int, help="maximum child jobs for this worker")
     parser.add_argument("--quiet", action="store_true")
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="inspect this UID's worker lease without starting a worker",
+    )
+    parser.add_argument("--json", action="store_true", help="emit status as versioned JSON")
+    parser.add_argument(
+        "--require-running",
+        action="store_true",
+        help="inspect status and return 2 unless a worker holds the lease",
+    )
     args = parser.parse_args(argv)
+    status_mode = args.status or args.require_running
+    if args.json and not status_mode:
+        parser.error("--json requires --status or --require-running")
+    if status_mode:
+        if args.once or args.poll is not None or args.max_parallel is not None or args.quiet:
+            parser.error("worker run options cannot be combined with status inspection")
+        status = inspect_worker_status(config, _current_actor())
+        if args.json:
+            print(json.dumps(status, ensure_ascii=False, sort_keys=True))
+        else:
+            print(_worker_status_line(status))
+        return 0 if not args.require_running or status.get("running") is True else 2
     summary = run_worker(
         config,
         store,
@@ -633,6 +657,7 @@ def _jobs_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     )
     args = parser.parse_args(argv)
     actor = _current_actor()
+    worker_status = inspect_worker_status(config, actor)
     spec_cleanup = None
     log_cleanup = None
     if args.cleanup:
@@ -657,6 +682,7 @@ def _jobs_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                 {
                     "schema_version": AGENT_SCHEMA_VERSION,
                     "kind": "jobs",
+                    "worker": worker_status,
                     "jobs": [
                         public_reservation(item, actor, config.max_shared_users)
                         for item in reservations
@@ -673,6 +699,7 @@ def _jobs_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             )
         )
         return 2 if any(item is not None and item.failed for item in (spec_cleanup, log_cleanup)) else 0
+    print(_worker_status_line(worker_status))
     if spec_cleanup is not None:
         print(
             f"spec cleanup: removed={spec_cleanup.removed} retained={spec_cleanup.retained} "
@@ -956,12 +983,40 @@ def _service_command(argv: List[str], config: Config) -> int:
     if args.kind == "monitor":
         print("shared server note: run exactly one trusted monitor writer; do not enable one per user")
         print("after starting it, verify: bk doctor --require-monitor --strict")
+    else:
+        print("after starting it, verify: bk worker --status --require-running")
     username = shlex.quote(_current_actor().username)
     print(
         "Linux boot/logout persistence (optional, admin): "
         f"sudo loginctl enable-linger {username}"
     )
     return 0
+
+
+def _worker_status_line(status: dict) -> str:
+    state = str(status.get("state", "invalid"))
+    lease = status.get("lease")
+    if state == "running" and isinstance(lease, dict):
+        return (
+            f"worker: running (lease held) recorded-pid={lease.get('pid')} "
+            f"host={lease.get('hostname')} "
+            f"since={format_local(str(lease.get('acquired_at')))}"
+        )
+    if state == "running":
+        suffix = f"; {status['warning']}" if status.get("warning") else ""
+        return f"worker: running (kernel lease held; metadata unavailable{suffix})"
+    if state == "stopped" and isinstance(lease, dict):
+        return (
+            f"worker: stopped (last pid={lease.get('pid')} host={lease.get('hostname')} "
+            f"since={format_local(str(lease.get('acquired_at')))})"
+        )
+    if state == "stopped":
+        suffix = f": {status['warning']}" if status.get("warning") else ""
+        return f"worker: stopped{suffix}"
+    if state == "not-seen":
+        return "worker: not seen (start `bk w` before a scheduled command is due)"
+    warning = str(status.get("warning") or "status unavailable")
+    return f"worker: {state}: {warning}"
 
 
 def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
@@ -2406,6 +2461,7 @@ MANAGE
 
 JOBS AND USAGE
   bk w                            run this UID's due jobs
+  bk w --status                   check this UID's worker
   bk j / bk jl ID / bk jr ID     list, inspect, or retry jobs
   bk j --cleanup                  prune private job files by policy
   bk m [--once]                  monitor GPU processes

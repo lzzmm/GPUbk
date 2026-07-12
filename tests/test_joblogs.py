@@ -1,3 +1,4 @@
+import fcntl
 import os
 import tempfile
 import unittest
@@ -77,6 +78,34 @@ class JobLogTests(unittest.TestCase):
             acquire_job_worker_lease(self.config, self.actor, "worker-1", "host-a")
 
         self.assertEqual(target.read_text(encoding="utf-8"), "untouched")
+
+    def test_worker_lease_retries_a_transient_status_probe(self):
+        real_flock = fcntl.flock
+        attempts = 0
+
+        def transient_probe(fd, operation):
+            nonlocal attempts
+            if operation == (fcntl.LOCK_EX | fcntl.LOCK_NB):
+                attempts += 1
+                if attempts == 1:
+                    raise BlockingIOError("transient status probe")
+            return real_flock(fd, operation)
+
+        with mock.patch("bk.joblogs.fcntl.flock", side_effect=transient_probe):
+            lease = acquire_job_worker_lease(
+                self.config,
+                self.actor,
+                "worker-after-probe",
+                "host-a",
+            )
+            lease.release()
+
+        path = self.root / "worker.lock"
+        self.assertEqual(attempts, 2)
+        self.assertIn(
+            '"worker_id": "worker-after-probe"',
+            path.read_text(encoding="utf-8"),
+        )
 
     def test_new_job_log_propagates_directory_fsync_failure_and_closes_file(self):
         path = job_log_path(self.config, str(uuid.uuid4()))

@@ -7,6 +7,7 @@ import os
 import selectors
 import stat
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -36,6 +37,9 @@ from .timeparse import parse_iso, to_iso, utc_now
 
 MIB = 1024 * 1024
 LOG_READ_CHUNK_BYTES = 64 * 1024
+WORKER_LEASE_FILENAME = "worker.lock"
+WORKER_LEASE_RETRY_SECONDS = 0.01
+WORKER_LEASE_ATTEMPTS = 3
 
 
 class WorkerBusyError(BookingError):
@@ -292,7 +296,7 @@ def acquire_job_worker_lease(
     if actor.uid != os.getuid():
         raise BookingError("worker lease actor must match the current process UID")
     root = ensure_job_log_dir(config, actor)
-    path = root / "worker.lock"
+    path = root / WORKER_LEASE_FILENAME
     fd = open_or_create_regular(path, os.O_RDWR, 0o600)
     try:
         metadata = os.fstat(fd)
@@ -301,10 +305,7 @@ def acquire_job_worker_lease(
         if stat.S_IMODE(metadata.st_mode) & 0o077:
             raise BookingError(f"worker lease is accessible by group or other users: {path}")
         os.fchmod(fd, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as exc:
-            raise WorkerBusyError(f"another worker is active for {root}") from exc
+        _acquire_worker_lock(fd, root)
         payload = json.dumps(
             {
                 "version": 1,
@@ -330,6 +331,17 @@ def acquire_job_worker_lease(
             pass
         os.close(fd)
         raise
+
+
+def _acquire_worker_lock(fd: int, root: Path) -> None:
+    for attempt in range(WORKER_LEASE_ATTEMPTS):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError as exc:
+            if attempt == WORKER_LEASE_ATTEMPTS - 1:
+                raise WorkerBusyError(f"another worker is active for {root}") from exc
+            time.sleep(WORKER_LEASE_RETRY_SECONDS)
 
 
 def ensure_private_directory(path: Path, actor: Actor) -> None:

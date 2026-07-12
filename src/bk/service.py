@@ -34,6 +34,7 @@ from .worker import (
     delete_job_spec,
     prepare_job_spec,
 )
+from .worker_status import inspect_worker_status
 
 
 AGENT_SCHEMA_VERSION = "bk.agent.v1"
@@ -297,6 +298,7 @@ def build_agent_context(
         now=generated_at,
         expected_gpu_count=config.gpu_count,
     )
+    worker_status = inspect_worker_status(config, actor, at=generated_at)
     return {
         "schema_version": AGENT_SCHEMA_VERSION,
         "kind": "context",
@@ -338,6 +340,7 @@ def build_agent_context(
             },
         },
         "gpu_advice": gpu_advice.as_dict(),
+        "worker": worker_status,
         "reservations": [
             _public_reservation(item, actor, config.max_shared_users) for item in active
         ],
@@ -352,6 +355,7 @@ def build_agent_context(
             "scheduled_jobs": True,
             "scheduled_job_live_guard": config.worker_live_guard,
             "single_worker_lease": True,
+            "worker_liveness": True,
             "scheduled_job_crash_recovery": True,
             "private_job_specs": True,
             "private_job_spec_cleanup": True,

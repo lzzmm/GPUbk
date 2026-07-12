@@ -10,6 +10,7 @@ from bk.advisor import build_gpu_advice
 from bk.collector_status import collector_document
 from bk.config import Config
 from bk.gpu import GpuProcessSnapshot, GpuSnapshot
+from bk.joblogs import acquire_job_worker_lease
 from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingRequest
 from bk.scheduler import add_booking
 from bk.service import (
@@ -78,6 +79,7 @@ class AgentServiceTests(unittest.TestCase):
         self.assertTrue(context["capabilities"]["structured_cancel"])
         self.assertTrue(context["capabilities"]["scheduled_job_live_guard"])
         self.assertTrue(context["capabilities"]["single_worker_lease"])
+        self.assertTrue(context["capabilities"]["worker_liveness"])
         self.assertTrue(context["capabilities"]["scheduled_job_crash_recovery"])
         self.assertTrue(context["capabilities"]["weighted_shared_capacity"])
         self.assertTrue(context["capabilities"]["private_job_spec_cleanup"])
@@ -114,7 +116,33 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(context["policy"]["worker_waiting_exit_code"], 3)
         self.assertTrue(context["capabilities"]["configurable_monitor_cadence"])
         self.assertTrue(context["capabilities"]["collector_liveness"])
+        self.assertEqual(context["worker"]["state"], "unavailable")
         self.assertNotIn("secret", str(context))
+
+    def test_agent_context_exposes_current_uid_worker_liveness(self):
+        actor = Actor(os.getuid(), "current")
+        job_dir = self.data_dir / "private-jobs"
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            job_log_dir=job_dir,
+        )
+        lease = acquire_job_worker_lease(config, actor, "agent-worker", "gpu-host")
+        try:
+            context = build_agent_context(
+                config,
+                self.store,
+                actor,
+                at=self.start,
+                advice=self.advice,
+            )
+        finally:
+            lease.release()
+
+        self.assertEqual(context["worker"]["state"], "running")
+        self.assertTrue(context["worker"]["running"])
+        self.assertEqual(context["worker"]["lease"]["worker_id"], "agent-worker")
 
     def test_agent_context_exposes_a_stale_collector_without_writing(self):
         usage_store = UsageAuditStore(self.data_dir)

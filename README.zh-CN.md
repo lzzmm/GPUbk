@@ -173,6 +173,7 @@ bk 2 1h30m --mem 12g -- python train.py --config exp.yaml
 bk j                    # 查看任务
 bk j --cleanup          # 检查并清理私有任务文件
 bk w                    # 执行当前用户已经到点的任务
+bk w --status           # 只读检查当前用户的 worker 是否在线
 bk jr ID --accept-duplicate-risk  # 检查 uncertain 任务后再确认重试
 ```
 
@@ -202,6 +203,11 @@ worker 会在预约窗口内持续重试；`bk worker --once` 有等待任务时
 升级时，旧版无租约 worker 创建的活动任务不会被接管，并会暂停领取新任务，直到旧任务
 结束或预约到期。
 
+`bk worker --status` 不创建或修改私有存储，并报告 `running`、`stopped`、`not-seen`
+或不安全/不可用状态。只有内核锁能证明 `running`；文件里的 PID、主机名和获取时间仅供
+诊断。加 `--json` 可得到 `gpubk.worker.v1`，加 `--require-running` 则在租约未被持有时
+返回状态码 2。`bk jobs --json` 与 Agent/MCP 上下文也会暴露同一份当前 UID 状态。
+
 预约取消、任务成功、超时或可重试窗口结束后，私有命令 spec 会被清理。worker 会在
 启动、退出以及持续运行时最多每 5 分钟检查一次。没有台账引用的规范 spec 会保留
 24 小时宽限期，避免与正在提交的预约发生竞争；仍待执行、运行中或可重试的任务不会
@@ -219,6 +225,7 @@ worker 会在预约窗口内持续重试；`bk worker --once` 有等待任务时
 bk service install worker
 systemctl --user daemon-reload
 systemctl --user enable --now bk-worker.service
+bk worker --status --require-running
 ```
 
 在 systemd Linux 上，用户退出后 user manager 可能停止，开机时也不一定自动启动。

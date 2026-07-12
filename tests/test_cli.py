@@ -1659,6 +1659,48 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 75)
             self.assertIn("another worker is active", result.stderr)
 
+    def test_worker_status_is_read_only_and_strictly_verifies_the_kernel_lease(self):
+        from bk.config import Config
+        from bk.identity import current_actor
+        from bk.joblogs import acquire_job_worker_lease
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            job_dir = root / "jobs"
+            env = {"BK_JOB_LOG_DIR": str(job_dir)}
+
+            unseen = self.run_bk(["worker", "--status", "--json"], data_dir, env)
+            required = self.run_bk(["w", "--require-running", "--json"], data_dir, env)
+
+            self.assertEqual(unseen.returncode, 0, unseen.stderr)
+            self.assertEqual(json.loads(unseen.stdout)["state"], "not-seen")
+            self.assertEqual(required.returncode, 2, required.stderr)
+            self.assertFalse(job_dir.exists())
+
+            config = Config(data_dir=data_dir, gpu_count=1, job_log_dir=job_dir)
+            lease = acquire_job_worker_lease(config, current_actor(), "holder", "test-host")
+            try:
+                running = self.run_bk(
+                    ["worker", "--status", "--require-running", "--json"],
+                    data_dir,
+                    env,
+                )
+                jobs = self.run_bk(["jobs", "--json"], data_dir, env)
+            finally:
+                lease.release()
+            stopped = self.run_bk(["worker", "--status"], data_dir, env)
+
+            self.assertEqual(running.returncode, 0, running.stderr)
+            running_payload = json.loads(running.stdout)
+            self.assertEqual(running_payload["state"], "running")
+            self.assertTrue(running_payload["running"])
+            self.assertEqual(running_payload["lease"]["worker_id"], "holder")
+            self.assertEqual(jobs.returncode, 0, jobs.stderr)
+            self.assertEqual(json.loads(jobs.stdout)["worker"]["state"], "running")
+            self.assertEqual(stopped.returncode, 0, stopped.stderr)
+            self.assertIn("worker: stopped", stopped.stdout)
+
     def test_service_unit_captures_effective_data_and_job_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -1687,6 +1729,7 @@ class CliTests(unittest.TestCase):
             self.assertNotIn("EnvironmentFile=", unit)
             self.assertIn(f"captured data directory: {data_dir}", installed.stdout)
             self.assertNotIn("captured config file:", installed.stdout)
+            self.assertIn("bk worker --status --require-running", installed.stdout)
             self.assertIn("sudo loginctl enable-linger", installed.stdout)
 
     def test_service_unit_captures_an_external_trusted_config(self):

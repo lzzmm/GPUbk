@@ -3,7 +3,8 @@
 ## JSON CLI
 
 Booking and allocation responses use `schema_version: "bk.agent.v1"`. The personal
-audit-tail response uses `schema_version: "gpubk.audit.v1"`.
+audit-tail response uses `schema_version: "gpubk.audit.v1"`; worker liveness uses
+`schema_version: "gpubk.worker.v1"`.
 
 ```bash
 bk agent context --compact
@@ -14,6 +15,7 @@ bk agent cancel RESERVATION --compact
 bk l --json
 bk j --json
 bk j --cleanup --json
+bk worker --status --json
 bk log --limit 100 --json
 bk usage me --since 24h --json --compact
 bk usage samples --since 2d --resolution 5m --json --compact
@@ -50,8 +52,12 @@ Recommendation fields:
   earlier side effects cannot be disproved. `remote-unverified`, `unverified`, and
   `termination-unverified` must never trigger automatic retry.
 - Context capabilities advertise `single_worker_lease`, `scheduled_job_crash_recovery`, and
-  `collector_liveness`.
+  `worker_liveness` plus `collector_liveness`.
   Worker exit `75` means the UID-private lease is already held; do not retry in a tight loop.
+- Context `worker` and `bk jobs --json` embed `gpubk.worker.v1`. Only `state=running` with
+  `running=true` is a positive liveness result, based on the UID-private kernel lock. `lease`
+  metadata is diagnostic and may be absent or stale. `bk worker --status --require-running`
+  returns exit 2 for every non-running state without starting a worker or writing storage.
 
 Create and edit return the same `kind=booking_result` shape through JSON CLI and MCP: `status`, a
 privacy-safe `reservation`, per-GPU `allocation.selected` explanations, allocator source/reason,

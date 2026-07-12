@@ -26,6 +26,9 @@ Supported security boundaries:
 - A UID-private kernel lease prevents concurrent workers. After an unclean exit, Linux recovery
   matches same-UID processes by the exact reservation environment marker and rechecks identity
   before TERM/KILL. Cross-host or unverifiable processes are never signalled and remain uncertain.
+- Worker status probes the same UID-private kernel lock without creating or modifying storage.
+  Lease PID, hostname, and timestamps are diagnostics only and never replace lock ownership as
+  liveness evidence.
 - Scheduled jobs re-check live process authorization and physical VRAM immediately before
   launch; this reduces races but cannot replace kernel device access control.
 - Shared capacity units enforce ledger admission and inferred memory budgets only. They do
@@ -94,6 +97,9 @@ Administrator responsibilities:
 - After enabling the monitor, run `bk doctor --require-monitor --strict`. Preflight intentionally
   permits a missing heartbeat because the service may not have started yet; post-start verification
   must not.
+- After enabling each per-user worker, run `bk worker --status --require-running`. The probe is
+  authoritative only for invocations resolving the same private job directory and lock-capable
+  mount as that worker.
 - Use plain `bk doctor --json --strict` for side-effect-free inspection. It does not recover a
   pending transaction or follow symbolic links at managed paths; `--probe` is the explicit
   temporary-write mode.
