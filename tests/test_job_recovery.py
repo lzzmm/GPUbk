@@ -64,7 +64,10 @@ class JobRecoveryTests(unittest.TestCase):
 
         def mutate(ledger):
             item = next(value for value in ledger["reservations"] if value["id"] == reservation["id"])
-            item["end_at"] = to_iso(end_at or (self.now + timedelta(minutes=30)))
+            effective_end = end_at or (self.now + timedelta(minutes=30))
+            if effective_end <= floor_5m(self.now):
+                item["start_at"] = to_iso(effective_end - timedelta(minutes=30))
+            item["end_at"] = to_iso(effective_end)
             item["job"].update(
                 {
                     "status": status,

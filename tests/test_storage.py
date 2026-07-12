@@ -14,6 +14,21 @@ from bk.storage import FileLock, LedgerStore
 from bk.timeparse import parse_iso
 
 
+def _reservation(reservation_id):
+    return {
+        "id": reservation_id,
+        "uid": 1001,
+        "username": "user1001",
+        "gpus": [0],
+        "mode": "shared",
+        "start_at": "2030-01-01T00:00:00Z",
+        "end_at": "2030-01-01T01:00:00Z",
+        "status": "active",
+        "created_at": "2029-12-31T23:00:00Z",
+        "updated_at": "2029-12-31T23:00:00Z",
+    }
+
+
 def _concurrent_booking(data_dir, start_at, uid, result_queue):
     config = Config(data_dir=Path(data_dir), gpu_count=1, max_shared_users=2)
     store = LedgerStore(config.data_dir)
@@ -253,7 +268,7 @@ class LedgerStorageTests(unittest.TestCase):
             store = LedgerStore(data_dir, file_mode=0o660, dir_mode=0o2770)
 
             def mutate(ledger):
-                ledger["reservations"].append({"id": "one"})
+                ledger["reservations"].append(_reservation("one"))
                 return ledger, "ok", [{"action": "test"}], True
 
             self.assertEqual(store.transaction(mutate), "ok")
@@ -271,7 +286,7 @@ class LedgerStorageTests(unittest.TestCase):
             store = LedgerStore(data_dir)
 
             def mutate(ledger):
-                ledger["reservations"].append({"id": "durable"})
+                ledger["reservations"].append(_reservation("durable"))
                 return ledger, "accepted", [{"action": "add", "reservation_id": "durable"}], True
 
             with mock.patch.object(store, "_apply_journal_unlocked", side_effect=OSError("injected failure")):
@@ -295,7 +310,7 @@ class LedgerStorageTests(unittest.TestCase):
             store = LedgerStore(data_dir)
 
             def mutate(ledger):
-                ledger["reservations"].append({"id": "journal-sync"})
+                ledger["reservations"].append(_reservation("journal-sync"))
                 return ledger, "accepted", [{"action": "add"}], True
 
             with mock.patch(
@@ -322,7 +337,7 @@ class LedgerStorageTests(unittest.TestCase):
             store = LedgerStore(data_dir)
 
             def mutate(ledger):
-                ledger["reservations"].append({"id": "ledger-sync"})
+                ledger["reservations"].append(_reservation("ledger-sync"))
                 return ledger, "accepted", [{"action": "add"}], True
 
             with mock.patch(
@@ -354,7 +369,7 @@ class LedgerStorageTests(unittest.TestCase):
                 "ledger": {
                     "version": 1,
                     "last_transaction_id": "tx-one",
-                    "reservations": [{"id": "one"}],
+                    "reservations": [_reservation("one")],
                 },
                 "logs": [
                     {
@@ -500,7 +515,7 @@ class LedgerStorageTests(unittest.TestCase):
                 "ledger": {
                     "version": 1,
                     "last_transaction_id": "tx-invalid-log",
-                    "reservations": [{"id": "must-not-apply"}],
+                    "reservations": [_reservation("must-not-apply")],
                 },
                 "logs": [{"transaction_id": "tx-invalid-log", "action": "add"}],
             }
@@ -518,7 +533,7 @@ class LedgerStorageTests(unittest.TestCase):
             store = LedgerStore(Path(tmp))
 
             def mutate(ledger):
-                ledger["reservations"].append({"id": "must-not-apply"})
+                ledger["reservations"].append(_reservation("must-not-apply"))
                 return ledger, None, [{"action": "add", "message": "x" * (1024 * 1024)}], True
 
             with self.assertRaisesRegex(ValueError, "audit record exceeds"):
@@ -527,6 +542,21 @@ class LedgerStorageTests(unittest.TestCase):
             self.assertFalse(store.ledger_path.exists())
             self.assertFalse(store.log_path.exists())
             self.assertFalse(store.journal_path.exists())
+
+    def test_invalid_reservation_is_rejected_before_journal_or_ledger_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+
+            def mutate(ledger):
+                ledger["reservations"].append({"id": "incomplete"})
+                return ledger, None, [], True
+
+            with self.assertRaisesRegex(ValueError, r"reservations\[0\]\.uid"):
+                store.transaction(mutate)
+
+            self.assertFalse(store.ledger_path.exists())
+            self.assertFalse(store.journal_path.exists())
+            self.assertEqual(list(store.backup_dir.glob("ledger-*.json")), [])
 
     def test_invalid_ledger_without_backup_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -550,16 +580,25 @@ class LedgerStorageTests(unittest.TestCase):
             store = LedgerStore(Path(tmp))
 
             def mutate(ledger):
-                ledger["reservations"].append({"id": "backed-up"})
+                ledger["reservations"].append(_reservation("backed-up"))
                 return ledger, None, [], True
 
             store.transaction(mutate)
-            store.ledger_path.write_text("not-json", encoding="utf-8")
+            store.ledger_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "reservations": [{"id": "semantically-invalid"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             restored = store.load()
 
             self.assertEqual([item["id"] for item in restored["reservations"]], ["backed-up"])
             self.assertIn("latest valid backup", store.last_warning)
+            self.assertIn("reservations[0].uid", store.last_warning)
 
     def test_valid_journal_recovers_over_an_invalid_ledger(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -574,7 +613,7 @@ class LedgerStorageTests(unittest.TestCase):
                 "ledger": {
                     "version": 1,
                     "last_transaction_id": "repair-transaction",
-                    "reservations": [{"id": "recovered"}],
+                    "reservations": [_reservation("recovered")],
                 },
                 "logs": [],
             }
@@ -612,7 +651,7 @@ class LedgerStorageTests(unittest.TestCase):
             store = LedgerStore(Path(tmp))
 
             def mutate(ledger):
-                ledger["reservations"].append({"id": "keep"})
+                ledger["reservations"].append(_reservation("keep"))
                 return ledger, None, [], True
 
             store.transaction(mutate)

@@ -520,7 +520,7 @@ class ScheduledJobTests(unittest.TestCase):
         )
         self.assertEqual(stored["job"]["status"], "pending")
 
-    def test_cleanup_retains_a_spec_referenced_by_a_malformed_uid(self):
+    def test_cleanup_fails_closed_and_retains_specs_for_a_malformed_uid(self):
         spec = prepare_job_spec(
             self.config,
             self.actor,
@@ -529,28 +529,38 @@ class ScheduledJobTests(unittest.TestCase):
         )
         path = job_spec_path(self.config, spec.spec_id)
 
-        def add_malformed_reference(ledger):
-            ledger["reservations"].append(
+        self.store.ensure()
+        self.store.ledger_path.write_text(
+            json.dumps(
                 {
-                    "id": "malformed-uid",
-                    "uid": "not-an-integer",
-                    "job": {"spec_id": spec.spec_id, "status": "succeeded"},
+                    "version": 1,
+                    "reservations": [
+                        {
+                            "id": "malformed-uid",
+                            "uid": "not-an-integer",
+                            "username": "unknown",
+                            "gpus": [0],
+                            "mode": "shared",
+                            "start_at": "2030-01-01T00:00:00Z",
+                            "end_at": "2030-01-01T01:00:00Z",
+                            "status": "expired",
+                            "job": {"spec_id": spec.spec_id, "status": "succeeded"},
+                        }
+                    ],
                 }
-            )
-            return ledger, None, [], True
-
-        self.store.transaction(add_malformed_reference)
-
-        result = cleanup_job_specs(
-            self.config,
-            self.store,
-            self.actor,
-            orphan_grace_seconds=0,
+            ),
+            encoding="utf-8",
         )
+        self.store.ledger_path.chmod(0o600)
 
-        self.assertEqual(result.failed, 1)
-        self.assertEqual(result.retained, 1)
-        self.assertIn("invalid UID", result.warnings[0])
+        with self.assertRaisesRegex(OSError, "reservations.*uid"):
+            cleanup_job_specs(
+                self.config,
+                self.store,
+                self.actor,
+                orphan_grace_seconds=0,
+            )
+
         self.assertTrue(path.exists())
 
     def test_cleanup_rejects_a_symlink_spec_directory(self):

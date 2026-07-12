@@ -46,9 +46,12 @@ Reinstall monitor and worker units with `--force` so they capture it. GPUbk reje
 an existing configuration whose directory can be replaced by shared-group members.
 
 GPUbk does not require an in-place ledger migration. It preserves unknown
-reservation fields and writes ledger changes atomically. Telemetry uses a
-separate versioned store; inspect legacy telemetry with `bk usage migrate` and
-copy it only with `bk usage migrate --yes`.
+reservation extension fields and writes ledger changes atomically. Fields with
+current scheduling semantics still require valid identity, GPU, mode, status,
+and ordered timestamps; run `bk doctor --json --strict` before upgrading so a
+legacy damaged record can be repaired or restored deliberately. Telemetry uses
+a separate versioned store; inspect legacy telemetry with `bk usage migrate`
+and copy it only with `bk usage migrate --yes`.
 
 ## 0.1.x to 0.2.x
 

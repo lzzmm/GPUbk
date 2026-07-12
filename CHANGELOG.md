@@ -16,6 +16,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Explain selective systemd linger in service-install output and deployment docs so unattended user services survive logout without silently changing host policy.
 - Reject explicit past edit starts even when queueing is enabled, and reject zero duration or GPU count instead of treating them as unchanged Agent input.
 - Auto-discover a trusted `/etc/gpubk/config.json` with a required absolute `data_dir`, preventing new SSH, MCP, and service sessions from silently splitting onto per-user ledgers.
+- Validate scheduling-critical reservation fields before ledger or WAL use, preserve unknown extension fields, and accept backup fallback only after the same semantic validation.
 - Fail closed with an actionable installer upgrade message when an old Debian/Ubuntu pip ignores the required isolated setuptools and would otherwise build an unusable `UNKNOWN` source package.
 - Validate configuration with a versioned closed schema, bounded finite values, typo hints, and a read-only redacted `bk config` report that detects ledger-policy drift.
 - Make booking granularity configurable through policy-bound `slot_minutes`/`BK_SLOT_MINUTES`, with consistent scheduler, CLI, TUI, Agent, and MCP behavior while retaining a 5-minute default.

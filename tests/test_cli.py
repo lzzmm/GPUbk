@@ -818,8 +818,12 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 2, result.stderr)
             payload = json.loads(result.stdout)
-            self.assertEqual(payload["policy_issues"][0]["type"], "invalid-ledger-record")
-            self.assertIn("end_at", payload["policy_issues"][0]["message"])
+            issue = next(
+                item
+                for item in payload["storage_issues"]
+                if item["type"] == "ledger-read"
+            )
+            self.assertIn("reservations[0].uid", issue["message"])
             self.assertFalse(payload["healthy"])
 
     def test_doctor_reports_non_object_reservation_records_as_json(self):
@@ -836,8 +840,40 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 2, result.stderr)
             payload = json.loads(result.stdout)
-            self.assertEqual(payload["policy_issues"][0]["type"], "invalid-ledger-record")
+            issue = next(
+                item
+                for item in payload["storage_issues"]
+                if item["type"] == "ledger-read"
+            )
+            self.assertIn("reservations[0] must be an object", issue["message"])
             self.assertFalse(payload["healthy"])
+
+    def test_semantic_ledger_corruption_fails_cleanly_for_humans_and_agents(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            ledger = data_dir / "ledger.json"
+            ledger.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "reservations": [{"id": "incomplete"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            ledger.chmod(0o600)
+
+            status = self.run_bk(["status"], data_dir)
+            agent = self.run_bk(["agent", "context", "--compact"], data_dir)
+
+            self.assertEqual(status.returncode, 2)
+            self.assertIn("reservations[0].uid", status.stderr)
+            self.assertNotIn("Traceback", status.stderr)
+            self.assertEqual(agent.returncode, 2)
+            payload = json.loads(agent.stdout)
+            self.assertEqual(payload["kind"], "error")
+            self.assertEqual(payload["error"]["type"], "LedgerCorruptionError")
+            self.assertIn("reservations[0].uid", payload["error"]["message"])
 
     def test_doctor_reports_read_only_backup_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:

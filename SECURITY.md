@@ -8,6 +8,9 @@ Supported security boundaries:
 
 - MCP, CLI, TUI, and worker identity comes from the local process UID.
 - Shared-ledger writes use an advisory lock, WAL journal, atomic replacement, and idempotent audit events.
+- Ledger and WAL reads validate reservation identity, devices, mode, status, and time ordering
+  before scheduling. Unknown extension fields are preserved, but unknown current semantics fail
+  closed; backup fallback accepts only a document that passes the same validation.
 - Shared data files reject symbolic links, hard-linked aliases, FIFOs, devices, and other
   unsafe leaf files before reading or writing.
 - Write paths require the configured file and directory modes exactly. Permission drift fails

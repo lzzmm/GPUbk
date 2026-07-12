@@ -465,6 +465,12 @@ defaults are configurable. Schema versions, transaction durability, path and
 permission checks, record-size limits, and other corruption defenses are fixed
 implementation safeguards rather than administrator tuning knobs.
 
+Ledger reads validate every reservation field used for admission: identity,
+GPU IDs, mode, status, and ordered timestamps. Unknown extension fields remain
+preserved for forward compatibility, while an unknown value in a current
+semantic field fails closed. A semantically damaged primary ledger can fall
+back only to a backup that passes the same complete validation.
+
 All users and user services must resolve the same data and configuration paths.
 The standard `/etc/gpubk/config.json` layout provides that automatically. The
 first write binds scheduling and storage policy into the ledger; clients with

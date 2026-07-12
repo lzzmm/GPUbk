@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from .config import Config
 from .granularity import DEFAULT_SLOT_MINUTES, ceil_to_slot, is_slot_aligned, slot_phrase
+from .ledger_schema import MAX_EDIT_OPERATIONS_PER_RESERVATION
 from .models import (
     MODE_EXCLUSIVE,
     MODE_SHARED,
@@ -35,7 +36,6 @@ from .storage import LedgerStore
 from .timeparse import normalize_queue_start, parse_iso, to_iso, utc_now
 
 
-MAX_EDIT_OPERATIONS_PER_RESERVATION = 256
 # Backward-compatible default; runtime scheduling uses Config.slot_seconds.
 BOOKING_GRANULARITY_SECONDS = DEFAULT_SLOT_MINUTES * 60
 

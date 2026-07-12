@@ -26,6 +26,7 @@ from .jsonl import (
     encode_json_object_line,
     read_json_objects_tail,
 )
+from .ledger_schema import validate_ledger_document
 from .models import BookingError
 from .policy import ledger_storage_modes
 
@@ -539,12 +540,7 @@ class LedgerStore:
 
     @staticmethod
     def _validate_ledger(data: dict) -> None:
-        if not isinstance(data, dict):
-            raise ValueError("ledger must be an object")
-        if data.get("version") != 1:
-            raise ValueError("unsupported ledger version")
-        if not isinstance(data.get("reservations"), list):
-            raise ValueError("ledger reservations must be a list")
+        validate_ledger_document(data)
 
     def _write_journal(self, journal: dict) -> None:
         _atomic_write_json(

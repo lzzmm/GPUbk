@@ -703,10 +703,16 @@ class SchedulerModeTests(unittest.TestCase):
             "created_at": old.isoformat(),
             "updated_at": old.isoformat(),
         }
-        old_cancelled = {**old_record, "id": "old-cancelled", "status": "cancelled"}
+        old_cancelled = {
+            **old_record,
+            "id": "old-cancelled",
+            "op_id": "old-cancelled-op",
+            "status": "cancelled",
+        }
         recent_cancelled = {
             **old_record,
             "id": "recent-cancelled",
+            "op_id": "recent-cancelled-op",
             "status": "cancelled",
             "updated_at": recent.isoformat(),
         }

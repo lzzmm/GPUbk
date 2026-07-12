@@ -9,10 +9,10 @@ from .advisor import GpuAdvice, build_gpu_advice
 from .allocator import AllocatorDecision, apply_external_allocator
 from .config import Config
 from .granularity import is_slot_aligned, slot_phrase
+from .ledger_schema import MAX_EDIT_OPERATIONS_PER_RESERVATION
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, BookingResult, EditRequest
 from .policy import validate_ledger_policy
 from .scheduler import (
-    MAX_EDIT_OPERATIONS_PER_RESERVATION,
     add_booking,
     cancel_booking,
     edit_booking,
