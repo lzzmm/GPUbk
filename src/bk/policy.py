@@ -3,10 +3,12 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 from .config import Config
+from .granularity import DEFAULT_SLOT_MINUTES
 from .models import BookingError
 
 
-BOOKING_GRANULARITY_SECONDS = 5 * 60
+# Backward-compatible default; runtime scheduling uses Config.slot_seconds.
+BOOKING_GRANULARITY_SECONDS = DEFAULT_SLOT_MINUTES * 60
 LEDGER_POLICY_VERSION = 1
 LEDGER_POLICY_KEY = "policy"
 
@@ -16,7 +18,7 @@ def policy_for_config(config: Config) -> dict:
         "version": LEDGER_POLICY_VERSION,
         "gpu_count": config.gpu_count,
         "max_shared_reservations_per_gpu": config.max_shared_users,
-        "granularity_seconds": BOOKING_GRANULARITY_SECONDS,
+        "granularity_seconds": config.slot_seconds,
         "require_shared_memory": config.require_shared_memory,
         "shared_memory_reserve_mb": config.shared_memory_reserve_mb,
         "file_mode": f"{config.file_mode:04o}",

@@ -7,7 +7,12 @@ from pathlib import Path
 from unittest import mock
 
 from bk.advisor import build_gpu_advice
-from bk.allocator import ALLOCATOR_SCHEMA_VERSION, _run_allocator_process, apply_external_allocator
+from bk.allocator import (
+    ALLOCATOR_SCHEMA_VERSION,
+    _allocator_payload,
+    _run_allocator_process,
+    apply_external_allocator,
+)
 from bk.config import Config
 from bk.gpu import GpuSnapshot
 from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingRequest
@@ -66,6 +71,29 @@ class ExternalAllocatorTests(unittest.TestCase):
         self.assertEqual(decision.order, [1, 0])
         self.assertLess(decision.scores[1], decision.scores[0])
         self.assertEqual(decision.reason, "spread thermal load")
+
+    def test_allocator_payload_exposes_configured_booking_granularity(self):
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            slot_minutes=10,
+        )
+        advice = build_gpu_advice(config, snapshots=self.snapshots, history={}, at=self.start)
+
+        payload = _allocator_payload(
+            config,
+            self.store,
+            self.actor,
+            advice,
+            count=1,
+            duration_seconds=20 * 60,
+            start_at=self.start,
+            mode=MODE_SHARED,
+            expected_memory_mb=None,
+            share_units=1,
+        )
+
+        self.assertEqual(payload["policy"]["granularity_minutes"], 10)
 
     def test_invalid_external_output_falls_back_without_crashing(self):
         config = Config(

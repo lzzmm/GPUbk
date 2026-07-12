@@ -36,6 +36,23 @@ class McpBackendTests(unittest.TestCase):
         self.assertEqual(context["actor"]["uid"], os.getuid())
         self.assertTrue(recommendation["available"])
 
+    def test_mcp_uses_the_configured_booking_granularity(self):
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            slot_minutes=10,
+            job_log_dir=Path(self.tmp.name) / "private-jobs",
+        )
+        backend = BkMcpBackend(config, self.store)
+
+        with self.assertRaisesRegex(BookingError, "multiple of 10 minutes"):
+            backend.book(1, "5m", "mcp-invalid-duration")
+        created = backend.book(1, "20m", "mcp-ten-minute-grid")
+
+        self.assertEqual(backend.context()["policy"]["granularity_minutes"], 10)
+        self.assertEqual(created["status"], "created")
+
     def test_booking_requires_operation_id_and_retries_are_idempotent(self):
         with self.assertRaisesRegex(BookingError, "operation_id is required"):
             self.backend.book(1, "30m", "")

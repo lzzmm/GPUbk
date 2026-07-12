@@ -20,6 +20,7 @@ from .identity import current_actor
 from .joblogs import WorkerBusyError, JobLogCleanupResult, cleanup_job_logs, job_log_paths
 from .monitor import MONITOR_BUSY_EXIT_CODE, MonitorBusyError, run_monitor
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, EditRequest
+from .policy import validate_ledger_policy
 from .scheduler import (
     edit_booking,
     find_earliest_slot,
@@ -79,6 +80,7 @@ TIMELINE_CELL_WIDTH = 3
 TIMELINE_DEFAULT_WINDOW_SECONDS = 2 * 60 * 60
 TIMELINE_MAX_SLOTS = 240
 TIMELINE_AUTO_STEPS = (300, 600, 900, 1800, 3600, 7200, 14400, 28800, 43200, 86400)
+TIMELINE_AUTO_FACTORS = (1, 2, 3, 4, 6, 12, 24, 48, 96, 144, 288)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -190,6 +192,7 @@ def _looks_like_auto_request(argv: List[str]) -> bool:
 def _interactive_shell(config: Config, store: LedgerStore) -> int:
     print("GPUbk booking")
     print(f"data: {config.data_dir}")
+    print(f"booking slice: {config.slot_minutes} minutes")
     print(f"shared capacity: {config.max_shared_users} units per GPU (default booking: 1 unit)")
     print("Type 'help' for commands. Type 'quit' to exit.")
     print()
@@ -330,7 +333,7 @@ def _book_command(argv: List[str], mode: str, config: Config, store: LedgerStore
     share_units = _share_units_from_args(args, config, mode)
     duration_seconds = parse_duration_seconds(args.duration)
     if args.at is not None:
-        start_at = parse_friendly_start(args.at)
+        start_at = parse_friendly_start(args.at, slot_minutes=config.slot_minutes)
     elif args.start is not None:
         start_at = parse_start(args.start)
     else:
@@ -433,11 +436,11 @@ def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     if args.limit < 1 or args.limit > 20:
         raise ValueError("--limit must be between 1 and 20")
     duration_seconds = parse_duration_seconds(args.duration)
-    if duration_seconds % (5 * 60):
-        raise ValueError("duration must be a multiple of 5 minutes")
+    if duration_seconds % config.slot_seconds:
+        raise ValueError(f"duration must be a multiple of {config.slot_minutes} minutes")
     mode_value = args.mode or positional_mode or "shared"
     mode = MODE_EXCLUSIVE if mode_value in {"x", "exclusive"} else MODE_SHARED
-    start = parse_friendly_start(args.start)
+    start = parse_friendly_start(args.start, slot_minutes=config.slot_minutes)
     expected_memory_mb = parse_memory_mb(args.mem) if args.mem else None
     share_units = _share_units_from_args(args, config, mode)
     preferred = _parse_gpu_list(args.gpu) if args.gpu else None
@@ -941,7 +944,11 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
     share_units = values["share"]
     command_argv = values["command"]
 
-    start_text = "current 5-minute interval, then earliest queueable slot" if allow_queue else format_local(start)
+    start_text = (
+        f"current {config.slot_minutes}-minute interval, then earliest queueable slot"
+        if allow_queue
+        else format_local(start)
+    )
     gpu_text = "automatic" if preferred is None else ",".join(map(str, preferred))
     memory_text = "share-weighted estimate" if expected_memory_mb is None else _format_memory_mb(expected_memory_mb)
     print("Review")
@@ -1013,13 +1020,16 @@ def _guided_booking_fields(config: Config) -> Optional[dict]:
         ),
         (
             "duration",
-            lambda _values: "duration [30m, 1h30m, 1d]: ",
-            lambda raw, _values: _guided_duration(raw),
+            lambda _values: (
+                f"duration [multiple of {config.slot_minutes}m; "
+                f"e.g. {config.slot_minutes}m, 1h, 1d]: "
+            ),
+            lambda raw, _values: _guided_duration(raw, config.slot_minutes),
         ),
         (
             "start",
             lambda _values: "start [now, +30m, 20:00, tomorrow 09:00, 07-13 20:00] (now): ",
-            lambda raw, _values: _guided_start(raw),
+            lambda raw, _values: _guided_start(raw, config.slot_minutes),
         ),
         (
             "gpus",
@@ -1067,13 +1077,21 @@ def _guided_edit_fields(config: Config, reservation: dict) -> Optional[dict]:
         ),
         (
             "duration",
-            lambda _values: "duration [keep | 30m | 1h30m] (keep): ",
-            lambda raw, _values: None if not raw else _guided_duration(raw),
+            lambda _values: (
+                f"duration [keep | multiple of {config.slot_minutes}m] (keep): "
+            ),
+            lambda raw, _values: (
+                None if not raw else _guided_duration(raw, config.slot_minutes)
+            ),
         ),
         (
             "start",
             lambda _values: "start [keep | +30m | 20:00 | tomorrow 09:00] (keep): ",
-            lambda raw, _values: None if not raw else parse_friendly_start(raw),
+            lambda raw, _values: (
+                None
+                if not raw
+                else parse_friendly_start(raw, slot_minutes=config.slot_minutes)
+            ),
         ),
         (
             "gpus",
@@ -1176,16 +1194,19 @@ def _guided_gpu_count(raw: str, gpu_count: int) -> int:
     return count
 
 
-def _guided_duration(raw: str) -> int:
+def _guided_duration(raw: str, slot_minutes: int) -> int:
     duration = parse_duration_seconds(raw)
-    if duration % (5 * 60):
-        raise ValueError("duration must be a multiple of 5 minutes")
+    if duration % (slot_minutes * 60):
+        raise ValueError(f"duration must be a multiple of {slot_minutes} minutes")
     return duration
 
 
-def _guided_start(raw: str) -> tuple[datetime, bool]:
+def _guided_start(raw: str, slot_minutes: int) -> tuple[datetime, bool]:
     value = raw or "now"
-    return parse_friendly_start(value), value.lower() == "now"
+    return (
+        parse_friendly_start(value, slot_minutes=slot_minutes),
+        value.lower() == "now",
+    )
 
 
 def _guided_gpus(raw: str, count: int, gpu_count: int) -> Optional[List[int]]:
@@ -1344,7 +1365,11 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     expected_memory_mb = None if args.mem == "-" else (parse_memory_mb(args.mem) if args.mem else None)
     edit_mode = MODE_EXCLUSIVE if args.mode == "x" else (MODE_SHARED if args.mode == "s" else args.mode)
     share_units = _share_units_from_args(args, config, edit_mode)
-    start_at = parse_friendly_start(args.at) if args.at else (parse_start(args.start) if args.start else None)
+    start_at = (
+        parse_friendly_start(args.at, slot_minutes=config.slot_minutes)
+        if args.at
+        else (parse_start(args.start) if args.start else None)
+    )
     result = edit_booking(
         store,
         config,
@@ -1688,7 +1713,16 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     issues = []
     if ledger_readable:
         try:
-            issues = find_policy_violations(ledger, config.max_shared_users)
+            validate_ledger_policy(ledger, config)
+        except BookingError as exc:
+            issues.append(
+                {
+                    "type": "ledger-policy-mismatch",
+                    "message": str(exc),
+                }
+            )
+        try:
+            issues.extend(find_policy_violations(ledger, config.max_shared_users))
         except Exception as exc:
             issues.append(
                 {
@@ -1718,6 +1752,7 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         "ready": ready,
         "data_dir": str(config.data_dir),
         "configured_gpu_count": config.gpu_count,
+        "booking_slot_minutes": config.slot_minutes,
         "file_mode": f"{config.file_mode:04o}",
         "dir_mode": f"{config.dir_mode:04o}",
         "storage_issues": storage_issues,
@@ -2076,8 +2111,8 @@ def _print_help(file=None) -> None:
         """GPUbk - shared GPU booking from the terminal
 
 BOOK
-  bk 2 1h30m                     earliest shared slot
-  bk x 1 30m                     earliest exclusive slot
+  bk 2 1h                        earliest shared slot
+  bk x 1 1h                      earliest exclusive slot
   bk 1 1h --gpu 3 --mem 12g      choose GPU and expected VRAM
   bk 1 1h --share 1/2            reserve half of shared capacity
   bk 1 1h --share-with 1         leave one minimum-share place
@@ -2109,13 +2144,14 @@ JOBS AND USAGE
 
 AGENTS AND ADMIN
   bk agent context               stable machine-readable context
-  bk agent recommend 2 1h30m    read-only legal placement
+  bk agent recommend 2 1h       read-only legal placement
   bk mcp / bk skill install      MCP server or bundled Codex skill
   bk doctor --probe --strict     verify deployment prerequisites
   bk reset --yes                 explicitly clear data
 
 TIME AND POLICY
-  Durations: 30m, 1h30m, 1d. All reservations use 5-minute slices.
+  Duration syntax: 30m, 1h30m, 1d; value must fit the configured slice.
+  Reservations use the server-configured slice (default: 5m).
   Friendly time: --at +30m, --at 20:00, --at "tomorrow 09:00".
   Machine time: --start 2030-01-01T20:00:00+08:00.
   No time option: use the active slice, then queue to the earliest slot.
@@ -2158,7 +2194,7 @@ def _print_shell_help() -> None:
   jl <number|short_id>      show a job log
   jr <number|short_id>      retry a failed job
   agent context             emit stable allocation context JSON
-  agent recommend 2 1h30m  compute a read-only legal placement
+  agent recommend 2 1h      compute a read-only legal placement
   agent edit ID --duration 2h --op-id KEY
   agent cancel ID           cancel with structured JSON output
   reset --yes               clear ledger, logs, and backups in this data dir
@@ -2185,17 +2221,24 @@ def _status_command(
         help="window start: now, +30m, 20:00, tomorrow 09:00, or ISO",
     )
     parser.add_argument("--window", help="display span, e.g. 2h, 8h, or 1d")
-    parser.add_argument("--step", default="5m", help="cell size: 5m, 15m, 1h, or auto")
+    parser.add_argument(
+        "--step",
+        default=f"{config.slot_minutes}m",
+        help=f"cell size: {config.slot_minutes}m, another whole slice multiple, or auto",
+    )
     parser.add_argument("--gpu", help="show only comma-separated GPU IDs on the timeline")
     if not timeline_only:
         parser.add_argument("--timeline", action="store_true", help="append the configurable timeline")
         parser.add_argument("-v", "--verbose", action="store_true", help="show processes and all reservations")
     args = parser.parse_args(argv)
 
-    start = _floor_timeline_start(parse_friendly_start(args.start))
     window_raw = args.window or (getattr(args, "window_arg", None) if timeline_only else None) or "2h"
     window_seconds = parse_duration_seconds(window_raw)
-    step_seconds = _resolve_timeline_step(args.step, window_seconds)
+    step_seconds = _resolve_timeline_step(args.step, window_seconds, config.slot_seconds)
+    start = _floor_timeline_start(
+        parse_friendly_start(args.start, slot_minutes=config.slot_minutes),
+        step_seconds,
+    )
     if window_seconds % step_seconds:
         raise ValueError("--window must be an exact multiple of --step")
     slots = window_seconds // step_seconds
@@ -2227,25 +2270,29 @@ def _status_command(
     return 0
 
 
-def _resolve_timeline_step(raw: str, window_seconds: int) -> int:
+def _resolve_timeline_step(raw: str, window_seconds: int, slot_seconds: int = 5 * 60) -> int:
     if raw.lower() != "auto":
         step = parse_duration_seconds(raw)
-        if step % (5 * 60):
-            raise ValueError("--step must be a multiple of 5 minutes")
+        if step % slot_seconds:
+            raise ValueError(
+                f"--step must be a multiple of the configured {slot_seconds // 60}-minute slice"
+            )
         return step
 
     terminal_columns = shutil.get_terminal_size(fallback=(100, 24)).columns
     target_slots = max(12, (terminal_columns - 6) // TIMELINE_CELL_WIDTH)
-    for step in TIMELINE_AUTO_STEPS:
+    dynamic_steps = {slot_seconds * factor for factor in TIMELINE_AUTO_FACTORS}
+    dynamic_steps.update(step for step in TIMELINE_AUTO_STEPS if step % slot_seconds == 0)
+    for step in sorted(dynamic_steps):
         if window_seconds % step == 0 and window_seconds // step <= min(target_slots, TIMELINE_MAX_SLOTS):
             return step
     raise ValueError("--window is too large for automatic timeline scaling")
 
 
-def _floor_timeline_start(value: datetime) -> datetime:
+def _floor_timeline_start(value: datetime, step_seconds: int = 5 * 60) -> datetime:
     normalized = value.astimezone(timezone.utc).replace(microsecond=0)
     timestamp = int(normalized.timestamp())
-    return datetime.fromtimestamp(timestamp - (timestamp % (5 * 60)), timezone.utc)
+    return datetime.fromtimestamp(timestamp - (timestamp % step_seconds), timezone.utc)
 
 
 def _print_status(
@@ -2361,7 +2408,7 @@ def _print_status(
         _print_timeline(
             config,
             store,
-            timeline_start or _floor_timeline_start(now),
+            timeline_start or _floor_timeline_start(now, step_seconds),
             window_seconds,
             step_seconds,
             timeline_gpus,
@@ -2377,7 +2424,7 @@ def _print_timeline(
     step_seconds: int = 5 * 60,
     gpus: Optional[List[int]] = None,
 ) -> None:
-    start = _floor_timeline_start(start or utc_now())
+    start = _floor_timeline_start(start or utc_now(), step_seconds)
     end = start + timedelta(seconds=window_seconds)
     slots = window_seconds // step_seconds
     active = list_active(store.load(), start)
@@ -2436,7 +2483,11 @@ def _print_timeline(
             print(_timeline_cells(f"G{gpu}", cells))
     print("Legend: ·· free | M1-M9 total units, includes mine")
     print("        S1-S9 total units, others only | MX/XX exclusive")
-    print("Control: --from 20:00 --window 8h --step 15m | --step auto")
+    example_step = _duration_compact(config.slot_seconds * 3)
+    print(
+        f"Control: --from 20:00 --window 8h --step {example_step} "
+        "| --step auto"
+    )
     print()
 
 

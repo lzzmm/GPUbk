@@ -19,7 +19,7 @@ bk usage me --since 24h --json --compact
 bk usage samples --since 2d --resolution 5m --json --compact
 ```
 
-Omitting `--start` uses the active 5-minute interval when possible, then permits earliest-slot queueing. Providing `--start` means exact placement. Human CLI users may use `--at`; Agents should keep using explicit ISO 8601 and structured fields.
+Omitting `--start` uses the active configured booking interval when possible, then permits earliest-slot queueing. Providing `--start` means exact placement. Read `policy.granularity_minutes` from context instead of assuming five minutes. Human CLI users may use `--at`; Agents should keep using explicit ISO 8601 and structured fields.
 The ledger binds its scheduling and storage policy on first write. Agents must surface policy-mismatch errors instead of retrying with altered local limits.
 
 Recommendation fields:
@@ -86,7 +86,7 @@ Each retained reservation keeps at most 256 idempotent edit intents so malformed
 
 ## External Allocator
 
-Input uses `schema_version: "bk.allocator.v1"` and includes a privacy-safe request, policy, built-in scores, per-GPU telemetry/history, and active reservation windows.
+Input uses `schema_version: "bk.allocator.v1"` and includes a privacy-safe request, policy (including `granularity_minutes`), built-in scores, per-GPU telemetry/history, and active reservation windows.
 
 Return exactly one JSON object:
 

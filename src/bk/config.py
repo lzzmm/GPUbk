@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
 from .fileio import open_existing_regular
+from .granularity import DEFAULT_SLOT_MINUTES, slot_seconds, validate_slot_minutes
 
 
 DEFAULT_PRIVATE_FILE_MODE = 0o600
@@ -48,6 +49,14 @@ class Config:
     allocator_command: Optional[Tuple[str, ...]] = None
     allocator_timeout_seconds: float = 3.0
     allocator_weight: float = 5.0
+    slot_minutes: int = DEFAULT_SLOT_MINUTES
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "slot_minutes", validate_slot_minutes(self.slot_minutes))
+
+    @property
+    def slot_seconds(self) -> int:
+        return slot_seconds(self.slot_minutes)
 
 
 def _read_config_file(data_dir: Path) -> Dict[str, Any]:
@@ -160,6 +169,7 @@ def load_config() -> Config:
 
     env_map = {
         "gpu_count": "BK_GPU_COUNT",
+        "slot_minutes": "BK_SLOT_MINUTES",
         "max_shared_users": "BK_MAX_SHARED_USERS",
         "queue_search_hours": "BK_QUEUE_SEARCH_HOURS",
         "ledger_retention_days": "BK_LEDGER_RETENTION_DAYS",
@@ -202,6 +212,7 @@ def load_config() -> Config:
     return Config(
         data_dir=data_dir,
         gpu_count=gpu_count,
+        slot_minutes=validate_slot_minutes(raw.get("slot_minutes", DEFAULT_SLOT_MINUTES)),
         max_shared_users=_int_value(raw, "max_shared_users", 2),
         queue_search_hours=_int_value(raw, "queue_search_hours", 168),
         ledger_retention_days=_nonnegative_int_value(raw, "ledger_retention_days", 90),

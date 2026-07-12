@@ -14,6 +14,7 @@ from bk.scheduler import (
     cancel_booking,
     edit_booking,
     find_available_gpus,
+    find_earliest_slot,
 )
 from bk.storage import LedgerStore
 from bk.timeparse import parse_iso, utc_now
@@ -560,6 +561,78 @@ class SchedulerModeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(BookingError, "multiple of 5 minutes"):
             add_booking(self.store, self.config, self.request(1001, MODE_SHARED, duration_seconds=60))
+
+    def test_configured_ten_minute_grid_controls_create_and_queue_candidates(self):
+        config = Config(
+            data_dir=Path(self.tmp.name),
+            gpu_count=1,
+            max_shared_users=2,
+            slot_minutes=10,
+        )
+        now = datetime(2030, 1, 1, 12, 47, 23, tzinfo=self.start.tzinfo)
+
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            created = add_booking(
+                self.store,
+                config,
+                self.request(
+                    1001,
+                    MODE_SHARED,
+                    start=now,
+                    duration_seconds=20 * 60,
+                    allow_queue=True,
+                ),
+            )
+
+        self.assertEqual(parse_iso(created.reservation["start_at"]), now.replace(minute=40, second=0))
+        with self.assertRaisesRegex(BookingError, "multiple of 10 minutes"):
+            add_booking(
+                self.store,
+                config,
+                self.request(1002, MODE_SHARED, duration_seconds=5 * 60),
+            )
+        with self.assertRaisesRegex(BookingError, "10-minute boundary"):
+            add_booking(
+                self.store,
+                config,
+                self.request(
+                    1002,
+                    MODE_SHARED,
+                    start=datetime(2030, 1, 2, 12, 45, tzinfo=self.start.tzinfo),
+                    duration_seconds=20 * 60,
+                ),
+            )
+
+        legacy_end = datetime(2030, 1, 2, 12, 45, tzinfo=self.start.tzinfo)
+        ledger = {
+            "version": 1,
+            "reservations": [
+                {
+                    "id": "legacy-five-minute-end",
+                    "uid": 1009,
+                    "username": "legacy",
+                    "gpus": [0],
+                    "mode": MODE_EXCLUSIVE,
+                    "start_at": (legacy_end - timedelta(minutes=5)).isoformat(),
+                    "end_at": legacy_end.isoformat(),
+                    "status": "active",
+                }
+            ],
+        }
+        with mock.patch("bk.scheduler.utc_now", return_value=legacy_end - timedelta(hours=1)):
+            slot = find_earliest_slot(
+                ledger,
+                config,
+                1,
+                legacy_end - timedelta(minutes=5),
+                timedelta(minutes=20),
+                MODE_EXCLUSIVE,
+                1001,
+                allow_queue=True,
+            )
+
+        self.assertIsNotNone(slot)
+        self.assertEqual(slot[0], datetime(2030, 1, 2, 12, 50, tzinfo=self.start.tzinfo))
 
     def test_new_booking_prunes_old_terminal_records_but_keeps_audit_log(self):
         now = utc_now()

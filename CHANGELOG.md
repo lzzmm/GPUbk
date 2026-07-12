@@ -4,6 +4,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Make booking granularity configurable through policy-bound `slot_minutes`/`BK_SLOT_MINUTES`, with consistent scheduler, CLI, TUI, Agent, and MCP behavior while retaining a 5-minute default.
 - Propagate directory-fsync failures across WAL, ledger, telemetry, private job files, and systemd unit installation instead of reporting uncertain writes as durable.
 - Reject permission drift and hard-linked aliases before managed writes, validate telemetry directory modes component by component, and report both conditions read-only through `bk doctor`.
 - Stream chronological telemetry queries without materializing a daily partition, while verifying closed gzip data before parsing it from the same pinned inode.

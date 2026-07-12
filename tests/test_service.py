@@ -96,6 +96,36 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(context["policy"]["worker_waiting_exit_code"], 3)
         self.assertNotIn("secret", str(context))
 
+    def test_context_and_implicit_submission_use_configured_granularity(self):
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            slot_minutes=10,
+        )
+        now = self.start + timedelta(minutes=47, seconds=23)
+        advice = build_gpu_advice(config, snapshots=self.snapshots, history={}, at=now)
+
+        context = build_agent_context(config, self.store, self.actor, at=now, advice=advice)
+        with (
+            mock.patch("bk.service.utc_now", return_value=now),
+            mock.patch("bk.scheduler.utc_now", return_value=now),
+        ):
+            submission = submit_booking(
+                config,
+                self.store,
+                self.actor,
+                count=1,
+                duration_seconds=20 * 60,
+                start_at=now,
+                allow_queue=True,
+                advice=advice,
+            )
+
+        self.assertEqual(context["policy"]["granularity_minutes"], 10)
+        self.assertTrue(context["capabilities"]["configurable_booking_granularity"])
+        self.assertEqual(submission.result.reservation["start_at"], "2030-01-01T12:40:00Z")
+
     def test_recommendation_is_read_only_and_prefers_live_idle_gpu(self):
         recommendation = recommend_booking(
             self.config,

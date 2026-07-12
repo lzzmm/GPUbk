@@ -9,6 +9,7 @@ from typing import List, Optional, Sequence, Tuple
 from .advisor import build_gpu_advice
 from .allocator import AllocatorDecision, apply_external_allocator
 from .config import Config
+from .granularity import DEFAULT_SLOT_MINUTES, ceil_to_slot, floor_to_slot
 from .gpu import GpuSnapshot, snapshot
 from .identity import current_actor
 from .models import (
@@ -49,7 +50,6 @@ COLOR_PREVIEW_SHARED = 9
 COLOR_PREVIEW_EXCLUSIVE = 10
 COLOR_RES_BASE = 11
 
-ADD_STEP_MINUTES = 5
 MIN_SHORT_ID_WIDTH = 6
 MAX_SHORT_ID_WIDTH = 12
 BAR_CHAR = "█"
@@ -66,7 +66,7 @@ FOCUS_RESERVATIONS = "reservations"
 FOCUS_GPUS = "gpus"
 DEFAULT_TIMELINE_COLUMNS = 48
 EDITOR_CONTEXT_COLUMNS = 3
-EDITOR_MIN_QUICK_STEPS = 6
+EDITOR_MIN_QUICK_MINUTES = 30
 ACCELERATED_MULTIPLIER = 6
 ACCELERATED_ZOOM_LEVELS = 3
 ACCELERATED_GPU_ROWS = 4
@@ -101,7 +101,7 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("", "TIMELINE"),
             ("Left / Right", "Pan one hour into history or the future"),
             ("n", "Jump back to the live NOW window"),
-            ("+ / -", "Zoom the timeline from 5 minutes to 1 day per column"),
+            ("+ / -", "Zoom from finest slice to 1 day per column"),
             ("v", "Cycle the reliable adjustment speed: 1x, 6x, or 24x"),
             ("r", "Refresh now; auto-refresh already runs every second"),
             ("c", "Toggle the dark or light color theme"),
@@ -119,10 +119,10 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("1-9", "Set GPU count; find earliest legal slot on best GPUs"),
             ("f", "Find earliest slot on any GPUs; keep selected count"),
             ("g", "Find earliest slot on exactly the selected GPUs"),
-            ("Left / Right", "Move start time by 5 minutes"),
+            ("Left / Right", "Move start time by one configured booking slice"),
             ("Up / Down", "Move the GPU cursor"),
             ("Space", "Select or clear the current GPU"),
-            ("[ / ]", "Shorten or extend duration by 5 minutes"),
+            ("[ / ]", "Shorten or extend duration by one booking slice"),
             (", / .", "Quick duration down or up; step follows zoom"),
             ("+ / -", "Zoom while keeping the selected interval in view"),
             ("Shift", "Larger step for movement, duration, and zoom"),
@@ -155,9 +155,9 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
         "Quick Tour",
         (
             ("bk 2 1h", "Book two shared GPUs at best available time"),
-            ("bk 1 30m --mem 12g", "Book shared capacity with expected VRAM"),
-            ("bk 1 30m --share 1/2", "Reserve half of the shared capacity"),
-            ("bk x 1 30m", "Book one GPU exclusively; x means exclusive"),
+            ("bk 1 1h --mem 12g", "Book shared capacity with expected VRAM"),
+            ("bk 1 1h --share 1/2", "Reserve half of the shared capacity"),
+            ("bk x 1 1h", "Book one GPU exclusively; x means exclusive"),
             ("bk tui", "Open this timeline"),
             ("a then 2", "Find earliest two-GPU slot; Enter confirms"),
             ("Tab", "Inspect a GPU's sharers and processes"),
@@ -194,10 +194,12 @@ class TuiState:
     gpu_memory_free_mb: dict[int, int] = field(default_factory=dict)
     timeline_columns: int = DEFAULT_TIMELINE_COLUMNS
     speed_index: int = 0
+    booking_slot_minutes: int = DEFAULT_SLOT_MINUTES
+    zoom_levels: Tuple[int, ...] = tuple(ZOOM_LEVELS)
 
     @property
     def slot_minutes(self) -> int:
-        return ZOOM_LEVELS[self.zoom_index]
+        return self.zoom_levels[self.zoom_index]
 
     @property
     def editor_active(self) -> bool:
@@ -232,7 +234,11 @@ def run_tui(config: Config, store: LedgerStore) -> int:
 
 def _run(stdscr, config: Config, store: LedgerStore) -> int:
     _init_curses(stdscr)
-    state = TuiState()
+    state = TuiState(
+        booking_slot_minutes=config.slot_minutes,
+        add_duration_steps=_default_editor_duration_steps(config.slot_minutes),
+    )
+    _configure_booking_slot(state, config.slot_minutes)
     while True:
         try:
             _draw(stdscr, config, store, state)
@@ -437,7 +443,10 @@ def _pan_timeline(config: Config, state: TuiState, direction: int, multiplier: i
 
 def _change_zoom(state: TuiState, direction: int) -> None:
     offset_minutes = state.offset_slots * state.slot_minutes
-    state.zoom_index = min(len(ZOOM_LEVELS) - 1, max(0, state.zoom_index + direction))
+    state.zoom_index = min(
+        len(state.zoom_levels) - 1,
+        max(0, state.zoom_index + direction),
+    )
     state.offset_slots = int(round(offset_minutes / state.slot_minutes))
 
 
@@ -453,8 +462,12 @@ def _speed_zoom_step(state: TuiState) -> int:
 
 def _change_editor_zoom(state: TuiState, direction: int) -> None:
     view_start = _editor_view_start(state)
-    selection_start = view_start + timedelta(minutes=state.add_start_steps * ADD_STEP_MINUTES)
-    selection_end = selection_start + timedelta(minutes=max(1, state.add_duration_steps) * ADD_STEP_MINUTES)
+    selection_start = view_start + timedelta(
+        minutes=state.add_start_steps * state.booking_slot_minutes
+    )
+    selection_end = selection_start + timedelta(
+        minutes=max(1, state.add_duration_steps) * state.booking_slot_minutes
+    )
     _change_zoom(state, direction)
     _frame_editor_window(state, selection_start, selection_end, utc_now(), auto_zoom=False)
 
@@ -767,7 +780,8 @@ def _editor_banner_text(
     return (
         f" {operation} {mode} | {len(preview.selected_gpus)} GPU [{gpu_text}] | "
         f"{_weekday_label(local_start)} {local_start:%m-%d %H:%M}->{local_end:%H:%M} | "
-        f"{_duration_detail_text(local_end - local_start)} | {state.speed_multiplier}x | {memory} | {status} "
+        f"{_duration_detail_text(local_end - local_start)} | slice {state.booking_slot_minutes}m | "
+        f"{state.speed_multiplier}x | {memory} | {status} "
     )
 
 
@@ -1186,8 +1200,17 @@ def _footer_label(state: TuiState, preview: Optional[AddPreview], width: int) ->
 
 def _start_add_select(config: Config, state: TuiState) -> None:
     now = utc_now()
-    view_start = _default_timeline_view_start(now, state.slot_minutes)
-    booking_start = _floor_to_add_step(now)
+    previous_slot = max(1, state.booking_slot_minutes)
+    duration_minutes = max(1, state.add_duration_steps) * previous_slot
+    _configure_booking_slot(state, config.slot_minutes)
+    state.add_duration_steps = max(
+        1,
+        (duration_minutes + config.slot_minutes - 1) // config.slot_minutes,
+    )
+    view_start = _default_timeline_view_start(
+        now, state.slot_minutes, state.booking_slot_minutes
+    )
+    booking_start = _floor_to_add_step(now, state.booking_slot_minutes)
     state.add_mode = True
     state.edit_mode = False
     state.edit_reservation_id = None
@@ -1195,7 +1218,10 @@ def _start_add_select(config: Config, state: TuiState) -> None:
     state.add_cursor_gpu = min(max(state.add_cursor_gpu, 0), max(0, config.gpu_count - 1))
     state.add_start_steps = max(
         0,
-        int((booking_start - view_start).total_seconds() // (ADD_STEP_MINUTES * 60)),
+        int(
+            (booking_start - view_start).total_seconds()
+            // (state.booking_slot_minutes * 60)
+        ),
     )
     state.add_duration_steps = max(1, state.add_duration_steps)
     state.add_selected_gpus = {state.add_cursor_gpu} if config.gpu_count else set()
@@ -1235,10 +1261,17 @@ def _load_edit_state(config: Config, state: TuiState, reservation: dict) -> None
     }
     state.add_mode = False
     state.edit_mode = True
+    _configure_booking_slot(state, config.slot_minutes)
     state.edit_reservation_id = str(reservation["id"])
-    state.editor_view_start = start - timedelta(minutes=30)
-    state.add_start_steps = 6
-    state.add_duration_steps = max(1, int((end - start).total_seconds() // (ADD_STEP_MINUTES * 60)))
+    context_steps = max(1, (30 + state.booking_slot_minutes - 1) // state.booking_slot_minutes)
+    state.editor_view_start = start - timedelta(
+        minutes=context_steps * state.booking_slot_minutes
+    )
+    state.add_start_steps = context_steps
+    state.add_duration_steps = max(
+        1,
+        int((end - start).total_seconds() // (state.booking_slot_minutes * 60)),
+    )
     state.add_selected_gpus = gpus
     state.add_cursor_gpu = min(gpus) if gpus else 0
     state.add_booking_mode = reservation.get("mode") if reservation.get("mode") in {MODE_SHARED, MODE_EXCLUSIVE} else MODE_SHARED
@@ -1335,25 +1368,25 @@ def _handle_add_key(
     if key == ord(","):
         step = state.speed_multiplier * _quick_duration_steps(state)
         state.add_duration_steps = max(1, state.add_duration_steps - step)
-        state.message = f"duration {_duration_text(timedelta(minutes=state.add_duration_steps * ADD_STEP_MINUTES))}"
+        state.message = f"duration {_editor_duration_text(state)}"
         state.error = False
         return
     if key == ord("."):
         step = state.speed_multiplier * _quick_duration_steps(state)
         state.add_duration_steps += step
-        state.message = f"duration {_duration_text(timedelta(minutes=state.add_duration_steps * ADD_STEP_MINUTES))}"
+        state.message = f"duration {_editor_duration_text(state)}"
         state.error = False
         return
     if key == ord("<"):
         step = state.speed_multiplier * _quick_duration_steps(state) * ACCELERATED_MULTIPLIER
         state.add_duration_steps = max(1, state.add_duration_steps - step)
-        state.message = f"fast duration {_duration_text(timedelta(minutes=state.add_duration_steps * ADD_STEP_MINUTES))}"
+        state.message = f"fast duration {_editor_duration_text(state)}"
         state.error = False
         return
     if key == ord(">"):
         step = state.speed_multiplier * _quick_duration_steps(state) * ACCELERATED_MULTIPLIER
         state.add_duration_steps += step
-        state.message = f"fast duration {_duration_text(timedelta(minutes=state.add_duration_steps * ADD_STEP_MINUTES))}"
+        state.message = f"fast duration {_editor_duration_text(state)}"
         state.error = False
         return
     if key == ord("+"):
@@ -1529,11 +1562,19 @@ def _find_add_slot(
         state.error = True
         return
     view_start = _editor_view_start(state)
-    selected_start = view_start + timedelta(minutes=state.add_start_steps * ADD_STEP_MINUTES)
+    selected_start = view_start + timedelta(
+        minutes=state.add_start_steps * state.booking_slot_minutes
+    )
     now = utc_now()
-    minimum_start = _ceil_to_add_step(now) if state.edit_mode else _floor_to_add_step(now)
+    minimum_start = (
+        _ceil_to_add_step(now, state.booking_slot_minutes)
+        if state.edit_mode
+        else _floor_to_add_step(now, state.booking_slot_minutes)
+    )
     earliest_start = max(selected_start, minimum_start)
-    duration = timedelta(minutes=max(1, state.add_duration_steps) * ADD_STEP_MINUTES)
+    duration = timedelta(
+        minutes=max(1, state.add_duration_steps) * state.booking_slot_minutes
+    )
     mode = state.add_booking_mode if state.add_booking_mode in {MODE_SHARED, MODE_EXCLUSIVE} else MODE_SHARED
     ledger = _availability_ledger(store.load(), state)
     advice = build_gpu_advice(config)
@@ -1611,7 +1652,7 @@ def _reset_editor(config: Config, store: LedgerStore, state: TuiState) -> None:
         state.error = True
         return
     cursor_gpu = state.add_cursor_gpu
-    state.add_duration_steps = 6
+    state.add_duration_steps = _default_editor_duration_steps(config.slot_minutes)
     _start_add_select(config, state)
     state.add_cursor_gpu = min(max(cursor_gpu, 0), max(0, config.gpu_count - 1))
     state.add_selected_gpus = {state.add_cursor_gpu} if config.gpu_count else set()
@@ -1624,16 +1665,49 @@ def _move_editor_start(state: TuiState, delta_steps: int) -> None:
         state.add_start_steps = requested
         return
     if state.edit_mode and state.editor_view_start is not None:
-        state.editor_view_start += timedelta(minutes=requested * ADD_STEP_MINUTES)
+        state.editor_view_start += timedelta(
+            minutes=requested * state.booking_slot_minutes
+        )
     state.add_start_steps = 0
 
 
 def _quick_duration_steps(state: TuiState) -> int:
-    return max(EDITOR_MIN_QUICK_STEPS, state.slot_minutes // ADD_STEP_MINUTES)
+    quick_minutes = max(EDITOR_MIN_QUICK_MINUTES, state.slot_minutes)
+    return max(
+        1,
+        (quick_minutes + state.booking_slot_minutes - 1)
+        // state.booking_slot_minutes,
+    )
 
 
 def _quick_duration_text(state: TuiState) -> str:
-    return _duration_text(timedelta(minutes=_quick_duration_steps(state) * ADD_STEP_MINUTES))
+    return _duration_text(
+        timedelta(
+            minutes=_quick_duration_steps(state) * state.booking_slot_minutes
+        )
+    )
+
+
+def _editor_duration_text(state: TuiState) -> str:
+    return _duration_text(
+        timedelta(
+            minutes=max(1, state.add_duration_steps) * state.booking_slot_minutes
+        )
+    )
+
+
+def _default_editor_duration_steps(slot_minutes: int) -> int:
+    return max(1, (30 + slot_minutes - 1) // slot_minutes)
+
+
+def _configure_booking_slot(state: TuiState, slot_minutes: int) -> None:
+    current_zoom = state.slot_minutes
+    state.booking_slot_minutes = slot_minutes
+    state.zoom_levels = tuple(sorted(set(ZOOM_LEVELS) | {slot_minutes}))
+    state.zoom_index = min(
+        range(len(state.zoom_levels)),
+        key=lambda index: abs(state.zoom_levels[index] - current_zoom),
+    )
 
 
 def _frame_editor_window(
@@ -1646,12 +1720,12 @@ def _frame_editor_window(
 ) -> None:
     columns = max(24, state.timeline_columns)
     context_columns = min(EDITOR_CONTEXT_COLUMNS, max(1, columns // 8))
-    now_anchor = _floor_to_add_step(now)
+    now_anchor = _floor_to_add_step(now, state.booking_slot_minutes)
 
     if auto_zoom:
-        chosen = len(ZOOM_LEVELS) - 1
-        for index in range(state.zoom_index, len(ZOOM_LEVELS)):
-            slot_minutes = ZOOM_LEVELS[index]
+        chosen = len(state.zoom_levels) - 1
+        for index in range(state.zoom_index, len(state.zoom_levels)):
+            slot_minutes = state.zoom_levels[index]
             candidate_start = now_anchor - timedelta(minutes=context_columns * slot_minutes)
             candidate_end = candidate_start + timedelta(minutes=columns * slot_minutes)
             margin = timedelta(minutes=context_columns * slot_minutes)
@@ -1661,18 +1735,27 @@ def _frame_editor_window(
         state.zoom_index = chosen
 
     slot_minutes = state.slot_minutes
-    live_start = now_anchor - timedelta(minutes=context_columns * slot_minutes)
+    live_start = _floor_to_add_step(
+        now_anchor - timedelta(minutes=context_columns * slot_minutes),
+        state.booking_slot_minutes,
+    )
     live_end = live_start + timedelta(minutes=columns * slot_minutes)
     margin = timedelta(minutes=context_columns * slot_minutes)
     if live_start <= selection_start and selection_end + margin <= live_end:
         view_start = live_start
     else:
-        view_start = selection_start - margin
+        view_start = _floor_to_add_step(
+            selection_start - margin,
+            state.booking_slot_minutes,
+        )
 
     state.editor_view_start = view_start
     state.add_start_steps = max(
         0,
-        int((selection_start - view_start).total_seconds() // (ADD_STEP_MINUTES * 60)),
+        int(
+            (selection_start - view_start).total_seconds()
+            // (state.booking_slot_minutes * 60)
+        ),
     )
 
 
@@ -1704,7 +1787,9 @@ def _close_editor(state: TuiState) -> None:
 def _editor_view_start(state: TuiState) -> datetime:
     if state.editor_view_start is not None:
         return state.editor_view_start
-    return _default_timeline_view_start(utc_now(), state.slot_minutes)
+    return _default_timeline_view_start(
+        utc_now(), state.slot_minutes, state.booking_slot_minutes
+    )
 
 
 def _own_reservation_index(store: LedgerStore, reservation_id: str) -> int:
@@ -1876,11 +1961,16 @@ def _tiny_range(start: str, end: str) -> str:
 def _build_add_preview(ledger: dict, config: Config, state: TuiState, view_start: datetime) -> AddPreview:
     cursor_gpu = min(max(state.add_cursor_gpu, 0), max(0, config.gpu_count - 1))
     selected = tuple(sorted(gpu for gpu in state.add_selected_gpus if 0 <= gpu < config.gpu_count))
-    start = view_start + timedelta(minutes=state.add_start_steps * ADD_STEP_MINUTES)
-    end = start + timedelta(minutes=max(1, state.add_duration_steps) * ADD_STEP_MINUTES)
+    slot_minutes = config.slot_minutes
+    start = view_start + timedelta(minutes=state.add_start_steps * slot_minutes)
+    end = start + timedelta(minutes=max(1, state.add_duration_steps) * slot_minutes)
     mode = state.add_booking_mode if state.add_booking_mode in {MODE_SHARED, MODE_EXCLUSIVE} else MODE_SHARED
     now = utc_now()
-    earliest = _ceil_to_add_step(now) if state.edit_mode else _floor_to_add_step(now)
+    earliest = (
+        _ceil_to_add_step(now, slot_minutes)
+        if state.edit_mode
+        else _floor_to_add_step(now, slot_minutes)
+    )
     if start < earliest:
         local_earliest = earliest.astimezone()
         return AddPreview(
@@ -2588,13 +2678,22 @@ def _clear_now_label_slot(line: str, now_col: int) -> Tuple[str, int]:
     return "".join(chars), label_col
 
 
-def _default_timeline_view_start(now: datetime, slot_minutes: int) -> datetime:
-    anchor = _floor_to_add_step(now)
-    return anchor - timedelta(minutes=NOW_CONTEXT_COLUMNS * max(1, slot_minutes))
+def _default_timeline_view_start(
+    now: datetime,
+    slot_minutes: int,
+    booking_slot_minutes: int = DEFAULT_SLOT_MINUTES,
+) -> datetime:
+    anchor = _floor_to_add_step(now, booking_slot_minutes)
+    return _floor_to_add_step(
+        anchor - timedelta(minutes=NOW_CONTEXT_COLUMNS * max(1, slot_minutes)),
+        booking_slot_minutes,
+    )
 
 
 def _timeline_view_start(now: datetime, state: TuiState) -> datetime:
-    return _default_timeline_view_start(now, state.slot_minutes) + timedelta(
+    return _default_timeline_view_start(
+        now, state.slot_minutes, state.booking_slot_minutes
+    ) + timedelta(
         minutes=state.offset_slots * state.slot_minutes
     )
 
@@ -2723,21 +2822,18 @@ def _compact_gpus(gpus: Sequence[int], max_width: int) -> str:
     return text[: max(0, max_width - 1)] + "+"
 
 
-def _ceil_to_add_step(value: datetime) -> datetime:
-    value = value.astimezone(timezone.utc).replace(microsecond=0)
-    timestamp = int(value.timestamp())
-    step = ADD_STEP_MINUTES * 60
-    remainder = timestamp % step
-    if remainder:
-        timestamp += step - remainder
-    return datetime.fromtimestamp(timestamp, timezone.utc)
+def _ceil_to_add_step(
+    value: datetime,
+    slot_minutes: int = DEFAULT_SLOT_MINUTES,
+) -> datetime:
+    return ceil_to_slot(value, slot_minutes)
 
 
-def _floor_to_add_step(value: datetime) -> datetime:
-    value = value.astimezone(timezone.utc).replace(second=0, microsecond=0)
-    timestamp = int(value.timestamp())
-    step = ADD_STEP_MINUTES * 60
-    return datetime.fromtimestamp(timestamp - (timestamp % step), timezone.utc)
+def _floor_to_add_step(
+    value: datetime,
+    slot_minutes: int = DEFAULT_SLOT_MINUTES,
+) -> datetime:
+    return floor_to_slot(value, slot_minutes)
 
 
 def _own_reservations(store: LedgerStore) -> List[dict]:

@@ -4,6 +4,15 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Union
 
+from .granularity import (
+    DEFAULT_SLOT_MINUTES,
+    ceil_to_slot,
+    floor_to_slot,
+    is_slot_aligned,
+    slot_phrase,
+    validate_slot_minutes,
+)
+
 
 _DURATION_TOKEN_RE = re.compile(r"(?P<num>\d+)(?P<unit>[dhm])")
 _MEMORY_RE = re.compile(r"^(?P<num>\d+(?:\.\d+)?)(?P<unit>g|gb|gib|m|mb|mib)$", re.IGNORECASE)
@@ -35,17 +44,22 @@ def parse_start(value: str) -> datetime:
     return parse_iso(value)
 
 
-def parse_friendly_start(value: str, now: datetime | None = None) -> datetime:
+def parse_friendly_start(
+    value: str,
+    now: datetime | None = None,
+    slot_minutes: int = DEFAULT_SLOT_MINUTES,
+) -> datetime:
+    slot_minutes = validate_slot_minutes(slot_minutes)
     raw = value.strip()
     current = (now if now is not None else datetime.now(timezone.utc)).astimezone(timezone.utc)
     if not raw or raw.lower() == "now":
-        return _floor_five_minutes(current)
+        return floor_to_slot(current, slot_minutes)
     if raw.startswith("+"):
         try:
             seconds = parse_duration_seconds(raw[1:])
         except ValueError as exc:
             raise ValueError("relative start must look like +30m or +1h30m") from exc
-        return _ceil_five_minutes(current + timedelta(seconds=seconds))
+        return ceil_to_slot(current + timedelta(seconds=seconds), slot_minutes)
 
     local_now = current.astimezone()
     local_zone = local_now.tzinfo
@@ -64,11 +78,11 @@ def parse_friendly_start(value: str, now: datetime | None = None) -> datetime:
         candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         if day_offset is not None:
             candidate += timedelta(days=day_offset)
-            if candidate.astimezone(timezone.utc) < _floor_five_minutes(current):
-                raise ValueError("start time is before the current 5-minute interval")
-        elif candidate.astimezone(timezone.utc) < _floor_five_minutes(current):
+            if candidate.astimezone(timezone.utc) < floor_to_slot(current, slot_minutes):
+                raise ValueError(f"start time is before the current {slot_phrase(slot_minutes)} interval")
+        elif candidate.astimezone(timezone.utc) < floor_to_slot(current, slot_minutes):
             candidate += timedelta(days=1)
-        return _validate_friendly_boundary(candidate)
+        return _validate_friendly_boundary(candidate, slot_minutes)
 
     month_day = re.fullmatch(r"(?P<month>\d{1,2})-(?P<day>\d{1,2})[ T](?P<time>\d{1,2}:\d{2})", raw)
     if month_day:
@@ -82,11 +96,11 @@ def parse_friendly_start(value: str, now: datetime | None = None) -> datetime:
                 minute,
                 tzinfo=local_zone,
             )
-            if candidate.astimezone(timezone.utc) < _floor_five_minutes(current):
+            if candidate.astimezone(timezone.utc) < floor_to_slot(current, slot_minutes):
                 candidate = candidate.replace(year=local_now.year + 1)
         except ValueError as exc:
             raise ValueError("invalid calendar date") from exc
-        return _validate_friendly_boundary(candidate)
+        return _validate_friendly_boundary(candidate, slot_minutes)
 
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
@@ -96,18 +110,22 @@ def parse_friendly_start(value: str, now: datetime | None = None) -> datetime:
         ) from exc
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=local_zone)
-    parsed = _validate_friendly_boundary(parsed)
-    if parsed.astimezone(timezone.utc) < _floor_five_minutes(current):
-        raise ValueError("start time is before the current 5-minute interval")
+    parsed = _validate_friendly_boundary(parsed, slot_minutes)
+    if parsed.astimezone(timezone.utc) < floor_to_slot(current, slot_minutes):
+        raise ValueError(f"start time is before the current {slot_phrase(slot_minutes)} interval")
     return parsed
 
 
-def normalize_queue_start(value: datetime, now: datetime | None = None) -> datetime:
+def normalize_queue_start(
+    value: datetime,
+    now: datetime | None = None,
+    slot_minutes: int = DEFAULT_SLOT_MINUTES,
+) -> datetime:
     start = value.astimezone(timezone.utc)
     current = (now or utc_now()).astimezone(timezone.utc)
     if start <= current:
-        return _floor_five_minutes(current)
-    return _ceil_five_minutes(start)
+        return floor_to_slot(current, slot_minutes)
+    return ceil_to_slot(start, slot_minutes)
 
 
 def _friendly_clock(value: str) -> tuple[int, int]:
@@ -121,26 +139,14 @@ def _friendly_clock(value: str) -> tuple[int, int]:
     return hour, minute
 
 
-def _validate_friendly_boundary(value: datetime) -> datetime:
+def _validate_friendly_boundary(
+    value: datetime,
+    slot_minutes: int = DEFAULT_SLOT_MINUTES,
+) -> datetime:
     normalized = value.astimezone(timezone.utc).replace(microsecond=0)
-    if normalized.second or int(normalized.timestamp()) % 300:
-        raise ValueError("start minute must be 00, 05, 10, ..., or 55")
+    if not is_slot_aligned(normalized, slot_minutes):
+        raise ValueError(f"start time must align to a {slot_phrase(slot_minutes)} boundary")
     return normalized
-
-
-def _floor_five_minutes(value: datetime) -> datetime:
-    normalized = value.astimezone(timezone.utc)
-    return normalized.replace(
-        minute=normalized.minute - (normalized.minute % 5),
-        second=0,
-        microsecond=0,
-    )
-
-
-def _ceil_five_minutes(value: datetime) -> datetime:
-    normalized = value.astimezone(timezone.utc)
-    floored = _floor_five_minutes(normalized)
-    return floored if normalized == floored else floored + timedelta(minutes=5)
 
 
 def format_local(value: Union[datetime, str]) -> str:

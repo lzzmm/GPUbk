@@ -5,10 +5,17 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from bk.config import load_config
+from bk.config import Config, load_config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_slot_field_preserves_existing_positional_constructor_order(self):
+        config = Config(Path("/tmp/bk-config-order"), 8, 4)
+
+        self.assertEqual(config.gpu_count, 8)
+        self.assertEqual(config.max_shared_users, 4)
+        self.assertEqual(config.slot_minutes, 5)
+
     def test_generic_default_uses_xdg_data_home_not_lab_specific_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             with mock.patch.dict(
@@ -21,6 +28,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.data_dir, Path(tmp) / "bk")
             self.assertEqual(config.file_mode, 0o600)
             self.assertEqual(config.dir_mode, 0o700)
+            self.assertEqual(config.slot_minutes, 5)
+            self.assertEqual(config.slot_seconds, 300)
             self.assertTrue(config.worker_live_guard)
             self.assertEqual(config.job_log_retention_days, 30)
             self.assertEqual(config.job_log_max_mb, 64)
@@ -58,6 +67,7 @@ class ConfigTests(unittest.TestCase):
                     {
                         "file_mode": "0660",
                         "dir_mode": "2770",
+                        "slot_minutes": 10,
                         "require_shared_memory": True,
                         "ledger_retention_days": 45,
                         "usage_minute_retention_days": 30,
@@ -77,6 +87,8 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual(config.file_mode, 0o660)
             self.assertEqual(config.dir_mode, 0o2770)
+            self.assertEqual(config.slot_minutes, 10)
+            self.assertEqual(config.slot_seconds, 600)
             self.assertTrue(config.require_shared_memory)
             self.assertEqual(config.ledger_retention_days, 45)
             self.assertEqual(config.usage_minute_retention_days, 30)
@@ -121,6 +133,37 @@ class ConfigTests(unittest.TestCase):
                 config = load_config()
 
             self.assertEqual(config.ledger_retention_days, 0)
+
+    def test_slot_minutes_can_be_overridden_by_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "BK_DATA_DIR": tmp,
+                    "BK_GPU_COUNT": "1",
+                    "BK_SLOT_MINUTES": "15",
+                },
+                clear=True,
+            ):
+                config = load_config()
+
+            self.assertEqual(config.slot_minutes, 15)
+            self.assertEqual(config.slot_seconds, 900)
+
+    def test_slot_minutes_must_divide_one_hour(self):
+        for value in (0, 7, 61, "bad", True):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                with mock.patch.dict(
+                    "os.environ",
+                    {
+                        "BK_DATA_DIR": tmp,
+                        "BK_GPU_COUNT": "1",
+                        "BK_SLOT_MINUTES": str(value),
+                    },
+                    clear=True,
+                ):
+                    with self.assertRaisesRegex(ValueError, "slot_minutes"):
+                        load_config()
 
     def test_zero_daily_retention_keeps_daily_usage_forever(self):
         with tempfile.TemporaryDirectory() as tmp:

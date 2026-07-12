@@ -8,10 +8,10 @@ from typing import Dict, List, Optional, Sequence
 from .advisor import GpuAdvice, build_gpu_advice
 from .allocator import AllocatorDecision, apply_external_allocator
 from .config import Config
+from .granularity import is_slot_aligned, slot_phrase
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, BookingResult, EditRequest
 from .policy import validate_ledger_policy
 from .scheduler import (
-    BOOKING_GRANULARITY_SECONDS,
     MAX_EDIT_OPERATIONS_PER_RESERVATION,
     add_booking,
     cancel_booking,
@@ -71,7 +71,11 @@ def submit_booking(
     advice: Optional[GpuAdvice] = None,
 ) -> BookingSubmission:
     generated_at = utc_now()
-    effective_start = normalize_queue_start(start_at, generated_at) if allow_queue else start_at
+    effective_start = (
+        normalize_queue_start(start_at, generated_at, config.slot_minutes)
+        if allow_queue
+        else start_at
+    )
     effective_share_units = _validate_recommendation_request(
         config,
         count,
@@ -292,7 +296,7 @@ def build_agent_context(
             "gpu_count": config.gpu_count,
             "default_mode": MODE_SHARED,
             "modes": [MODE_SHARED, MODE_EXCLUSIVE],
-            "granularity_minutes": BOOKING_GRANULARITY_SECONDS // 60,
+            "granularity_minutes": config.slot_minutes,
             "max_shared_reservations_per_gpu": config.max_shared_users,
             "shared_capacity_units_per_gpu": config.max_shared_users,
             "default_share_units_per_gpu": 1,
@@ -326,6 +330,7 @@ def build_agent_context(
             "idempotent_booking": True,
             "idempotent_edit": True,
             "weighted_shared_capacity": True,
+            "configurable_booking_granularity": True,
             "idempotent_edit_history_limit": MAX_EDIT_OPERATIONS_PER_RESERVATION,
             "structured_cancel": True,
             "scheduled_jobs": True,
@@ -363,7 +368,11 @@ def recommend_booking(
     advice: Optional[GpuAdvice] = None,
 ) -> dict:
     generated_at = utc_now()
-    effective_start = normalize_queue_start(start_at, generated_at) if allow_queue else start_at
+    effective_start = (
+        normalize_queue_start(start_at, generated_at, config.slot_minutes)
+        if allow_queue
+        else start_at
+    )
     effective_share_units = _validate_recommendation_request(
         config,
         count,
@@ -690,8 +699,10 @@ def _validate_recommendation_request(
         raise BookingError(f"unsupported booking mode: {mode}")
     if count < 1 or count > config.gpu_count:
         raise BookingError(f"GPU count must be between 1 and {config.gpu_count}")
-    if duration_seconds <= 0 or duration_seconds % BOOKING_GRANULARITY_SECONDS:
-        raise BookingError("duration must be a positive multiple of 5 minutes")
+    if duration_seconds <= 0 or duration_seconds % config.slot_seconds:
+        raise BookingError(
+            f"duration must be a positive multiple of {config.slot_minutes} minutes"
+        )
     if expected_memory_mb is not None and expected_memory_mb <= 0:
         raise BookingError("expected GPU memory must be positive")
     if mode == MODE_SHARED and config.require_shared_memory and expected_memory_mb is None:
@@ -705,8 +716,10 @@ def _validate_recommendation_request(
             normalized_share_units = normalize_share_units(share_units, config.max_shared_users)
         except (TypeError, ValueError) as exc:
             raise BookingError(str(exc)) from exc
-    if not allow_queue and int(start_at.timestamp()) % BOOKING_GRANULARITY_SECONDS:
-        raise BookingError("exact start time must align to a 5-minute boundary")
+    if not allow_queue and not is_slot_aligned(start_at, config.slot_minutes):
+        raise BookingError(
+            f"exact start time must align to a {slot_phrase(config.slot_minutes)} boundary"
+        )
     return normalized_share_units
 
 

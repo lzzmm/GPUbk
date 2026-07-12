@@ -228,6 +228,7 @@ def _allocator_payload(
         },
         "policy": {
             "gpu_count": config.gpu_count,
+            "granularity_minutes": config.slot_minutes,
             "max_shared_reservations_per_gpu": config.max_shared_users,
             "shared_capacity_units_per_gpu": config.max_shared_users,
             "shared_memory_reserve_mb": config.shared_memory_reserve_mb,

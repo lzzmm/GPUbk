@@ -231,6 +231,55 @@ class CliTests(unittest.TestCase):
             created_at = datetime.fromisoformat(reservation["created_at"].replace("Z", "+00:00"))
             self.assertEqual(reservation["start_at"], iso(floor_5m(created_at)))
 
+    def test_configured_booking_slice_applies_to_cli_and_agent_context(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            environment = {"BK_SLOT_MINUTES": "10"}
+
+            rejected = self.run_bk(["1", "5m"], data_dir, environment)
+            created = self.run_bk(["1", "20m", "--json"], data_dir, environment)
+            context = self.run_bk(
+                ["agent", "context", "--compact"],
+                data_dir,
+                environment,
+            )
+            timeline = self.run_bk(
+                ["timeline", "2h", "--step", "10m"],
+                data_dir,
+                environment,
+            )
+            doctor = self.run_bk(["doctor", "--json"], data_dir, environment)
+
+            self.assertEqual(rejected.returncode, 2)
+            self.assertIn("multiple of 10 minutes", rejected.stderr)
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertEqual(timeline.returncode, 0, timeline.stderr)
+            reservation = json.loads(created.stdout)["reservation"]
+            start = datetime.fromisoformat(reservation["start_at"].replace("Z", "+00:00"))
+            end = datetime.fromisoformat(reservation["end_at"].replace("Z", "+00:00"))
+            self.assertEqual(int(start.timestamp()) % 600, 0)
+            self.assertEqual(end - start, timedelta(minutes=20))
+            self.assertEqual(json.loads(context.stdout)["policy"]["granularity_minutes"], 10)
+            self.assertIn("10m/cell", timeline.stdout)
+            self.assertIn("--step 30m", timeline.stdout)
+            self.assertEqual(json.loads(doctor.stdout)["booking_slot_minutes"], 10)
+
+    def test_doctor_reports_a_local_granularity_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            created = self.run_bk(["1", "30m"], data_dir)
+            report = self.run_bk(
+                ["doctor", "--json"],
+                data_dir,
+                {"BK_SLOT_MINUTES": "10"},
+            )
+
+            self.assertEqual(created.returncode, 0, created.stderr)
+            payload = json.loads(report.stdout)
+            self.assertFalse(payload["healthy"])
+            self.assertEqual(payload["policy_issues"][0]["type"], "ledger-policy-mismatch")
+            self.assertIn("granularity_seconds", payload["policy_issues"][0]["message"])
+
     def test_human_at_option_accepts_relative_time_without_queueing(self):
         with tempfile.TemporaryDirectory() as tmp:
             before = datetime.now(timezone.utc)
@@ -1166,7 +1215,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("BOOK\n", result.stdout)
             self.assertIn("VIEW\n", result.stdout)
-            self.assertIn("bk 2 1h30m", result.stdout)
+            self.assertIn("bk 2 1h", result.stdout)
             self.assertIn("bk e ID --at 20:00", result.stdout)
             self.assertTrue(all(len(line) <= 72 for line in result.stdout.splitlines()), result.stdout)
 

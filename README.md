@@ -11,7 +11,7 @@ JSON commands, or an optional local MCP server.
 
 ## What It Covers
 
-- Shared and exclusive reservations in 5-minute intervals.
+- Shared and exclusive reservations in configurable intervals (5 minutes by default).
 - Automatic queueing, live GPU awareness, and per-GPU VRAM budgets.
 - A compact timeline that works on dark and light terminals.
 - Scheduled commands with automatic `CUDA_VISIBLE_DEVICES`.
@@ -70,8 +70,8 @@ bk doctor                         # read-only ledger checks
 
 Scheduling rules are intentionally small:
 
-- Start times and durations use 5-minute boundaries.
-- Without `--at` or `--start`, GPUbk starts in the active 5-minute interval when possible
+- Start times and durations use the server's configured booking boundary.
+- Without `--at` or `--start`, GPUbk starts in the active booking interval when possible
   (`12:41` starts at `12:40`) and prints `queued:` when it must start later.
 - `--at` accepts `+30m`, `20:00`, `tomorrow 09:00`, or `07-13 20:00`.
   `--start` keeps exact ISO 8601 input for scripts and Agents. Either is exact;
@@ -79,7 +79,7 @@ Scheduling rules are intentionally small:
 - Each GPU has `max_shared_users` capacity units. A shared booking uses one unit
   by default; `--share 3/4`, `--share 3`, and an exact percentage select a
   larger portion. `--share-with 1` reserves all but one unit. Capacity is checked
-  independently in every overlapping 5-minute interval.
+  independently in every overlapping booking interval.
 - Share units control admission and inferred VRAM, not hardware-enforced SM
   bandwidth. Use MIG/MPS or device controls when physical partitioning is required.
 - Exclusive reservations cannot overlap anything.
@@ -99,7 +99,7 @@ The plain CLI is designed for the common path:
 bk st                              # compact live status
 bk st -v                           # include processes and all reservations
 bk st --timeline                   # append the default timeline
-bk tl                              # current 5-minute interval, next 2 hours
+bk tl                              # current booking interval, next 2 hours
 bk tl 8h --step 15m --gpu 0,1
 bk tl --from 20:00 --window 1d --step auto
 bk slots 2 1h --mem 12g            # read-only placement alternatives
@@ -137,7 +137,7 @@ Useful TUI keys:
 | `←`, `→` | Browse the timeline; move time in Add/Edit |
 | `Space` | Toggle the current GPU in Add/Edit |
 | `-`, `=` | Change timeline zoom |
-| `[`, `]` | Shorten or extend duration; normally 5 minutes |
+| `[`, `]` | Shorten or extend duration by one configured booking interval |
 | `,`, `.` | Quickly shorten or extend duration; step follows zoom |
 | `v` | Cycle adjustment speed through 1x, 6x, and 24x |
 | `Shift` + adjustment | Use a larger step when the terminal reports it |
@@ -321,6 +321,7 @@ Put a root-owned `config.json` in that directory:
 ```json
 {
   "gpu_count": 8,
+  "slot_minutes": 5,
   "max_shared_users": 4,
   "queue_search_hours": 168,
   "ledger_retention_days": 90,
@@ -351,6 +352,17 @@ sudo chmod 0644 /data2/shared/bk/config.json
 `max_shared_users` is retained as the compatible configuration name; it now
 defines whole shared capacity units per GPU. Old reservations without a
 `share_units` field consume one unit.
+
+`slot_minutes` controls booking start and duration granularity. It defaults to
+`5` and may be any divisor of one hour from 1 through 60. `BK_SLOT_MINUTES`
+overrides it for single-user or test setups. On a shared server, keep this in the
+root-owned file: the ledger binds the value on first write and rejects clients
+using another grid.
+
+Scheduling policy, retention, worker timing, allocator integration, and display
+defaults are configurable. Schema versions, transaction durability, path and
+permission checks, record-size limits, and other corruption defenses are fixed
+implementation safeguards rather than administrator tuning knobs.
 
 All users and user services must use the same `BK_DATA_DIR`. The first write
 binds scheduling and storage policy into the ledger; clients with conflicting

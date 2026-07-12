@@ -206,6 +206,66 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertEqual(preview.start, datetime(2030, 1, 1, 17, 40, tzinfo=timezone.utc))
         self.assertTrue(preview.valid, preview.reason)
 
+    def test_add_uses_configured_booking_slice_independently_of_timeline_zoom(self):
+        now = datetime(2030, 1, 1, 17, 47, 23, tzinfo=timezone.utc)
+        config = Config(
+            data_dir=Path("/tmp/bk-tui-ten-minute-test"),
+            gpu_count=2,
+            max_shared_users=2,
+            slot_minutes=10,
+        )
+        state = TuiState()
+
+        with tempfile.TemporaryDirectory() as tmp, mock.patch("bk.tui.utc_now", return_value=now):
+            store = LedgerStore(Path(tmp))
+            _start_add_select(config, state)
+            initial = _build_add_preview({}, config, state, state.editor_view_start)
+            _handle_add_key(curses.KEY_RIGHT, config, store, state)
+            moved = _build_add_preview({}, config, state, state.editor_view_start)
+            _handle_add_key(ord("]"), config, store, state)
+            extended = _build_add_preview({}, config, state, state.editor_view_start)
+
+        self.assertEqual(state.slot_minutes, 5)
+        self.assertEqual(state.booking_slot_minutes, 10)
+        self.assertEqual(initial.start, datetime(2030, 1, 1, 17, 40, tzinfo=timezone.utc))
+        self.assertEqual(initial.end - initial.start, timedelta(minutes=30))
+        self.assertEqual(moved.start, initial.start + timedelta(minutes=10))
+        self.assertEqual(extended.end - extended.start, timedelta(minutes=40))
+
+    def test_non_five_minute_slice_keeps_editor_view_and_preview_aligned(self):
+        now = datetime(2030, 1, 1, 17, 41, 23, tzinfo=timezone.utc)
+        config = Config(
+            data_dir=Path("/tmp/bk-tui-four-minute-test"),
+            gpu_count=1,
+            slot_minutes=4,
+        )
+        state = TuiState()
+
+        with mock.patch("bk.tui.utc_now", return_value=now):
+            _start_add_select(config, state)
+            preview = _build_add_preview({}, config, state, state.editor_view_start)
+
+        self.assertEqual(int(state.editor_view_start.timestamp()) % (4 * 60), 0)
+        self.assertEqual(int(preview.start.timestamp()) % (4 * 60), 0)
+        self.assertTrue(preview.valid, preview.reason)
+
+    def test_sub_five_minute_booking_slice_is_available_as_a_zoom_level(self):
+        config = Config(
+            data_dir=Path("/tmp/bk-tui-one-minute-test"),
+            gpu_count=1,
+            slot_minutes=1,
+        )
+        state = TuiState()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = LedgerStore(Path(tmp))
+            _start_add_select(config, state)
+            _handle_add_key(ord("="), config, store, state)
+
+        self.assertIn(1, state.zoom_levels)
+        self.assertEqual(state.slot_minutes, 1)
+        self.assertEqual(state.booking_slot_minutes, 1)
+
     def test_edit_still_rejects_the_already_started_current_slot(self):
         now = datetime(2030, 1, 1, 17, 41, 23, tzinfo=timezone.utc)
         state = self.state()

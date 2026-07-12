@@ -65,8 +65,26 @@ class TimeParsingTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "tomorrow 09:00"):
             parse_friendly_start("hwo", datetime(2030, 1, 1, tzinfo=timezone.utc))
 
-        with self.assertRaisesRegex(ValueError, "00, 05"):
+        with self.assertRaisesRegex(ValueError, "5-minute boundary"):
             parse_friendly_start("2030-01-01T12:41:00Z", datetime(2030, 1, 1, tzinfo=timezone.utc))
+
+    def test_custom_granularity_controls_friendly_and_queued_times(self):
+        now = datetime(2030, 1, 1, 12, 47, 23, tzinfo=timezone.utc)
+
+        self.assertEqual(
+            parse_friendly_start("now", now, slot_minutes=10),
+            datetime(2030, 1, 1, 12, 40, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            parse_friendly_start("+30m", now, slot_minutes=10),
+            datetime(2030, 1, 1, 13, 20, tzinfo=timezone.utc),
+        )
+        self.assertEqual(
+            normalize_queue_start(now + timedelta(minutes=1), now, slot_minutes=10),
+            datetime(2030, 1, 1, 12, 50, tzinfo=timezone.utc),
+        )
+        with self.assertRaisesRegex(ValueError, "10-minute boundary"):
+            parse_friendly_start("2030-01-01T12:45:00Z", now, slot_minutes=10)
 
 
 if __name__ == "__main__":

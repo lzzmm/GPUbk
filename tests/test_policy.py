@@ -48,6 +48,42 @@ class LedgerPolicyTests(unittest.TestCase):
 
         self.assertEqual(self.store.ledger_path.read_bytes(), original)
 
+    def test_granularity_override_cannot_mutate_a_bound_ledger(self):
+        add_booking(self.store, self.config, self.request)
+        original = self.store.ledger_path.read_bytes()
+        override = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            slot_minutes=10,
+        )
+
+        with self.assertRaisesRegex(BookingError, "granularity_seconds"):
+            add_booking(self.store, override, self.request)
+        with self.assertRaisesRegex(BookingError, "granularity_seconds"):
+            build_agent_context(override, self.store, self.actor)
+
+        self.assertEqual(self.store.ledger_path.read_bytes(), original)
+
+    def test_nondefault_granularity_is_bound_in_seconds(self):
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            slot_minutes=10,
+        )
+        request = BookingRequest(
+            actor=self.actor,
+            count=1,
+            duration_seconds=20 * 60,
+            start_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
+            preferred_gpus=[0],
+        )
+
+        add_booking(self.store, config, request)
+
+        self.assertEqual(self.store.load()["policy"]["granularity_seconds"], 600)
+
     def test_storage_mode_override_is_rejected_before_mutation(self):
         add_booking(self.store, self.config, self.request)
         mismatched = LedgerStore(self.data_dir, file_mode=0o660, dir_mode=0o700)
