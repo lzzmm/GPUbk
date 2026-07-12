@@ -4,8 +4,8 @@
 
 1. Read the target release notes and run `bk doctor --json` with the installed
    version.
-2. Record the canonical `BK_DATA_DIR`, trusted `BK_CONFIG_FILE`, and each user's
-   `BK_JOB_LOG_DIR`.
+2. Record the canonical data, trusted configuration, and per-user job-log paths
+   reported by `bk config --json` and `bk service show`.
 3. Back up the shared data directory without following symbolic links. Keep its
    ownership, group, modes, and ACLs.
 4. Stop the one trusted monitor and ask users to stop their GPUbk workers. Do
@@ -24,18 +24,22 @@ starting 0.2.x:
 sudo install -d -m 0755 -o root -g root /etc/gpubk
 sudo install -m 0644 -o root -g root /data2/shared/bk/config.json \
   /etc/gpubk/config.json
-export BK_CONFIG_FILE=/etc/gpubk/config.json
 ```
 
-Add the numeric UID of the one telemetry account to that reviewed file before
-starting the 0.2 monitor:
+Add the canonical shared data directory and numeric UID of the one telemetry
+account to that reviewed file before starting the 0.2 monitor:
 
 ```json
-{"monitor_uid": 1001}
+{
+  "data_dir": "/data2/shared/bk",
+  "monitor_uid": 1001
+}
 ```
 
 Replace `1001` with `id -u <monitor-account>`. This is required when the
-configured data-directory mode is group-writable.
+configured data-directory mode is group-writable. With the standard path,
+GPUbk discovers `/etc/gpubk/config.json` without shell exports. An alternate
+trusted path still requires `BK_CONFIG_FILE`.
 
 Confirm `bk config` reports the new canonical path and a matching ledger policy.
 Reinstall monitor and worker units with `--force` so they capture it. GPUbk rejects

@@ -18,6 +18,7 @@ DEFAULT_PRIVATE_FILE_MODE = 0o600
 DEFAULT_PRIVATE_DIR_MODE = 0o700
 MAX_CONFIG_FILE_BYTES = 1024 * 1024
 CONFIG_VERSION = 1
+SYSTEM_CONFIG_FILE = Path("/etc/gpubk/config.json")
 MAX_GPU_COUNT = 1024
 MAX_SHARED_UNITS = 10_000
 MAX_QUEUE_SEARCH_HOURS = 10 * 365 * 24
@@ -73,6 +74,7 @@ CONFIG_ENV_MAP = {
 CONFIG_FILE_KEYS = frozenset(
     {
         "config_version",
+        "data_dir",
         *CONFIG_ENV_MAP,
         "job_log_dir",
         "allocator_command",
@@ -238,10 +240,11 @@ def _read_config_file(
     path: Path,
     *,
     required: bool = False,
+    missing_label: str = "BK_CONFIG_FILE",
 ) -> Tuple[Dict[str, Any], Optional[int]]:
     if not os.path.lexists(path):
         if required:
-            raise FileNotFoundError(f"configured BK_CONFIG_FILE does not exist: {path}")
+            raise FileNotFoundError(f"configured {missing_label} does not exist: {path}")
         return {}, None
     parent_fd = _open_trusted_config_parent(path.parent)
     try:
@@ -404,18 +407,47 @@ def _auto_gpu_count() -> int:
 
 
 def load_config() -> Config:
+    explicit_data_dir = "BK_DATA_DIR" in os.environ
     data_dir = (
         _path_value(os.environ["BK_DATA_DIR"], "BK_DATA_DIR")
-        if "BK_DATA_DIR" in os.environ
+        if explicit_data_dir
         else _default_data_dir()
     )
     explicit_config_file = "BK_CONFIG_FILE" in os.environ
-    config_file = (
-        _canonical_config_file(_path_value(os.environ["BK_CONFIG_FILE"], "BK_CONFIG_FILE"))
-        if explicit_config_file
-        else data_dir / "config.json"
+    system_config_file = (
+        not explicit_config_file
+        and not explicit_data_dir
+        and os.path.lexists(SYSTEM_CONFIG_FILE)
     )
-    raw, config_owner_uid = _read_config_file(config_file, required=explicit_config_file)
+    if explicit_config_file:
+        config_file = _canonical_config_file(
+            _path_value(os.environ["BK_CONFIG_FILE"], "BK_CONFIG_FILE")
+        )
+    elif system_config_file:
+        config_file = _canonical_config_file(SYSTEM_CONFIG_FILE)
+    else:
+        config_file = data_dir / "config.json"
+    external_config = explicit_config_file or system_config_file
+    raw, config_owner_uid = _read_config_file(
+        config_file,
+        required=external_config,
+        missing_label=(
+            "BK_CONFIG_FILE" if explicit_config_file else "system configuration file"
+        ),
+    )
+    if "data_dir" in raw:
+        if not external_config:
+            raise ValueError(
+                f"{config_file}: data_dir is only allowed in BK_CONFIG_FILE "
+                f"or {SYSTEM_CONFIG_FILE}"
+            )
+        if not explicit_data_dir:
+            data_dir = _absolute_path_value(raw["data_dir"], "data_dir")
+    elif external_config and not explicit_data_dir:
+        raise ValueError(
+            f"{config_file}: external or system configuration must define data_dir "
+            "when BK_DATA_DIR is unset"
+        )
 
     for key, env_name in CONFIG_ENV_MAP.items():
         if env_name in os.environ:
@@ -440,7 +472,7 @@ def load_config() -> Config:
 
     return Config(
         data_dir=data_dir,
-        config_file=config_file if explicit_config_file else None,
+        config_file=config_file if external_config else None,
         gpu_count=gpu_count,
         slot_minutes=validate_slot_minutes(raw.get("slot_minutes", DEFAULT_SLOT_MINUTES)),
         max_shared_users=_int_value(raw, "max_shared_users", 2, maximum=MAX_SHARED_UNITS),
@@ -625,6 +657,13 @@ def _path_value(value: Any, key: str) -> Path:
     if not text or "\x00" in text or len(text) > 4096:
         raise ValueError(f"{key} must be a non-empty path of at most 4096 characters")
     return Path(text).expanduser()
+
+
+def _absolute_path_value(value: Any, key: str) -> Path:
+    path = _path_value(value, key)
+    if not Path(os.fspath(value)).is_absolute():
+        raise ValueError(f"{key} must be an absolute filesystem path")
+    return Path(os.path.abspath(os.fspath(path)))
 
 
 def _command_value(value: Any) -> Optional[Tuple[str, ...]]:

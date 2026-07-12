@@ -46,9 +46,9 @@ def monitor_configuration_error(config: Config) -> Optional[str]:
     if not config.dir_mode & 0o022:
         return None
     if config.config_file is None:
-        return "shared monitor requires an explicit BK_CONFIG_FILE"
+        return "shared monitor requires a trusted external or system configuration file"
     if config.config_owner_uid != 0:
-        return "shared monitor requires a root-owned BK_CONFIG_FILE"
+        return "shared monitor requires a root-owned configuration file"
     if config.monitor_uid is None:
         return "shared monitor requires monitor_uid in the trusted configuration"
     return None

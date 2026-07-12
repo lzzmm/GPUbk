@@ -42,11 +42,12 @@ Supported security boundaries:
 - Durable writes fsync both file contents and the containing directory. Directory-sync
   errors are never silently ignored: a valid WAL remains for idempotent deferred recovery,
   while telemetry, private job files, and service installation fail visibly.
-- Trusted configuration can live outside the writable ledger through `BK_CONFIG_FILE`.
-  GPUbk canonicalizes its parent, pins every directory component and the leaf by file
-  descriptor, rejects replaceable non-sticky directories, and never follows a leaf symlink.
-- A monitor targeting a group-writable data directory requires an explicit root-owned
-  configuration and matching numeric `monitor_uid`. This prevents accidental or
+- Trusted configuration can live outside the writable ledger through the automatically
+  discovered `/etc/gpubk/config.json` or an explicit `BK_CONFIG_FILE`. GPUbk canonicalizes
+  its parent, pins every directory component and the leaf by file descriptor, rejects
+  replaceable non-sticky directories, and never follows a leaf symlink.
+- A monitor targeting a group-writable data directory requires a trusted root-owned system
+  or external configuration and matching numeric `monitor_uid`. This prevents accidental or
   misconfigured telemetry writers that still use GPUbk; it does not stop a group member
   from bypassing GPUbk and modifying group-writable files directly.
 - Applied telemetry maintenance and migration commands use the same writer role; dry-run
@@ -58,9 +59,10 @@ Supported security boundaries:
 Administrator responsibilities:
 
 - Configure a dedicated Unix group and correct setgid directory permissions.
-- On a shared deployment, keep `BK_CONFIG_FILE` in a root-owned directory such as
-  `/etc/gpubk`, outside the group-writable ledger directory. File mode alone cannot prevent
-  rename or deletion by a user who can write its parent directory.
+- On a shared deployment, keep the system or external configuration in a root-owned
+  directory such as `/etc/gpubk`, outside the group-writable ledger directory. Put one
+  absolute `data_dir` in that file so every invocation resolves the same ledger. File mode
+  alone cannot prevent rename or deletion by a user who can write its parent directory.
 - Verify `flock` and atomic rename behavior on the actual NFS/FUSE mount.
 - Control `/dev/nvidia*` access separately if hard enforcement is required.
 - Run MCP over per-user local stdio unless an authenticated remote transport is deliberately engineered.

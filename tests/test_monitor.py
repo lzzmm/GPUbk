@@ -130,7 +130,7 @@ class UsageMonitorTests(unittest.TestCase):
             monitor_uid=1001,
         )
 
-        self.assertIn("explicit BK_CONFIG_FILE", monitor_configuration_error(missing_path))
+        self.assertIn("trusted external or system", monitor_configuration_error(missing_path))
         self.assertIn("root-owned", monitor_configuration_error(user_owned))
         self.assertIn("monitor_uid", monitor_configuration_error(missing_uid))
         self.assertIsNone(monitor_configuration_error(configured))
@@ -158,7 +158,7 @@ class UsageMonitorTests(unittest.TestCase):
                 dir_mode=config.dir_mode,
             )
 
-            with self.assertRaisesRegex(MonitorAuthorizationError, "explicit BK_CONFIG_FILE"):
+            with self.assertRaisesRegex(MonitorAuthorizationError, "trusted external or system"):
                 run_monitor(config, store, once=True)
 
             self.assertFalse(data_dir.exists())

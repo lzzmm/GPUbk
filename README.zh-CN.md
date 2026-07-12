@@ -322,8 +322,6 @@ schema 标明 read-only、idempotent、destructive 和 closed-world 属性。
 ```bash
 sudo install -d -m 2770 -o root -g gpuusers /data2/shared/bk
 sudo install -d -m 0755 -o root -g root /etc/gpubk
-export BK_DATA_DIR=/data2/shared/bk
-export BK_CONFIG_FILE=/etc/gpubk/config.json
 ```
 
 将 root 管理的配置放在 `/etc/gpubk/config.json`，不要与组可写台账目录同置：
@@ -331,6 +329,7 @@ export BK_CONFIG_FILE=/etc/gpubk/config.json
 ```json
 {
   "config_version": 1,
+  "data_dir": "/data2/shared/bk",
   "gpu_count": 8,
   "slot_minutes": 5,
   "max_shared_users": 4,
@@ -369,15 +368,22 @@ sudo chown root:root /etc/gpubk/config.json
 sudo chmod 0644 /etc/gpubk/config.json
 ```
 
+当 `BK_DATA_DIR` 与 `BK_CONFIG_FILE` 都未设置时，GPUbk 会自动发现
+`/etc/gpubk/config.json`。系统配置必须写明绝对 `data_dir`，因此普通 SSH、MCP
+客户端和用户服务不依赖 shell 启动文件也会连接同一台账。非标准可信配置可通过
+`BK_CONFIG_FILE` 选择；除非同时设置 `BK_DATA_DIR`，该文件也必须包含 `data_dir`。
+显式设置 `BK_DATA_DIR` 会保留原有私有/数据目录内配置行为并跳过系统配置自动发现；
+需要组合其他数据目录与外部配置时应同时设置两个变量。
+
 请用 `id -u <monitor账号>` 的结果替换 `1001`。配置文件及其每一级目录必须由 root
 或当前 UID 所有，并且不可被 group/other 写入。
 即使文件自身是 root 所有的 `0644`，只要它位于 `/data2/shared/bk` 这种组可写目录中，
 目录成员仍能通过 rename 替换它。GPUbk 会按文件描述符逐级固定并验证配置路径，拒绝
-这种部署。单用户安装继续兼容 `$BK_DATA_DIR/config.json` 默认路径；只有选择独立配置
-时才需要 `BK_CONFIG_FILE`。
+这种部署。显式选择 `BK_DATA_DIR` 时，单用户安装继续兼容
+`$BK_DATA_DIR/config.json` 默认路径。
 
-向组可写目录写入遥测的 monitor 会执行更严格的检查：必须显式使用 root-owned
-`BK_CONFIG_FILE`，配置 `monitor_uid`，且进程 UID 必须完全一致。退出码 `77` 表示当前
+向组可写目录写入遥测的 monitor 会执行更严格的检查：必须使用可信且 root-owned 的
+外部或系统配置，配置 `monitor_uid`，且进程 UID 必须完全一致。退出码 `77` 表示当前
 进程不是指定写入者。实际执行遥测维护和迁移也要求同一角色，dry-run 仍可由普通用户
 查看。单用户私有目录不要求配置该角色。
 
@@ -406,14 +412,14 @@ bk config --json
 事务持久性、路径与权限校验、记录大小上限等防损坏约束属于实现安全边界，不开放为
 管理员调优项。
 
-所有用户和用户服务必须使用同一个 `BK_DATA_DIR` 与 `BK_CONFIG_FILE`。第一次写入会把
-调度与存储策略绑定到台账，配置冲突的客户端会直接拒绝操作。启用服务前运行部署预检：
+所有用户和用户服务必须解析到相同的数据与配置路径；标准
+`/etc/gpubk/config.json` 布局会自动满足这一点。第一次写入会把调度与存储策略绑定到
+台账，配置冲突的客户端会直接拒绝操作。启用服务前应从一个干净登录环境运行预检：
 
 ```bash
-BK_DATA_DIR=/data2/shared/bk BK_CONFIG_FILE=/etc/gpubk/config.json \
-  bk doctor --probe --strict
-BK_DATA_DIR=/data2/shared/bk BK_CONFIG_FILE=/etc/gpubk/config.json \
-  bk doctor --probe --json --strict
+bk config
+bk doctor --probe --strict
+bk doctor --probe --json --strict
 ```
 
 共享数据目录模式下会禁用 `bk reset`。需要退役或重建共享台账时，管理员必须先停止

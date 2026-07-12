@@ -1527,9 +1527,9 @@ class CliTests(unittest.TestCase):
             )
 
             self.assertEqual(monitor.returncode, 77)
-            self.assertIn("explicit BK_CONFIG_FILE", monitor.stderr)
+            self.assertIn("trusted external or system", monitor.stderr)
             self.assertEqual(service.returncode, 77)
-            self.assertIn("explicit BK_CONFIG_FILE", service.stderr)
+            self.assertIn("trusted external or system", service.stderr)
             self.assertEqual(maintenance_dry_run.returncode, 0, maintenance_dry_run.stderr)
             self.assertEqual(maintenance.returncode, 77)
             self.assertEqual(migration.returncode, 77)

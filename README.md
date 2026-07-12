@@ -361,8 +361,6 @@ Create one setgid directory for the lab group:
 ```bash
 sudo install -d -m 2770 -o root -g gpuusers /data2/shared/bk
 sudo install -d -m 0755 -o root -g root /etc/gpubk
-export BK_DATA_DIR=/data2/shared/bk
-export BK_CONFIG_FILE=/etc/gpubk/config.json
 ```
 
 Put the root-owned configuration at `/etc/gpubk/config.json`, outside the
@@ -371,6 +369,7 @@ group-writable ledger directory:
 ```json
 {
   "config_version": 1,
+  "data_dir": "/data2/shared/bk",
   "gpu_count": 8,
   "slot_minutes": 5,
   "max_shared_users": 4,
@@ -409,6 +408,16 @@ sudo chown root:root /etc/gpubk/config.json
 sudo chmod 0644 /etc/gpubk/config.json
 ```
 
+When neither `BK_DATA_DIR` nor `BK_CONFIG_FILE` is set, GPUbk automatically
+discovers `/etc/gpubk/config.json`. A system configuration must contain an
+absolute `data_dir`, so normal SSH sessions, MCP clients, and user services all
+reach the same ledger without shell startup files. A nonstandard trusted file
+can be selected with `BK_CONFIG_FILE`; its `data_dir` field has the same
+behavior and is required unless `BK_DATA_DIR` is also set. Explicit
+`BK_DATA_DIR` keeps the previous private/data-local behavior and skips automatic
+system discovery. Set both variables when deliberately combining an alternate
+data directory with an external configuration.
+
 Replace `1001` with `id -u <monitor-account>`. The configuration file and every
 directory that contains it must be owned by root or the current UID and must
 not be writable by group or other users. A
@@ -416,15 +425,14 @@ root-owned file inside `/data2/shared/bk` is still replaceable by members who
 can write that directory, regardless of the file's `0644` mode. GPUbk therefore
 opens the configured parent chain and file by descriptor and rejects that layout.
 For a single-user installation, the backward-compatible default remains
-`$BK_DATA_DIR/config.json`; `BK_CONFIG_FILE` is required only when selecting a
-separate file.
+`$BK_DATA_DIR/config.json` whenever `BK_DATA_DIR` is explicitly selected.
 
 A monitor writing to a group-writable data directory has stricter checks: it
-requires an explicit root-owned `BK_CONFIG_FILE`, a configured `monitor_uid`,
-and an exact match with the process UID. Exit status `77` means the process is
-not the configured writer. Single-user private directories do not require this
-role setting. Applied usage maintenance and migration use the same role; their
-dry-run forms stay available to ordinary users.
+requires a trusted root-owned external or system configuration, a configured
+`monitor_uid`, and an exact match with the process UID. Exit status `77` means
+the process is not the configured writer. Single-user private directories do
+not require this role setting. Applied usage maintenance and migration use the
+same role; their dry-run forms stay available to ordinary users.
 
 `max_shared_users` is retained as the compatible configuration name; it now
 defines whole shared capacity units per GPU. Old reservations without a
@@ -457,16 +465,16 @@ defaults are configurable. Schema versions, transaction durability, path and
 permission checks, record-size limits, and other corruption defenses are fixed
 implementation safeguards rather than administrator tuning knobs.
 
-All users and user services must use the same `BK_DATA_DIR` and
-`BK_CONFIG_FILE`. The first write binds scheduling and storage policy into the
-ledger. Clients with conflicting settings fail closed. Run the deployment
-preflight before enabling services:
+All users and user services must resolve the same data and configuration paths.
+The standard `/etc/gpubk/config.json` layout provides that automatically. The
+first write binds scheduling and storage policy into the ledger; clients with
+conflicting settings fail closed. Run the deployment preflight from a clean
+login environment before enabling services:
 
 ```bash
-BK_DATA_DIR=/data2/shared/bk BK_CONFIG_FILE=/etc/gpubk/config.json \
-  bk doctor --probe --strict
-BK_DATA_DIR=/data2/shared/bk BK_CONFIG_FILE=/etc/gpubk/config.json \
-  bk doctor --probe --json --strict
+bk config
+bk doctor --probe --strict
+bk doctor --probe --json --strict
 ```
 
 `bk reset` is intentionally disabled for a shared data-directory mode. To retire

@@ -23,6 +23,9 @@ class ConfigTests(unittest.TestCase):
                 "os.environ",
                 {"XDG_DATA_HOME": tmp},
                 clear=True,
+            ), mock.patch(
+                "bk.config.SYSTEM_CONFIG_FILE",
+                Path(tmp) / "missing-system-config.json",
             ):
                 config = load_config()
 
@@ -44,6 +47,154 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.tui_refresh_seconds, 1.0)
             self.assertIsNone(config.monitor_uid)
             self.assertIsNone(config.config_owner_uid)
+
+    def test_trusted_system_config_supplies_shared_data_dir_without_shell_exports(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_dir = root / "etc" / "gpubk"
+            config_dir.mkdir(parents=True, mode=0o700)
+            config_path = config_dir / "config.json"
+            data_dir = root / "shared-data"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "config_version": 1,
+                        "data_dir": str(data_dir),
+                        "gpu_count": 8,
+                        "slot_minutes": 10,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path.chmod(0o600)
+
+            with mock.patch.dict("os.environ", {}, clear=True), mock.patch(
+                "bk.config.SYSTEM_CONFIG_FILE",
+                config_path,
+            ):
+                config = load_config()
+
+            self.assertEqual(config.data_dir, data_dir)
+            self.assertEqual(config.config_file, config_path.resolve())
+            self.assertEqual(config.config_owner_uid, os.getuid())
+            self.assertEqual(config.gpu_count, 8)
+            self.assertEqual(config.slot_minutes, 10)
+
+    def test_explicit_data_dir_bypasses_system_config_discovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "private-data"
+            system_config = root / "broken-system-config.json"
+            system_config.write_text("not json", encoding="utf-8")
+            system_config.chmod(0o600)
+
+            with mock.patch.dict(
+                "os.environ",
+                {"BK_DATA_DIR": str(data_dir), "BK_GPU_COUNT": "2"},
+                clear=True,
+            ), mock.patch("bk.config.SYSTEM_CONFIG_FILE", system_config):
+                config = load_config()
+
+            self.assertEqual(config.data_dir, data_dir)
+            self.assertIsNone(config.config_file)
+            self.assertEqual(config.gpu_count, 2)
+
+    def test_system_config_requires_an_absolute_data_dir(self):
+        cases = (
+            ({"config_version": 1, "gpu_count": 2}, "must define data_dir"),
+            (
+                {"config_version": 1, "data_dir": "relative/data", "gpu_count": 2},
+                "data_dir must be an absolute filesystem path",
+            ),
+        )
+        for document, message in cases:
+            with self.subTest(message=message), tempfile.TemporaryDirectory() as tmp:
+                config_path = Path(tmp) / "config.json"
+                config_path.write_text(json.dumps(document), encoding="utf-8")
+                config_path.chmod(0o600)
+                with mock.patch.dict("os.environ", {}, clear=True), mock.patch(
+                    "bk.config.SYSTEM_CONFIG_FILE",
+                    config_path,
+                ):
+                    with self.assertRaisesRegex(ValueError, message):
+                        load_config()
+
+    def test_external_config_data_dir_is_overridden_only_by_explicit_environment(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            configured_data = root / "configured-data"
+            environment_data = root / "environment-data"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "config_version": 1,
+                        "data_dir": str(configured_data),
+                        "gpu_count": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path.chmod(0o600)
+
+            with mock.patch.dict(
+                "os.environ",
+                {"BK_CONFIG_FILE": str(config_path)},
+                clear=True,
+            ):
+                configured = load_config()
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "config_version": 1,
+                        "data_dir": "superseded/relative/path",
+                        "gpu_count": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "BK_CONFIG_FILE": str(config_path),
+                    "BK_DATA_DIR": str(environment_data),
+                },
+                clear=True,
+            ):
+                overridden = load_config()
+
+            self.assertEqual(configured.data_dir, configured_data)
+            self.assertEqual(overridden.data_dir, environment_data)
+
+    def test_external_config_without_data_dir_requires_an_environment_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config_path = root / "config.json"
+            data_dir = root / "environment-data"
+            config_path.write_text(
+                json.dumps({"config_version": 1, "gpu_count": 2}),
+                encoding="utf-8",
+            )
+            config_path.chmod(0o600)
+
+            with mock.patch.dict(
+                "os.environ",
+                {"BK_CONFIG_FILE": str(config_path)},
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "must define data_dir"):
+                    load_config()
+            with mock.patch.dict(
+                "os.environ",
+                {
+                    "BK_CONFIG_FILE": str(config_path),
+                    "BK_DATA_DIR": str(data_dir),
+                },
+                clear=True,
+            ):
+                configured = load_config()
+
+            self.assertEqual(configured.data_dir, data_dir)
 
     def test_gpu_count_is_auto_detected_when_not_configured(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -136,6 +287,31 @@ class ConfigTests(unittest.TestCase):
 
             with mock.patch.dict("os.environ", {"BK_DATA_DIR": str(data_dir)}, clear=True):
                 with self.assertRaises(OSError):
+                    load_config()
+
+    def test_data_local_config_cannot_redirect_the_ledger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "selected-data"
+            data_dir.mkdir()
+            config_path = data_dir / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "config_version": 1,
+                        "data_dir": str(root / "redirected-data"),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path.chmod(0o600)
+
+            with mock.patch.dict(
+                "os.environ",
+                {"BK_DATA_DIR": str(data_dir)},
+                clear=True,
+            ):
+                with self.assertRaisesRegex(ValueError, "data_dir is only allowed"):
                     load_config()
 
     def test_external_config_file_is_separate_from_shared_data(self):
