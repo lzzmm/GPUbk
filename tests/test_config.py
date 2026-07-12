@@ -40,6 +40,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.worker_recovery_grace_seconds, 5.0)
             self.assertEqual(config.monitor_interval_seconds, 2.0)
             self.assertEqual(config.monitor_rollup_seconds, 60)
+            self.assertEqual(config.tui_refresh_seconds, 1.0)
 
     def test_gpu_count_is_auto_detected_when_not_configured(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -84,6 +85,7 @@ class ConfigTests(unittest.TestCase):
                         "worker_live_guard": False,
                         "monitor_interval_seconds": 5,
                         "monitor_rollup_seconds": 300,
+                        "tui_refresh_seconds": 2.5,
                     }
                 ),
                 encoding="utf-8",
@@ -107,6 +109,7 @@ class ConfigTests(unittest.TestCase):
             self.assertFalse(config.worker_live_guard)
             self.assertEqual(config.monitor_interval_seconds, 5.0)
             self.assertEqual(config.monitor_rollup_seconds, 300)
+            self.assertEqual(config.tui_refresh_seconds, 2.5)
 
     def test_config_file_must_not_be_group_writable(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -329,6 +332,7 @@ class ConfigTests(unittest.TestCase):
                     "BK_DATA_DIR": tmp,
                     "BK_MONITOR_INTERVAL_SECONDS": "2.5",
                     "BK_MONITOR_ROLLUP_SECONDS": "30",
+                    "BK_TUI_REFRESH_SECONDS": "1.5",
                 },
                 clear=True,
             ):
@@ -336,6 +340,7 @@ class ConfigTests(unittest.TestCase):
 
             self.assertEqual(config.monitor_interval_seconds, 2.5)
             self.assertEqual(config.monitor_rollup_seconds, 30)
+            self.assertEqual(config.tui_refresh_seconds, 1.5)
 
     def test_monitor_cadence_rejects_unsafe_or_inexact_windows(self):
         cases = (
@@ -356,6 +361,18 @@ class ConfigTests(unittest.TestCase):
                         "BK_MONITOR_INTERVAL_SECONDS": interval,
                         "BK_MONITOR_ROLLUP_SECONDS": rollup,
                     },
+                    clear=True,
+                ):
+                    with self.assertRaisesRegex(ValueError, message):
+                        load_config()
+
+    def test_tui_refresh_rejects_unbounded_or_nonfinite_values(self):
+        cases = (("0.01", ">= 0.1"), ("61", "<= 60"), ("nan", "finite"))
+        for value, message in cases:
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                with mock.patch.dict(
+                    "os.environ",
+                    {"BK_DATA_DIR": tmp, "BK_TUI_REFRESH_SECONDS": value},
                     clear=True,
                 ):
                     with self.assertRaisesRegex(ValueError, message):

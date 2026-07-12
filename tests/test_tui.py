@@ -43,6 +43,7 @@ from bk.tui import (
     _handle_add_key,
     _handle_key,
     _hour_label,
+    _init_curses,
     _load_edit_state,
     _minute_label,
     _move_focus_down,
@@ -126,6 +127,7 @@ class TuiAddPreviewTests(unittest.TestCase):
             data_dir=Path("/home/example/.local/share/a-very-long-bk-trial-name"),
             gpu_count=8,
             max_shared_users=3,
+            tui_refresh_seconds=2.5,
         )
         width = 72
         title, details = _header_lines(config, self.start, self.start, self.end, width, TuiState())
@@ -134,6 +136,7 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertLessEqual(len(details), width - 1)
         self.assertTrue(title.endswith("5m"), title)
         self.assertTrue(details.endswith("? help"), details)
+        self.assertIn("2.5s refresh", details)
 
         preview = AddPreview(self.start, self.end, (0,), 0, MODE_SHARED, True, blink=True)
         variants = [
@@ -169,6 +172,18 @@ class TuiAddPreviewTests(unittest.TestCase):
                 if key:
                     self.assertLessEqual(len(key), key_width - 2)
                     self.assertLessEqual(len(description), description_width, (key, description))
+
+    def test_curses_timeout_uses_configured_refresh_interval(self):
+        screen = mock.Mock()
+        with (
+            mock.patch("bk.tui.curses.curs_set"),
+            mock.patch("bk.tui.curses.has_colors", return_value=False),
+            mock.patch("bk.tui._apply_tui_theme"),
+        ):
+            _init_curses(screen, 2.5)
+
+        screen.timeout.assert_called_once_with(2500)
+        screen.keypad.assert_called_once_with(True)
 
     def test_theme_auto_detection_supports_dark_light_and_explicit_override(self):
         self.assertEqual(_resolve_tui_theme("auto", "15;0"), "dark")

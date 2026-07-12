@@ -1037,6 +1037,10 @@ def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         f"rollup={effective['monitor_rollup_seconds']}s"
     )
     print(
+        f"display: timeline={effective['timeline_hours']}h "
+        f"tui-refresh={effective['tui_refresh_seconds']}s"
+    )
+    print(
         f"allocator: {'configured' if effective['allocator_command_configured'] else 'builtin'} "
         f"timeout={effective['allocator_timeout_seconds']}s"
     )
@@ -1081,6 +1085,7 @@ def _effective_config(config: Config) -> dict:
         "worker_live_guard": config.worker_live_guard,
         "monitor_interval_seconds": config.monitor_interval_seconds,
         "monitor_rollup_seconds": config.monitor_rollup_seconds,
+        "tui_refresh_seconds": config.tui_refresh_seconds,
         "file_mode": f"{config.file_mode:04o}",
         "dir_mode": f"{config.dir_mode:04o}",
         "allocator_command_configured": config.allocator_command is not None,

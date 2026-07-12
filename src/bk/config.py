@@ -35,6 +35,8 @@ MAX_ALLOCATOR_WEIGHT = 1_000_000
 MIN_MONITOR_INTERVAL_SECONDS = 0.2
 MAX_MONITOR_INTERVAL_SECONDS = 60 * 60
 MAX_MONITOR_ROLLUP_SECONDS = 24 * 60 * 60
+MIN_TUI_REFRESH_SECONDS = 0.1
+MAX_TUI_REFRESH_SECONDS = 60.0
 
 CONFIG_ENV_MAP = {
     "gpu_count": "BK_GPU_COUNT",
@@ -63,6 +65,7 @@ CONFIG_ENV_MAP = {
     "worker_live_guard": "BK_WORKER_LIVE_GUARD",
     "monitor_interval_seconds": "BK_MONITOR_INTERVAL_SECONDS",
     "monitor_rollup_seconds": "BK_MONITOR_ROLLUP_SECONDS",
+    "tui_refresh_seconds": "BK_TUI_REFRESH_SECONDS",
     "file_mode": "BK_FILE_MODE",
     "dir_mode": "BK_DIR_MODE",
 }
@@ -114,6 +117,7 @@ class Config:
     config_file: Optional[Path] = None
     monitor_interval_seconds: float = 2.0
     monitor_rollup_seconds: int = 60
+    tui_refresh_seconds: float = 1.0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "slot_minutes", validate_slot_minutes(self.slot_minutes))
@@ -123,6 +127,11 @@ class Config:
         )
         object.__setattr__(self, "monitor_interval_seconds", interval)
         object.__setattr__(self, "monitor_rollup_seconds", rollup)
+        object.__setattr__(
+            self,
+            "tui_refresh_seconds",
+            validate_tui_refresh_seconds(self.tui_refresh_seconds),
+        )
 
     @property
     def slot_seconds(self) -> int:
@@ -179,6 +188,22 @@ def validate_monitor_timing(
             "monitor_rollup_seconds must be an integer multiple of monitor_interval_seconds"
         )
     return interval, rollup
+
+
+def validate_tui_refresh_seconds(value: object) -> float:
+    if isinstance(value, bool):
+        raise ValueError("tui_refresh_seconds must be a number")
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("tui_refresh_seconds must be a number") from exc
+    if not math.isfinite(parsed):
+        raise ValueError("tui_refresh_seconds must be finite")
+    if parsed < MIN_TUI_REFRESH_SECONDS:
+        raise ValueError(f"tui_refresh_seconds must be >= {MIN_TUI_REFRESH_SECONDS:g}")
+    if parsed > MAX_TUI_REFRESH_SECONDS:
+        raise ValueError(f"tui_refresh_seconds must be <= {MAX_TUI_REFRESH_SECONDS:g}")
+    return parsed
 
 
 def _read_config_file(path: Path, *, required: bool = False) -> Dict[str, Any]:
@@ -462,6 +487,12 @@ def load_config() -> Config:
             "monitor_rollup_seconds",
             60,
             maximum=MAX_MONITOR_ROLLUP_SECONDS,
+        ),
+        tui_refresh_seconds=_float_value(
+            raw,
+            "tui_refresh_seconds",
+            1.0,
+            maximum=MAX_TUI_REFRESH_SECONDS,
         ),
         file_mode=_mode_value(raw, "file_mode", DEFAULT_PRIVATE_FILE_MODE, directory=False),
         dir_mode=_mode_value(raw, "dir_mode", DEFAULT_PRIVATE_DIR_MODE, directory=True),

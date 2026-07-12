@@ -153,6 +153,9 @@ bk t
 | `?` | 打开分页帮助和快速上手说明 |
 | `Enter`、`Esc`、`q` | 提交、取消当前操作或退出 |
 
+TUI 默认每秒刷新一次。较慢终端或希望降低轮询频率时，可在配置中设置
+`tui_refresh_seconds`，或用 `BK_TUI_REFRESH_SECONDS` 覆盖当前环境。
+
 时间轴可以查看过去的预约，但历史只读。Add 和 Edit 提交时，调度器会在文件锁事务内
 再次校验所选时段。预约焦点默认停在标题栏，按下方向键后才选中并闪烁某条预约。
 不超过 10 张 GPU 时，预约表的 `GPU` 列为每张卡保留固定位置，只在预约使用的
@@ -335,6 +338,7 @@ export BK_CONFIG_FILE=/etc/gpubk/config.json
   "worker_live_guard": true,
   "monitor_interval_seconds": 2,
   "monitor_rollup_seconds": 60,
+  "tui_refresh_seconds": 1,
   "file_mode": "0660",
   "dir_mode": "2770"
 }

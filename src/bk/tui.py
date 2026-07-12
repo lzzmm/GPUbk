@@ -103,7 +103,7 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("n", "Jump back to the live NOW window"),
             ("+ / -", "Zoom from finest slice to 1 day per column"),
             ("v", "Cycle the reliable adjustment speed: 1x, 6x, or 24x"),
-            ("r", "Refresh now; auto-refresh already runs every second"),
+            ("r", "Refresh now; auto-refresh uses configured interval"),
             ("c", "Toggle the dark or light color theme"),
             ("", "FOCUS AND ACTIONS"),
             ("Up / Down", "Move through reservations or GPU rows"),
@@ -233,7 +233,7 @@ def run_tui(config: Config, store: LedgerStore) -> int:
 
 
 def _run(stdscr, config: Config, store: LedgerStore) -> int:
-    _init_curses(stdscr)
+    _init_curses(stdscr, config.tui_refresh_seconds)
     state = TuiState(
         booking_slot_minutes=config.slot_minutes,
         add_duration_steps=_default_editor_duration_steps(config.slot_minutes),
@@ -251,9 +251,9 @@ def _run(stdscr, config: Config, store: LedgerStore) -> int:
             state.error = True
 
 
-def _init_curses(stdscr) -> None:
+def _init_curses(stdscr, refresh_seconds: float = 1.0) -> None:
     curses.curs_set(0)
-    stdscr.timeout(1000)
+    stdscr.timeout(max(1, round(refresh_seconds * 1000)))
     stdscr.keypad(True)
     if curses.has_colors():
         curses.start_color()
@@ -332,7 +332,9 @@ def _handle_key(stdscr, key: int, config: Config, store: LedgerStore, state: Tui
         _handle_add_key(key, config, store, state, stdscr=stdscr)
         return
     if key in (ord("r"), ord("R")):
-        state.message = "refreshed now (automatic refresh: 1s)"
+        state.message = (
+            f"refreshed now (automatic refresh: {config.tui_refresh_seconds:g}s)"
+        )
         state.error = False
         return
     if key in (ord("c"), ord("C")):
@@ -683,7 +685,7 @@ def _header_lines(
     )
     wide_details = (
         f" data={config.data_dir} | shared_capacity={config.max_shared_users} units/GPU "
-        "| refresh=1s | n NOW | q quit | ? help"
+        f"| refresh={config.tui_refresh_seconds:g}s | n NOW | q quit | ? help"
     )
     if width >= 100 and len(wide_title) < width and len(wide_details) < width:
         title = wide_title
@@ -693,7 +695,10 @@ def _header_lines(
             f" GPUbk {window_mode} | {_weekday_label(local_now)} {local_now:%m-%d %H:%M:%S} "
             f"| {local_start:%m-%d %H:%M}->{local_end:%m-%d %H:%M} | {state.slot_minutes}m"
         )
-        suffix = f" | cap={config.max_shared_users}u/GPU | 1s refresh | n NOW | ? help"
+        suffix = (
+            f" | cap={config.max_shared_users}u/GPU | "
+            f"{config.tui_refresh_seconds:g}s refresh | n NOW | ? help"
+        )
         path_budget = max(1, width - len(" data=") - len(suffix) - 1)
         details = f" data={_truncate(config.data_dir.name or str(config.data_dir), path_budget)}{suffix}"
     limit = max(0, width - 1)

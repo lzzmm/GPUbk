@@ -163,6 +163,10 @@ Useful TUI keys:
 | `?` | Open the paged help and quick tour |
 | `Enter`, `Esc`, `q` | Submit, cancel the current action, or quit |
 
+The TUI refreshes once per second by default. Set `tui_refresh_seconds` in the
+configuration, or `BK_TUI_REFRESH_SECONDS` for one environment, when a slower
+terminal or lower polling rate is preferred.
+
 The timeline can show past reservations, but history is read-only. Add and Edit
 always validate the selected interval again inside the locked scheduler
 transaction. Reservation focus starts on the header, so no booking blinks until
@@ -370,6 +374,7 @@ group-writable ledger directory:
   "worker_live_guard": true,
   "monitor_interval_seconds": 2,
   "monitor_rollup_seconds": 60,
+  "tui_refresh_seconds": 1,
   "file_mode": "0660",
   "dir_mode": "2770"
 }
