@@ -41,6 +41,10 @@ class GpuAdvisorTests(unittest.TestCase):
             idle["capabilities"],
             {"process_telemetry": True, "process_utilization": True},
         )
+        self.assertEqual(
+            idle["memory"],
+            {"used_mb": 0, "total_mb": 24000, "free_mb": 24000},
+        )
 
     def test_advice_reports_degraded_process_capabilities(self):
         snapshot = GpuSnapshot(

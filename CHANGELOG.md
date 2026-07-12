@@ -4,6 +4,11 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Preserve known zero VRAM usage in Agent context instead of collapsing it into unavailable
+  telemetry, and document the stable zero-versus-null contract.
+- Surface per-UID worker readiness in plain status and the TUI only while a scheduled command may
+  still run, using a read-only rate-limited probe that stops after the job reaches a terminal state;
+  make the TUI refresh key invalidate both monitor and worker status caches immediately.
 - Bind scheduled-command create/edit results to an immediate per-UID worker liveness check, with
   actionable human warnings and the same structured evidence in JSON CLI and MCP responses.
 - Add a read-only, versioned per-UID worker liveness probe backed by the existing kernel lease,

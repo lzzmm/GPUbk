@@ -126,6 +126,11 @@ Narrow terminals
 wrap the timeline at whole-hour boundaries without reducing the requested
 resolution.
 
+When the current UID has a pending, claimed, or running scheduled command,
+`bk st` also reports the private worker's kernel-proven state and warns if the
+command cannot launch. Terminal jobs and ordinary reservations do not trigger
+that private-directory probe.
+
 `bk add` and a flag-free `bk edit ID` are recoverable guided flows. They accept
 the same natural time forms, re-prompt an invalid field, support `back` and
 `cancel`, and show a local-time change summary before writing. An edit cannot
@@ -169,6 +174,11 @@ Useful TUI keys:
 The TUI refreshes once per second by default. Set `tui_refresh_seconds` in the
 configuration, or `BK_TUI_REFRESH_SECONDS` for one environment, when a slower
 terminal or lower polling rate is preferred.
+The header uses `M:` for the shared telemetry collector and `W:` for this UID's
+scheduled-command worker. `W:IDLE` means no current reservation needs automatic
+execution; worker state is checked read-only and at most once every ten seconds
+while a runnable command exists. Press `r` to invalidate both monitor and worker
+status caches immediately.
 
 The timeline can show past reservations, but history is read-only. Add and Edit
 always validate the selected interval again inside the locked scheduler

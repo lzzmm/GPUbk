@@ -4,12 +4,22 @@ import fcntl
 import json
 import os
 from datetime import datetime
-from typing import Optional
+from typing import Iterable, Optional
 
 from .config import MAX_UID, Config
 from .fileio import open_existing_regular
 from .joblogs import WORKER_LEASE_FILENAME, job_log_root, validate_private_directory
-from .models import Actor, BookingError
+from .models import (
+    JOB_CANCELLED,
+    JOB_FAILED,
+    JOB_INTERRUPTED,
+    JOB_MISSED,
+    JOB_SUCCEEDED,
+    JOB_TIMED_OUT,
+    JOB_UNCERTAIN,
+    Actor,
+    BookingError,
+)
 from .timeparse import parse_iso, to_iso, utc_now
 
 
@@ -18,6 +28,31 @@ MAX_WORKER_LEASE_BYTES = 16 * 1024
 MAX_WORKER_ID_LENGTH = 128
 MAX_HOSTNAME_LENGTH = 255
 MAX_PID = 2**31 - 1
+WORKER_TERMINAL_JOB_STATES = frozenset(
+    {
+        JOB_SUCCEEDED,
+        JOB_FAILED,
+        JOB_CANCELLED,
+        JOB_MISSED,
+        JOB_TIMED_OUT,
+        JOB_INTERRUPTED,
+        JOB_UNCERTAIN,
+    }
+)
+
+
+def reservations_need_worker(reservations: Iterable[dict], uid: int) -> bool:
+    """Return whether this UID has a job that may still run automatically."""
+
+    for reservation in reservations:
+        if reservation.get("uid") != uid:
+            continue
+        job = reservation.get("job")
+        if not isinstance(job, dict):
+            continue
+        if job.get("status") not in WORKER_TERMINAL_JOB_STATES:
+            return True
+    return False
 
 
 def inspect_worker_status(

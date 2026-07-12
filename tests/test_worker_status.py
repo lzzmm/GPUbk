@@ -5,8 +5,24 @@ from pathlib import Path
 
 from bk.config import Config
 from bk.joblogs import acquire_job_worker_lease
-from bk.models import Actor
-from bk.worker_status import MAX_WORKER_LEASE_BYTES, inspect_worker_status
+from bk.models import (
+    JOB_CANCELLED,
+    JOB_CLAIMED,
+    JOB_FAILED,
+    JOB_INTERRUPTED,
+    JOB_MISSED,
+    JOB_PENDING,
+    JOB_RUNNING,
+    JOB_SUCCEEDED,
+    JOB_TIMED_OUT,
+    JOB_UNCERTAIN,
+    Actor,
+)
+from bk.worker_status import (
+    MAX_WORKER_LEASE_BYTES,
+    inspect_worker_status,
+    reservations_need_worker,
+)
 
 
 class WorkerStatusTests(unittest.TestCase):
@@ -144,6 +160,31 @@ class WorkerStatusTests(unittest.TestCase):
         self.assertEqual(status["state"], "unavailable")
         self.assertIsNone(status["running"])
         self.assertFalse(self.root.exists())
+
+    def test_only_nonterminal_current_uid_jobs_require_a_worker(self):
+        def item(status, *, uid=self.actor.uid):
+            return {"uid": uid, "job": {"status": status}}
+
+        for status in (JOB_PENDING, JOB_CLAIMED, JOB_RUNNING, "future-state", None):
+            with self.subTest(status=status):
+                self.assertTrue(reservations_need_worker([item(status)], self.actor.uid))
+
+        for status in (
+            JOB_SUCCEEDED,
+            JOB_FAILED,
+            JOB_CANCELLED,
+            JOB_MISSED,
+            JOB_TIMED_OUT,
+            JOB_INTERRUPTED,
+            JOB_UNCERTAIN,
+        ):
+            with self.subTest(status=status):
+                self.assertFalse(reservations_need_worker([item(status)], self.actor.uid))
+
+        self.assertFalse(reservations_need_worker([{"uid": self.actor.uid}], self.actor.uid))
+        self.assertFalse(
+            reservations_need_worker([item(JOB_PENDING, uid=self.actor.uid + 1)], self.actor.uid)
+        )
 
 
 if __name__ == "__main__":

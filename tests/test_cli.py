@@ -1895,7 +1895,9 @@ class CliTests(unittest.TestCase):
                 data_dir,
                 env,
             )
+            status_before = self.run_bk(["status"], data_dir, env)
             worker = self.run_bk(["w", "--once", "--quiet", "--poll", "0.1"], data_dir, env)
+            status_after = self.run_bk(["status"], data_dir, env)
             jobs = self.run_bk(["j"], data_dir, env)
             log = self.run_bk(["jl", "1"], data_dir, env)
             cleanup = self.run_bk(["jobs", "--cleanup", "--json"], data_dir, env)
@@ -1904,7 +1906,13 @@ class CliTests(unittest.TestCase):
             self.assertIn("job: pending", create.stdout)
             self.assertIn("worker: not seen", create.stdout)
             self.assertIn("scheduled command worker is not-seen", create.stderr)
+            self.assertEqual(status_before.returncode, 0, status_before.stderr)
+            self.assertIn("worker: not seen", status_before.stdout)
+            self.assertIn("scheduled command worker is not-seen", status_before.stderr)
             self.assertEqual(worker.returncode, 0, worker.stderr)
+            self.assertEqual(status_after.returncode, 0, status_after.stderr)
+            self.assertNotIn("worker:", status_after.stdout)
+            self.assertNotIn("scheduled command worker", status_after.stderr)
             self.assertEqual(jobs.returncode, 0, jobs.stderr)
             self.assertIn("succeeded", jobs.stdout)
             self.assertIn("CUDA=0", log.stdout)

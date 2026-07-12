@@ -67,6 +67,8 @@ GPUbk sets `CUDA_VISIBLE_DEVICES`; do not add physical GPU IDs to the training c
 - `exists`: the operation ID was already applied; treat this as idempotent success.
 - JSON exit `2`: invalid request or write conflict. Inspect `error.message`.
 - Recommendation exit `3`: no legal exact slot; present `nearest_available` without booking it.
+- Context VRAM values distinguish known zero from unknown: `memory.used_mb=0` means the GPU is
+  known empty, while `null` means telemetry is unavailable. Never coerce one into the other.
 - `uncertain` job: it may have run or produced partial side effects. Inspect `recovery_state`,
   processes, and private logs before using duplicate-risk retry. A recovered `terminated` group is
   still uncertain; never present it as safe automatic retry.

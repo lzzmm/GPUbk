@@ -96,6 +96,7 @@ def _gpu_advice_dict(
 ) -> dict:
     total = snapshot_item.memory_total_mb if snapshot_item is not None else 0
     used = snapshot_item.memory_used_mb if snapshot_item is not None else 0
+    memory_known = total > 0
     return {
         "index": index,
         "name": snapshot_item.name if snapshot_item is not None else "unknown",
@@ -116,9 +117,9 @@ def _gpu_advice_dict(
             "sample_count": historical.sample_count,
         },
         "memory": {
-            "used_mb": used or None,
-            "total_mb": total or None,
-            "free_mb": max(0, total - used) if total else None,
+            "used_mb": used if memory_known else None,
+            "total_mb": total if memory_known else None,
+            "free_mb": max(0, total - used) if memory_known else None,
         },
         "source": snapshot_item.source if snapshot_item is not None else "none",
         "capabilities": {

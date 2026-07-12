@@ -78,7 +78,7 @@ from .worker import (
     retry_job,
     run_worker,
 )
-from .worker_status import inspect_worker_status
+from .worker_status import inspect_worker_status, reservations_need_worker
 
 try:
     import readline  # noqa: F401
@@ -2732,6 +2732,12 @@ def _print_status(
                     f"{_reservation_share_label(reservation, config)}"
                     f"G={_clip_text(gpus, 8):<8} {_compact_local_range(reservation['start_at'], reservation['end_at'])}"
                 )
+    if reservations_need_worker(mine, actor.uid):
+        worker_status = inspect_worker_status(config, actor)
+        print(_worker_status_line(worker_status))
+        worker_warning = scheduled_job_worker_warning(worker_status)
+        if worker_warning:
+            print(f"warning: {worker_warning}", file=sys.stderr)
     if verbose and active:
         others = [item for item in active if int(item.get("uid", -1)) != actor.uid]
         if others:

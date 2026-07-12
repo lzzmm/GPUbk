@@ -57,6 +57,7 @@ from bk.tui import (
     _reservation_color_map,
     _reservation_gpu_text,
     _refresh_collector_status,
+    _refresh_worker_status,
     _resolve_tui_theme,
     _selected_share_detail,
     _shared_weave_pair,
@@ -72,6 +73,7 @@ from bk.tui import (
     _visible_shared_reservations,
     _visible_id_width,
     _weekday_label,
+    _worker_label,
 )
 from bk.timeparse import parse_iso, utc_now
 from bk.usage import ProcessUsage, USAGE_AUTHORIZED, USAGE_UNRESERVED
@@ -140,6 +142,7 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertTrue(details.endswith("? help"), details)
         self.assertIn("2.5s refresh", details)
         self.assertIn("M:--", details)
+        self.assertIn("W:IDLE", details)
 
         preview = AddPreview(self.start, self.end, (0,), 0, MODE_SHARED, True, blink=True)
         variants = [
@@ -163,6 +166,7 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertIn("exactly the selected GPUs", pages["Add / Edit"]["g"])
         self.assertIn("restore", pages["Add / Edit"]["r"])
         self.assertIn("collector health", pages["Timeline"]["Monitor"])
+        self.assertIn("scheduled-command worker", pages["Timeline"]["Worker"])
         self.assertIn("bk u", pages["Quick Tour"])
 
         minimum_window_width = 70
@@ -213,6 +217,53 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertEqual(state.collector_status, payload)
         self.assertEqual(state.collector_checked_at, first + timedelta(seconds=10))
 
+    def test_worker_labels_are_compact_and_defensive(self):
+        self.assertEqual(_worker_label({"state": "idle"}), "IDLE")
+        self.assertEqual(_worker_label({"state": "running", "running": True}), "OK")
+        self.assertEqual(_worker_label({"state": "running", "running": False}), "ERR")
+        self.assertEqual(_worker_label({"state": "not-seen"}), "OFF")
+        self.assertEqual(_worker_label({"state": "stopped"}), "STOP")
+        self.assertEqual(_worker_label({"state": "unavailable"}), "N/A")
+        self.assertEqual(_worker_label({"state": "future-state"}), "ERR")
+        self.assertEqual(_worker_label(None), "ERR")
+
+    def test_worker_status_refresh_is_on_demand_read_only_and_rate_limited(self):
+        config = Config(data_dir=Path("/tmp/bk-tui-worker"), gpu_count=2)
+        state = TuiState()
+        actor = Actor(os.getuid(), "current")
+        first = self.start
+        pending = reservation("scheduled", actor.uid, MODE_SHARED, [0], first, self.end)
+        pending["job"] = {"status": "pending"}
+        payload = {"state": "running", "running": True}
+
+        with mock.patch("bk.tui.inspect_worker_status", return_value=payload) as inspect:
+            _refresh_worker_status(config, state, [pending], actor, first)
+            _refresh_worker_status(
+                config,
+                state,
+                [pending],
+                actor,
+                first + timedelta(seconds=9),
+            )
+            _refresh_worker_status(
+                config,
+                state,
+                [pending],
+                actor,
+                first + timedelta(seconds=10),
+            )
+
+        self.assertEqual(inspect.call_count, 2)
+        inspect.assert_called_with(config, actor, at=first + timedelta(seconds=10))
+        self.assertEqual(state.worker_status, payload)
+        self.assertEqual(state.worker_checked_at, first + timedelta(seconds=10))
+
+        with mock.patch("bk.tui.inspect_worker_status") as inspect_idle:
+            _refresh_worker_status(config, state, [], actor, first + timedelta(seconds=11))
+        inspect_idle.assert_not_called()
+        self.assertEqual(state.worker_status, {"state": "idle", "running": None})
+        self.assertIsNone(state.worker_checked_at)
+
     def test_curses_timeout_uses_configured_refresh_interval(self):
         screen = mock.Mock()
         with (
@@ -224,6 +275,19 @@ class TuiAddPreviewTests(unittest.TestCase):
 
         screen.timeout.assert_called_once_with(2500)
         screen.keypad.assert_called_once_with(True)
+
+    def test_refresh_key_invalidates_monitor_and_worker_caches(self):
+        state = TuiState(
+            collector_checked_at=self.start,
+            worker_checked_at=self.start,
+        )
+
+        _handle_key(mock.Mock(), ord("r"), self.config, mock.Mock(), state)
+
+        self.assertIsNone(state.collector_checked_at)
+        self.assertIsNone(state.worker_checked_at)
+        self.assertIn("refreshed now", state.message)
+        self.assertFalse(state.error)
 
     def test_theme_auto_detection_supports_dark_light_and_explicit_override(self):
         self.assertEqual(_resolve_tui_theme("auto", "15;0"), "dark")

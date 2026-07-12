@@ -32,6 +32,8 @@ Recommendation fields:
   history, and additive `capabilities.process_telemetry` /
   `capabilities.process_utilization` booleans. Treat missing process capability as unknown state,
   never as proof that a GPU has no processes.
+- Context VRAM fields preserve zero: `memory.used_mb=0` is a known empty reading, while `null`
+  means physical memory telemetry is unavailable. Consumers must not merge these states.
 - Context `policy.monitoring` reports the effective sample and rollup cadence; consumers must
   not infer finer telemetry precision. `writer_uid` identifies the configured telemetry role,
   not the Agent caller.
@@ -58,6 +60,8 @@ Recommendation fields:
   `running=true` is a positive liveness result, based on the UID-private kernel lock. `lease`
   metadata is diagnostic and may be absent or stale. `bk worker --status --require-running`
   returns exit 2 for every non-running state without starting a worker or writing storage.
+- Human `bk status` and TUI `W:` inspect that lease only while the current UID has a job that may
+  still run automatically; terminal jobs do not create a stale worker warning.
 
 Create and edit return the same `kind=booking_result` shape through JSON CLI and MCP: `status`, a
 privacy-safe `reservation`, per-GPU `allocation.selected` explanations, allocator source/reason,

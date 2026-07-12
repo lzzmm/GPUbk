@@ -37,6 +37,7 @@ from .storage import LedgerStore
 from .timeparse import format_local_range, parse_iso, parse_memory_mb, utc_now
 from .usage import ProcessUsage, classify_process_usage, summarize_process_command
 from .usage_store import UsageAuditStore
+from .worker_status import inspect_worker_status, reservations_need_worker
 
 
 COLOR_HEADER = 1
@@ -147,6 +148,7 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("GPU focus", "Tab to expand share lanes and live processes"),
             ("Reservation", "Select a row to blink its exact interval"),
             ("Monitor", "Header M shows collector health; details: bk doctor"),
+            ("Worker", "Header W shows your scheduled-command worker"),
             ("Util history", "Run: bk u me, users, samples, or events"),
             ("Live context", "Run: bk agent context --compact"),
             ("Theme", "Auto-detect; set BK_TUI_THEME=dark or light"),
@@ -202,6 +204,10 @@ class TuiState:
         default_factory=lambda: {"state": "not-seen", "fresh": None}
     )
     collector_checked_at: Optional[datetime] = None
+    worker_status: dict = field(
+        default_factory=lambda: {"state": "idle", "running": None}
+    )
+    worker_checked_at: Optional[datetime] = None
 
     @property
     def slot_minutes(self) -> int:
@@ -338,6 +344,8 @@ def _handle_key(stdscr, key: int, config: Config, store: LedgerStore, state: Tui
         _handle_add_key(key, config, store, state, stdscr=stdscr)
         return
     if key in (ord("r"), ord("R")):
+        state.collector_checked_at = None
+        state.worker_checked_at = None
         state.message = (
             f"refreshed now (automatic refresh: {config.tui_refresh_seconds:g}s)"
         )
@@ -543,6 +551,7 @@ def _draw(stdscr, config: Config, store: LedgerStore, state: TuiState) -> None:
     ledger = store.load()
     active_index = ReservationIndex.from_ledger(ledger, now)
     active = active_index.records()
+    _refresh_worker_status(config, state, active, _current_actor(), now)
     state.selected_gpu = min(max(state.selected_gpu, 0), config.gpu_count - 1)
     focused_gpu = state.selected_gpu if state.focus == FOCUS_GPUS and not state.editor_active else None
     selected_id = _timeline_selected_id(active, state)
@@ -692,6 +701,7 @@ def _header_lines(
     )
     wide_details = (
         f" data={config.data_dir} | M:{_collector_label(state.collector_status)} "
+        f"| W:{_worker_label(state.worker_status)} "
         f"| shared_capacity={config.max_shared_users} units/GPU "
         f"| refresh={config.tui_refresh_seconds:g}s | n NOW | q quit | ? help"
     )
@@ -705,6 +715,7 @@ def _header_lines(
         )
         suffix = (
             f" | M:{_collector_label(state.collector_status)} "
+            f"| W:{_worker_label(state.worker_status)} "
             f"| cap={config.max_shared_users}u/GPU | "
             f"{config.tui_refresh_seconds:g}s refresh | n NOW | ? help"
         )
@@ -743,6 +754,40 @@ def _collector_label(status: object) -> str:
         "clock-skew": "CLOCK",
         "topology-mismatch": "TOPO",
         "not-seen": "--",
+    }.get(state, "ERR")
+
+
+def _refresh_worker_status(
+    config: Config,
+    state: TuiState,
+    reservations: Sequence[dict],
+    actor: Actor,
+    now: datetime,
+) -> None:
+    if not reservations_need_worker(reservations, actor.uid):
+        state.worker_status = {"state": "idle", "running": None}
+        state.worker_checked_at = None
+        return
+    if (
+        state.worker_checked_at is not None
+        and now < state.worker_checked_at + timedelta(seconds=10)
+    ):
+        return
+    state.worker_status = inspect_worker_status(config, actor, at=now)
+    state.worker_checked_at = now
+
+
+def _worker_label(status: object) -> str:
+    if not isinstance(status, dict):
+        return "ERR"
+    state = str(status.get("state", "unknown"))
+    if state == "running":
+        return "OK" if status.get("running") is True else "ERR"
+    return {
+        "idle": "IDLE",
+        "not-seen": "OFF",
+        "stopped": "STOP",
+        "unavailable": "N/A",
     }.get(state, "ERR")
 
 
