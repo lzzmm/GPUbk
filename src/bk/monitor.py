@@ -124,6 +124,7 @@ class UsageMonitor:
         self._retention_policy = UsageRetentionPolicy.from_config(config)
         self._reported_sink_warnings = 0
         self._process_telemetry_gap: frozenset[int] = frozenset()
+        self._process_identity_gap: frozenset[int] = frozenset()
         self._process_utilization_gap: frozenset[int] = frozenset()
         self._stable_identifier_gap: frozenset[int] = frozenset()
         self._collector_heartbeat_seconds = max(
@@ -137,6 +138,7 @@ class UsageMonitor:
         self._last_sampled_at = self._started_at
         self._last_devices: Sequence[GpuSnapshot] = ()
         self._last_process_gap: frozenset[int] = frozenset(range(config.gpu_count))
+        self._last_identity_gap: frozenset[int] = frozenset(range(config.gpu_count))
         self._last_utilization_gap: frozenset[int] = frozenset()
         self._last_stable_identifier_gap: frozenset[int] = frozenset(
             range(config.gpu_count)
@@ -155,12 +157,13 @@ class UsageMonitor:
         ledger = self.ledger_store.load()
         warnings = self._maintain_storage(sampled_at)
         devices = self.snapshot_provider(self.config)
-        process_gap, utilization_gap, stable_identifier_gap = _telemetry_capability_gaps(
-            devices, self.config.gpu_count
+        process_gap, identity_gap, utilization_gap, stable_identifier_gap = (
+            _telemetry_capability_gaps(devices, self.config.gpu_count)
         )
         warnings.extend(
             self._telemetry_gap_warnings(
                 process_gap,
+                identity_gap,
                 utilization_gap,
                 stable_identifier_gap,
             )
@@ -191,6 +194,7 @@ class UsageMonitor:
                 sampled_at,
                 devices,
                 process_gap,
+                identity_gap,
                 utilization_gap,
                 stable_identifier_gap,
             )
@@ -211,6 +215,7 @@ class UsageMonitor:
     def _telemetry_gap_warnings(
         self,
         process_gap: frozenset[int],
+        identity_gap: frozenset[int],
         utilization_gap: frozenset[int],
         stable_identifier_gap: frozenset[int],
     ) -> List[str]:
@@ -225,6 +230,18 @@ class UsageMonitor:
             elif self._process_telemetry_gap:
                 warnings.append("process telemetry restored for all configured GPUs")
             self._process_telemetry_gap = process_gap
+        if identity_gap != self._process_identity_gap:
+            if identity_gap:
+                warnings.append(
+                    "process UID attribution unavailable for GPU(s) "
+                    + ",".join(str(gpu) for gpu in sorted(identity_gap))
+                    + "; usage remains unknown and guarded jobs cannot launch safely"
+                )
+            elif self._process_identity_gap:
+                warnings.append(
+                    "process UID attribution restored for all configured GPUs"
+                )
+            self._process_identity_gap = identity_gap
         if utilization_gap != self._process_utilization_gap:
             if utilization_gap:
                 warnings.append(
@@ -253,6 +270,7 @@ class UsageMonitor:
         sampled_at: datetime,
         devices: Sequence[GpuSnapshot],
         process_gap: frozenset[int],
+        identity_gap: frozenset[int],
         utilization_gap: frozenset[int],
         stable_identifier_gap: frozenset[int],
         *,
@@ -262,6 +280,7 @@ class UsageMonitor:
         self._last_sampled_at = sampled_at
         self._last_devices = tuple(devices)
         self._last_process_gap = process_gap
+        self._last_identity_gap = identity_gap
         self._last_utilization_gap = utilization_gap
         self._last_stable_identifier_gap = stable_identifier_gap
         save = getattr(self.audit_store, "save_collector_status", None)
@@ -273,6 +292,7 @@ class UsageMonitor:
         device_status = _collector_devices(devices, self.config.gpu_count)
         degraded = bool(
             process_gap
+            or identity_gap
             or utilization_gap
             or stable_identifier_gap
             or any(not item["device_telemetry"] for item in device_status)
@@ -292,6 +312,7 @@ class UsageMonitor:
                 for item in device_status
             ),
             tuple(sorted(process_gap)),
+            tuple(sorted(identity_gap)),
             tuple(sorted(utilization_gap)),
             tuple(sorted(stable_identifier_gap)),
         )
@@ -319,6 +340,7 @@ class UsageMonitor:
             devices=device_status,
             stable_device_identifier_gap=sorted(stable_identifier_gap),
             process_telemetry_gap=sorted(process_gap),
+            process_identity_gap=sorted(identity_gap),
             process_utilization_gap=sorted(utilization_gap),
         )
         try:
@@ -365,6 +387,7 @@ class UsageMonitor:
                     self._last_sampled_at,
                     self._last_devices,
                     self._last_process_gap,
+                    self._last_identity_gap,
                     self._last_utilization_gap,
                     self._last_stable_identifier_gap,
                     force=True,
@@ -727,9 +750,15 @@ def _process_sample_key(gpu: int, pid: int, start_id: str) -> Tuple[int, int, st
 
 def _telemetry_capability_gaps(
     devices: Sequence[GpuSnapshot], gpu_count: int
-) -> Tuple[frozenset[int], frozenset[int], frozenset[int]]:
+) -> Tuple[
+    frozenset[int],
+    frozenset[int],
+    frozenset[int],
+    frozenset[int],
+]:
     by_index = {device.index: device for device in devices}
     process_gap = set()
+    identity_gap = set()
     utilization_gap = set()
     stable_identifier_gap = set()
     for gpu in range(gpu_count):
@@ -740,12 +769,17 @@ def _telemetry_capability_gaps(
             or not has_process_telemetry(device)
         ):
             process_gap.add(gpu)
-        elif not has_process_utilization(device):
-            utilization_gap.add(gpu)
+            identity_gap.add(gpu)
+        else:
+            if any(process.uid is None for process in device.processes):
+                identity_gap.add(gpu)
+            if not has_process_utilization(device):
+                utilization_gap.add(gpu)
         if device is None or not has_stable_device_identifier(device):
             stable_identifier_gap.add(gpu)
     return (
         frozenset(process_gap),
+        frozenset(identity_gap),
         frozenset(utilization_gap),
         frozenset(stable_identifier_gap),
     )

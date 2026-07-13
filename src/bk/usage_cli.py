@@ -208,6 +208,19 @@ def _print_collector_summary(collector: object) -> None:
     if state in {"running", "degraded", "stale"}:
         age = collector.get("age_seconds")
         detail = f" age={age:g}s" if isinstance(age, (int, float)) else ""
+        if state == "degraded":
+            gaps = []
+            for label, key in (
+                ("stable-id", "stable_device_identifier_gap"),
+                ("process", "process_telemetry_gap"),
+                ("identity", "process_identity_gap"),
+                ("util", "process_utilization_gap"),
+            ):
+                values = collector.get(key)
+                if isinstance(values, list) and values:
+                    gaps.append(f"{label}:{','.join(str(item) for item in values)}")
+            if gaps:
+                detail += " gaps=" + ";".join(gaps)
     elif state == "stopped" and collector.get("stopped_at"):
         try:
             detail = f" at={parse_iso(str(collector['stopped_at'])).astimezone():%m-%d %H:%M:%S}"

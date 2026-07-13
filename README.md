@@ -364,16 +364,20 @@ stop, authorization, and workload changes. It does not append a full snapshot
 every second. Without NVML, GPUbk falls back to `nvidia-smi` for device metrics.
 Because that fallback has no trustworthy process list, GPUbk preserves the last
 observed process state and reports the telemetry gap instead of manufacturing
-stop/start events. The gap and per-process utilization capabilities are exposed
-in monitor warnings and Agent GPU details. Stable CUDA device identifier capability
-is tracked independently as well.
+stop/start events. Process-list and per-process-utilization capabilities are
+exposed in monitor warnings and Agent GPU details. The collector status tracks
+stable CUDA device identifiers and numeric process-UID attribution independently.
 The monitor also atomically updates a small `usage/collector.json` heartbeat.
 Usage JSON, Agent context, `bk doctor`, and the TUI header expose the same states:
 `running`, `degraded`, `stale`, `stopped`, or `topology-mismatch`. A crash becomes
 `stale` after three missed heartbeats; a normal exit becomes `stopped`. In the
 TUI, `M:OK` means a fresh collector and `M:--` means no heartbeat has been recorded.
-Missing stable identifiers make the collector `degraded`, so post-start doctor
-verification cannot pass while guarded scheduled commands would remain blocked.
+Missing stable identifiers or an observed process whose numeric UID cannot be
+resolved make the collector `degraded`, so post-start doctor verification cannot
+pass while guarded scheduled commands would remain blocked. On hosts using
+`hidepid` or containerized `/proc`, grant the selected monitor account only the
+administrator-approved process-visibility group needed for attribution; do not
+run the collector as root merely to clear the gap.
 The default cadence is a 2-second sample folded into 60-second records. Set
 `monitor_interval_seconds` and `monitor_rollup_seconds` in the trusted config to
 tune this for the server; the rollup must be an exact multiple of the sample

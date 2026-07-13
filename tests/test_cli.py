@@ -1016,6 +1016,60 @@ class CliTests(unittest.TestCase):
             )
             self.assertIn("stable identifier gaps=[0]", issue["message"])
 
+    def test_doctor_post_start_rejects_unattributed_gpu_processes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            now = datetime.now(timezone.utc).replace(microsecond=0)
+            UsageAuditStore(data_dir).save_collector_status(
+                collector_document(
+                    monitor_id="monitor-no-process-identity",
+                    status="degraded",
+                    uid=os.getuid(),
+                    pid=4321,
+                    hostname="gpu-host",
+                    heartbeat_interval_seconds=60.0,
+                    sample_interval_seconds=2.0,
+                    rollup_seconds=60,
+                    started_at=now - timedelta(minutes=1),
+                    sampled_at=now,
+                    written_at=now,
+                    devices=[
+                        {
+                            "gpu": 0,
+                            "source": "nvml",
+                            "device_telemetry": True,
+                            "stable_device_identifier": True,
+                            "process_telemetry": True,
+                            "process_utilization": True,
+                        }
+                    ],
+                    stable_device_identifier_gap=[],
+                    process_telemetry_gap=[],
+                    process_identity_gap=[0],
+                    process_utilization_gap=[],
+                )
+            )
+
+            result = self.run_bk(
+                ["doctor", "--require-monitor", "--json", "--strict"],
+                data_dir,
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["collector"]["state"], "degraded")
+            self.assertEqual(payload["collector"]["process_identity_gap"], [0])
+            usage = self.run_bk(["usage"], data_dir)
+            self.assertEqual(usage.returncode, 0, usage.stderr)
+            self.assertIn("collector: degraded", usage.stdout)
+            self.assertIn("gaps=identity:0", usage.stdout)
+            issue = next(
+                item
+                for item in payload["policy_issues"]
+                if item["type"] == "monitor-health"
+            )
+            self.assertIn("process identity gaps=[0]", issue["message"])
+
     def test_doctor_rejects_a_fresh_collector_for_the_wrong_gpu_topology(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

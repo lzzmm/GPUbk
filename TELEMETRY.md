@@ -64,9 +64,12 @@ three heartbeat intervals. The crash path attempts to flush partial rollups,
 but a flush failure never replaces the original collector error. `degraded`
 means collection is alive but at least one
 configured GPU lacks device telemetry, a stable CUDA-compatible identifier, a
-process list, or per-process utilization telemetry. A legacy v1 heartbeat without
-the additive stable-ID capability remains readable but is classified as degraded
-until a current monitor replaces it.
+process list, numeric UID attribution for an observed process, or per-process
+utilization telemetry. A legacy v1 heartbeat without the additive stable-ID or
+process-identity capability remains readable but is classified as degraded until
+a current monitor replaces it. `process_identity_gap` is empty on an idle GPU;
+it becomes populated only when process telemetry is unavailable or a currently
+observed process cannot be attributed.
 `clock-skew`, `invalid`, and `incompatible` remain explicit rather than being
 treated as fresh data. A fresh heartbeat covering a different number of GPUs
 than the active policy is `topology-mismatch` and is also not current. These
@@ -183,6 +186,8 @@ Whole-device utilization cannot be divided accurately among simultaneous shared
 users, so the user API does not manufacture an equal split. CUDA MPS, restricted
 `/proc`, and some containers can also prevent exact process attribution; such
 records remain explicit `unknown` or `unattributed` data rather than guessed data.
+The collector publishes those active gaps through `process_identity_gap`, and a
+strict post-start doctor check rejects the degraded heartbeat.
 If command-line access is restricted but `/proc/<pid>` ownership is visible,
 GPUbk retains the numeric UID with an empty command label instead of discarding
 the known owner. Process command reads are bounded to 4096 bytes.

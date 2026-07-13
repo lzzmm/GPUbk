@@ -185,6 +185,9 @@ class UsageApiTests(unittest.TestCase):
                 for payload in payloads
             )
         )
+        self.assertTrue(
+            all(payload["collector"]["process_identity_gap"] == [] for payload in payloads)
+        )
 
     def test_public_telemetry_facade_is_ui_independent(self):
         store = open_usage_store(self.config)

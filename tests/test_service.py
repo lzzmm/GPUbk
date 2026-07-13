@@ -210,6 +210,8 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(collector["state"], "stale")
         self.assertFalse(collector["fresh"])
         self.assertTrue(collector["topology_match"])
+        self.assertTrue(collector["process_identity_capability_known"])
+        self.assertEqual(collector["process_identity_gap"], [])
 
     def test_context_and_implicit_submission_use_configured_granularity(self):
         config = Config(

@@ -133,11 +133,17 @@ def validate_collector_document(payload: object) -> dict:
             "stable device identifier capability must be present for every GPU or none"
         )
     stable_gap_present = "stable_device_identifier_gap" in payload
+    identity_gap_present = "process_identity_gap" in payload
     if stable_gap_present != all(stable_identifier_fields_present):
         raise CollectorStatusError(
             "stable_device_identifier_gap must accompany per-device stable identifier capabilities"
         )
     process_gap = _gpu_list(payload.get("process_telemetry_gap"), "process_telemetry_gap")
+    identity_gap = (
+        _gpu_list(payload.get("process_identity_gap"), "process_identity_gap")
+        if identity_gap_present
+        else []
+    )
     utilization_gap = _gpu_list(
         payload.get("process_utilization_gap"), "process_utilization_gap"
     )
@@ -152,6 +158,8 @@ def validate_collector_document(payload: object) -> dict:
     device_indices = set(indices)
     if not set(process_gap).issubset(device_indices):
         raise CollectorStatusError("process_telemetry_gap contains an unknown GPU")
+    if not set(identity_gap).issubset(device_indices):
+        raise CollectorStatusError("process_identity_gap contains an unknown GPU")
     if not set(utilization_gap).issubset(device_indices):
         raise CollectorStatusError("process_utilization_gap contains an unknown GPU")
     if not set(stable_identifier_gap).issubset(device_indices):
@@ -159,6 +167,10 @@ def validate_collector_document(payload: object) -> dict:
     if process_gap != expected_process_gap:
         raise CollectorStatusError(
             "process_telemetry_gap must match per-device process telemetry capabilities"
+        )
+    if identity_gap_present and not set(process_gap).issubset(identity_gap):
+        raise CollectorStatusError(
+            "process_identity_gap must include every process telemetry gap"
         )
     if utilization_gap != expected_utilization_gap:
         raise CollectorStatusError(
@@ -176,6 +188,7 @@ def validate_collector_document(payload: object) -> dict:
             )
     derived_degraded = bool(
         process_gap
+        or identity_gap
         or utilization_gap
         or stable_identifier_gap
         or any(not bool(item["device_telemetry"]) for item in devices)
@@ -205,6 +218,7 @@ def classify_collector_document(
     stale_after = max(MIN_STALE_AFTER_SECONDS, heartbeat * STALE_HEARTBEAT_MULTIPLIER)
     reported = str(payload["status"])
     legacy_stable_capability = "stable_device_identifier_gap" not in payload
+    legacy_process_identity = "process_identity_gap" not in payload
     topology_match = expected_gpu_count is None or len(payload["devices"]) == expected_gpu_count
     if raw_age < -MAX_CLOCK_SKEW_SECONDS:
         state = "clock-skew"
@@ -219,7 +233,12 @@ def classify_collector_document(
         state = "topology-mismatch"
         fresh = False
     else:
-        state = "degraded" if legacy_stable_capability and reported == "running" else reported
+        state = (
+            "degraded"
+            if (legacy_stable_capability or legacy_process_identity)
+            and reported == "running"
+            else reported
+        )
         fresh = True
     public_devices = []
     for item in payload["devices"]:
@@ -229,6 +248,11 @@ def classify_collector_document(
     stable_identifier_gap = (
         list(payload["stable_device_identifier_gap"])
         if not legacy_stable_capability
+        else [int(item["gpu"]) for item in payload["devices"]]
+    )
+    process_identity_gap = (
+        list(payload["process_identity_gap"])
+        if not legacy_process_identity
         else [int(item["gpu"]) for item in payload["devices"]]
     )
     result = {
@@ -253,6 +277,8 @@ def classify_collector_document(
         "stable_device_identifier_capability_known": not legacy_stable_capability,
         "stable_device_identifier_gap": stable_identifier_gap,
         "process_telemetry_gap": list(payload["process_telemetry_gap"]),
+        "process_identity_capability_known": not legacy_process_identity,
+        "process_identity_gap": process_identity_gap,
         "process_utilization_gap": list(payload["process_utilization_gap"]),
     }
     if state == "clock-skew":
@@ -302,6 +328,7 @@ def collector_document(
     stable_device_identifier_gap: list[int],
     process_telemetry_gap: list[int],
     process_utilization_gap: list[int],
+    process_identity_gap: Optional[list[int]] = None,
     written_at: Optional[datetime] = None,
     stopped_at: Optional[datetime] = None,
 ) -> dict:
@@ -323,6 +350,11 @@ def collector_document(
         "devices": devices,
         "stable_device_identifier_gap": stable_device_identifier_gap,
         "process_telemetry_gap": process_telemetry_gap,
+        "process_identity_gap": (
+            process_telemetry_gap
+            if process_identity_gap is None
+            else process_identity_gap
+        ),
         "process_utilization_gap": process_utilization_gap,
     }
     validate_collector_document(payload)

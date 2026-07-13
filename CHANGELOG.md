@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Degrade collector health when an observed GPU process cannot be attributed to a numeric UID.
+  The additive `process_identity_gap` field reaches doctor, Agent, TUI, and usage APIs; legacy v1
+  heartbeats remain readable but are conservative until a current monitor replaces them.
 - Add `bk doctor --require-worker` for a read-only, instance-bound deployment check of the
   current UID's scheduled-command worker. Doctor JSON now includes the privacy-safe worker status,
   while ordinary checks do not require the optional per-user service.

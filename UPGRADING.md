@@ -82,8 +82,8 @@ Restart every worker after upgrading. A lease written by an older worker has no
 data-directory instance binding, so current clients intentionally report it as
 `unverified` until the worker restarts and rewrites the lease.
 Restart the monitor during this upgrade. A legacy `gpubk.collector.v1` heartbeat
-without the additive stable-device-identifier capability is intentionally shown
-as degraded until the current monitor replaces it.
+without the additive stable-device-identifier or process-identity capability is
+intentionally shown as degraded until the current monitor replaces it.
 After starting the services, verify the monitor with
 `bk doctor --require-monitor --strict` and each user's worker with
 `bk doctor --require-worker --strict`.

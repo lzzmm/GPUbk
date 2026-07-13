@@ -41,6 +41,7 @@ class CollectorStatusTests(unittest.TestCase):
             "devices": self.devices,
             "stable_device_identifier_gap": [],
             "process_telemetry_gap": [],
+            "process_identity_gap": [],
             "process_utilization_gap": [],
         }
         values.update(overrides)
@@ -58,6 +59,8 @@ class CollectorStatusTests(unittest.TestCase):
         self.assertTrue(fresh["fresh"])
         self.assertTrue(fresh["stable_device_identifier_capability_known"])
         self.assertEqual(fresh["stable_device_identifier_gap"], [])
+        self.assertTrue(fresh["process_identity_capability_known"])
+        self.assertEqual(fresh["process_identity_gap"], [])
         self.assertEqual(stale["state"], "stale")
         self.assertFalse(stale["fresh"])
         self.assertEqual(stale["reported_status"], "running")
@@ -97,6 +100,19 @@ class CollectorStatusTests(unittest.TestCase):
         self.assertEqual(status["stable_device_identifier_gap"], [0])
         self.assertFalse(status["devices"][0]["stable_device_identifier"])
 
+    def test_legacy_status_without_process_identity_capability_is_degraded(self):
+        payload = self.document()
+        payload.pop("process_identity_gap")
+
+        self.assertIs(validate_collector_document(payload), payload)
+        status = classify_collector_document(payload, now=self.now)
+
+        self.assertEqual(status["reported_status"], "running")
+        self.assertEqual(status["state"], "degraded")
+        self.assertTrue(status["fresh"])
+        self.assertFalse(status["process_identity_capability_known"])
+        self.assertEqual(status["process_identity_gap"], [0])
+
     def test_large_future_timestamp_is_reported_as_clock_skew(self):
         payload = self.document()
 
@@ -134,10 +150,27 @@ class CollectorStatusTests(unittest.TestCase):
             )
         ]
         false_running["process_telemetry_gap"] = [0]
+        false_running["process_identity_gap"] = [0]
         cases.append((false_running, "running collector status contains degraded"))
         mismatched_gap = self.document()
         mismatched_gap["process_telemetry_gap"] = [0]
         cases.append((mismatched_gap, "must match per-device process telemetry"))
+        missing_identity_dependency = self.document()
+        missing_identity_dependency["status"] = "degraded"
+        missing_identity_dependency["devices"] = [
+            dict(
+                self.devices[0],
+                process_telemetry=False,
+                process_utilization=False,
+            )
+        ]
+        missing_identity_dependency["process_telemetry_gap"] = [0]
+        cases.append(
+            (
+                missing_identity_dependency,
+                "process_identity_gap must include every process telemetry gap",
+            )
+        )
         mismatched_identifier_gap = self.document()
         mismatched_identifier_gap["stable_device_identifier_gap"] = [0]
         cases.append(
@@ -167,6 +200,7 @@ class CollectorStatusTests(unittest.TestCase):
             )
         ]
         impossible_identifier["process_telemetry_gap"] = [0]
+        impossible_identifier["process_identity_gap"] = [0]
         cases.append((impossible_identifier, "stable_device_identifier requires"))
         bad_order = self.document()
         bad_order["sampled_at"] = "2029-12-31T11:00:00Z"
@@ -188,7 +222,28 @@ class CollectorStatusTests(unittest.TestCase):
             self.document(
                 devices=[degraded_device],
                 process_telemetry_gap=[0],
+                process_identity_gap=[0],
             )
+
+    def test_builder_infers_identity_gap_from_missing_process_telemetry(self):
+        degraded_device = dict(
+            self.devices[0],
+            process_telemetry=False,
+            process_utilization=False,
+        )
+
+        payload = self.document(
+            status="degraded",
+            devices=[degraded_device],
+            process_telemetry_gap=[0],
+            process_identity_gap=None,
+        )
+
+        self.assertEqual(payload["process_identity_gap"], [0])
+
+    def test_builder_rejects_unattributed_processes_marked_running(self):
+        with self.assertRaisesRegex(CollectorStatusError, "running collector status"):
+            self.document(process_identity_gap=[0])
 
     def test_builder_rejects_missing_stable_identifier_marked_running(self):
         degraded_device = dict(

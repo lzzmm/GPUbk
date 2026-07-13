@@ -41,6 +41,10 @@ Supported security boundaries:
   PID, hostname, timestamps, and digest text are diagnostics only.
 - Scheduled jobs re-check live process authorization and physical VRAM immediately before
   launch; this reduces races but cannot replace kernel device access control.
+- A process listed by NVML without a readable numeric UID is never treated as authorized. The
+  collector publishes `process_identity_gap`, guarded launches fail closed, and strict monitor
+  verification remains degraded until attribution recovers. Prefer a narrowly assigned procfs
+  visibility group over running the monitor as root.
 - Scheduled process groups receive TERM during the configured final grace window and KILL at the
   reservation deadline, so graceful shutdown time is charged to the current booking rather than
   leaking into the next one. Cancellation and worker shutdown use a bounded post-event grace.
@@ -92,8 +96,9 @@ Supported security boundaries:
   from bypassing GPUbk and modifying group-writable files directly.
 - `usage/collector.json` is an atomic, versioned liveness hint. Its PID, hostname, and
   freshness are operator diagnostics, not proof of identity, authorization, or lock ownership;
-  its capability gaps include stable device identifiers as well as process telemetry. A group
-  member who can modify the data directory can also replace this advisory file.
+  its capability gaps include stable device identifiers, process telemetry, and numeric process
+  identity attribution. A group member who can modify the data directory can also replace this
+  advisory file.
 - Fatal collector exits never overwrite the last heartbeat with a graceful `stopped` state.
   Partial rollups are flushed best-effort, the original error remains the service exit cause,
   and the kernel-backed single-writer lease is released in all cases.

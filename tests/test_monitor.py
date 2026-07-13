@@ -637,6 +637,83 @@ class UsageMonitorTests(unittest.TestCase):
                 restored_sample.warnings,
             )
 
+    def test_process_identity_gap_degrades_and_recovers_without_false_authorization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self.write_ledger(data_dir, [])
+            config = Config(data_dir=data_dir, gpu_count=1)
+            audit_store = UsageAuditStore(data_dir)
+            unknown = GpuProcessSnapshot(
+                4321,
+                None,
+                "?",
+                "python hidden.py",
+                2048,
+                50,
+                host_start_id="hidden-start",
+            )
+            current = [
+                GpuSnapshot(
+                    0,
+                    "gpu0",
+                    memory_total_mb=24576,
+                    processes=(unknown,),
+                    source="nvml",
+                    process_telemetry_available=True,
+                    process_utilization_available=True,
+                    device_uuid="GPU-00000000-0000-0000-0000-000000000000",
+                )
+            ]
+            monitor = UsageMonitor(
+                config,
+                LedgerStore(data_dir),
+                audit_store,
+                snapshot_provider=lambda _config: current,
+            )
+
+            degraded_sample = monitor.collect(self.now)
+            degraded = audit_store.load_collector_status(now=self.now)
+            degraded_state = audit_store.load_state()
+            known = GpuProcessSnapshot(
+                4321,
+                1001,
+                "alice",
+                "python hidden.py",
+                2048,
+                50,
+                host_start_id="hidden-start",
+            )
+            current[0] = GpuSnapshot(
+                0,
+                "gpu0",
+                memory_total_mb=24576,
+                processes=(known,),
+                source="nvml",
+                process_telemetry_available=True,
+                process_utilization_available=True,
+                device_uuid="GPU-00000000-0000-0000-0000-000000000000",
+            )
+            restored_sample = monitor.collect(self.now + timedelta(seconds=2))
+            restored = audit_store.load_collector_status(
+                now=self.now + timedelta(seconds=2)
+            )
+
+            self.assertEqual(degraded["state"], "degraded")
+            self.assertEqual(degraded["process_telemetry_gap"], [])
+            self.assertEqual(degraded["process_identity_gap"], [0])
+            self.assertEqual(len(degraded_state), 1)
+            self.assertEqual(next(iter(degraded_state.values()))["status"], "unknown")
+            self.assertIsNone(next(iter(degraded_state.values()))["uid"])
+            self.assertTrue(
+                any("UID attribution unavailable" in item for item in degraded_sample.warnings)
+            )
+            self.assertEqual(restored["state"], "running")
+            self.assertEqual(restored["process_identity_gap"], [])
+            self.assertIn(
+                "process UID attribution restored for all configured GPUs",
+                restored_sample.warnings,
+            )
+
     def test_collector_heartbeat_failure_is_deduplicated_and_recovers(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

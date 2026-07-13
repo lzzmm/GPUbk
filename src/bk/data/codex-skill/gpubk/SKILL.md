@@ -125,8 +125,8 @@ evidence of unattended command execution.
   degraded, stale, stopped, topology-mismatched, missing, or invalid collector is never proof
   that a GPU is idle.
 - For unattended commands, also require an empty
-  `policy.monitoring.collector.stable_device_identifier_gap`; a fresh degraded collector is not
-  sufficient.
+  `policy.monitoring.collector.stable_device_identifier_gap` and
+  `policy.monitoring.collector.process_identity_gap`; a fresh degraded collector is not sufficient.
 - Do not delete journal or lock files manually.
 - Do not enable a worker, monitor, or service on a shared server without the user's or administrator's approval.
 - Do not disable `worker_live_guard` merely to make a scheduled command start sooner.

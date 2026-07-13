@@ -66,8 +66,9 @@ replacing an uploaded file.
 8. Run bounded read-only NVML/context/recommendation checks on a real multi-GPU host with an
    isolated `BK_DATA_DIR`. Confirm every GPU reports
    `capabilities.stable_device_identifier=true`; after one bounded `bk monitor --once` sample,
-   confirm `collector.stable_device_identifier_gap=[]`. Do not start workloads or services during
-   release validation.
+   confirm `collector.stable_device_identifier_gap=[]` and
+   `collector.process_identity_gap=[]`. Do not start workloads or services during release
+   validation.
 9. Commit and push the release metadata through a pull request, wait for `CI` to pass, and merge it to `main`. Create the annotated tag from that exact `main` commit:
 
    ```bash
