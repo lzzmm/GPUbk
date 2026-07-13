@@ -43,7 +43,7 @@ mcp = ["mcp>=1.28.1,<2"]
 all = ["nvidia-ml-py>=12", "mcp>=1.28.1,<2"]
 
 [project.scripts]
-bk = "bk.cli:main"
+bk = "bk.entrypoint:main"
 bk-mcp = "bk.mcp_server:main"
 
 [tool.setuptools.packages.find]

@@ -1,9 +1,12 @@
 import hashlib
 import re
 import runpy
+import subprocess
+import sys
 import unittest
 from pathlib import Path
 
+from bk import __version__
 from bk.systemd import system_unit_text
 
 
@@ -53,7 +56,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
 
         self.assertRegex(pyproject, r'(?m)^name = "gpubk"$')
-        self.assertRegex(pyproject, r'(?m)^bk = "bk\.cli:main"$')
+        self.assertRegex(pyproject, r'(?m)^bk = "bk\.entrypoint:main"$')
 
         public_files = [
             ROOT / "README.md",
@@ -68,6 +71,24 @@ class ReleaseConfigurationTests(unittest.TestCase):
             text = path.read_text(encoding="utf-8")
             self.assertNotIn(old_distribution, text, str(path.relative_to(ROOT)))
             self.assertNotIn(old_skill, text, str(path.relative_to(ROOT)))
+
+    def test_version_entrypoint_does_not_import_the_full_cli(self):
+        code = (
+            "import sys\n"
+            "from bk.entrypoint import main\n"
+            "result = main(['--version'])\n"
+            "raise SystemExit(0 if result == 0 and 'bk.cli' not in sys.modules else 1)\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, f"bk {__version__}\n")
 
     def test_default_readme_is_english_with_a_packaged_chinese_guide(self):
         english = (ROOT / "README.md").read_text(encoding="utf-8")

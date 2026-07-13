@@ -4,6 +4,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Keep version queries on a small process entrypoint instead of importing scheduling, monitoring,
+  worker, and TUI modules before printing the package version.
 - Tighten the compact TUI with aligned GPU capacity/utilization/VRAM fields, responsive action
   hints, cursor-following GPU and reservation views, and read-only details for any visible
   reservation.
