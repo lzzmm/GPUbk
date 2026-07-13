@@ -93,6 +93,49 @@ jobs:
           BK_DATA_DIR=/tmp/gpubk-release-data BK_GPU_COUNT=2 \
             /tmp/gpubk-release-smoke/bin/bk agent context --compact > /tmp/gpubk-release-context.json
           test ! -e /tmp/gpubk-release-data
+      - name: Smoke-test upgrade from last public release
+        shell: bash
+        env:
+          BK_DATA_DIR: /tmp/gpubk-upgrade-data
+          BK_GPU_COUNT: "2"
+          BK_MAX_SHARED_USERS: "4"
+          LAST_PUBLIC_VERSION: "0.1.0"
+        run: |
+          python -m venv /tmp/gpubk-upgrade-smoke
+          upgrade_python=/tmp/gpubk-upgrade-smoke/bin/python
+          upgrade_bk=/tmp/gpubk-upgrade-smoke/bin/bk
+          "$upgrade_python" -m pip install --no-deps "gpubk==$LAST_PUBLIC_VERSION"
+          "$upgrade_bk" 1 10m --json > /tmp/gpubk-upgrade-old-booking.json
+          before=$(sha256sum "$BK_DATA_DIR/ledger.json" "$BK_DATA_DIR/ops.log")
+
+          "$upgrade_python" -m pip install --no-deps --upgrade dist/*.whl
+          test "$("$upgrade_bk" --version)" = "bk ${{ steps.package.outputs.version }}"
+          "$upgrade_bk" list --json > /tmp/gpubk-upgrade-old-list.json
+          "$upgrade_bk" doctor --json > /tmp/gpubk-upgrade-doctor.json
+          after=$(sha256sum "$BK_DATA_DIR/ledger.json" "$BK_DATA_DIR/ops.log")
+          test "$before" = "$after"
+
+          "$upgrade_bk" 1 10m --gpu 0 --share 2 --json \
+            > /tmp/gpubk-upgrade-new-booking.json
+          "$upgrade_bk" list --json > /tmp/gpubk-upgrade-final-list.json
+          "$upgrade_python" - <<'PY'
+          import json
+          from pathlib import Path
+
+          def load(name):
+              return json.loads(Path(name).read_text(encoding="utf-8"))
+
+          old = load("/tmp/gpubk-upgrade-old-list.json")["reservations"]
+          doctor = load("/tmp/gpubk-upgrade-doctor.json")
+          new = load("/tmp/gpubk-upgrade-new-booking.json")["reservation"]
+          final = load("/tmp/gpubk-upgrade-final-list.json")["reservations"]
+          if len(old) != 1 or old[0]["share_units_per_gpu"] != 1:
+              raise SystemExit(f"legacy booking was not preserved: {old!r}")
+          if old[0]["share_capacity_units_per_gpu"] != 4 or not doctor["healthy"]:
+              raise SystemExit(f"legacy ledger failed read-only validation: {doctor!r}")
+          if new["share_units_per_gpu"] != 2 or len(final) != 2:
+              raise SystemExit(f"upgraded ledger rejected a weighted write: {final!r}")
+          PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: python-package-distributions

@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Exercise the real update path in every release build by creating a ledger with the latest public
+  package, installing the candidate wheel over it, proving read-only compatibility, and performing
+  a new weighted-capacity write.
 - Keep version queries on a small process entrypoint instead of importing scheduling, monitoring,
   worker, and TUI modules before printing the package version.
 - Tighten the compact TUI with aligned GPU capacity/utilization/VRAM fields, responsive action
