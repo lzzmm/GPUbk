@@ -1,0 +1,17 @@
+{
+  "created_at": "2030-01-01T00:00:00Z",
+  "features": [
+    "daily-partitions",
+    "compact-json-objects",
+    "gzip-closed-partitions",
+    "partition-checksums",
+    "workload-dictionary"
+  ],
+  "format": "gpubk.usage",
+  "format_major": 1,
+  "format_minor": 0,
+  "min_reader_major": 1,
+  "min_reader_minor": 0,
+  "min_writer_major": 1,
+  "min_writer_minor": 0
+}

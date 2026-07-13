@@ -1,4 +1,4 @@
 interface:
-  display_name: "GPUbk"
+  display_name: "GPUBK"
   short_description: "Plan and manage safe GPU reservations"
   default_prompt: "Use $gpubk to inspect GPU availability and recommend a safe reservation for my experiment."

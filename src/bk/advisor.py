@@ -5,7 +5,13 @@ from datetime import datetime
 from typing import Dict, List, Optional, Sequence
 
 from .config import Config
-from .gpu import GpuSnapshot, snapshot
+from .gpu import (
+    GpuSnapshot,
+    has_process_telemetry,
+    has_process_utilization,
+    has_stable_device_identifier,
+    snapshot,
+)
 from .monitor import UsageAuditStore
 from .timeparse import to_iso, utc_now
 from .usage import (
@@ -68,9 +74,15 @@ def build_gpu_advice(
             config.lock_timeout_seconds,
             config.file_mode,
             config.dir_mode,
+            config.storage_gid,
         ).load_load_history()
     live = assess_gpu_live_states(devices, config.gpu_count)
-    historical = historical_gpu_loads(history, config.gpu_count, generated_at)
+    historical = historical_gpu_loads(
+        history,
+        config.gpu_count,
+        generated_at,
+        window_minutes=config.usage_load_window_minutes,
+    )
     scores = combined_gpu_scores(live, historical)
     return GpuAdvice(
         generated_at=generated_at,
@@ -91,6 +103,7 @@ def _gpu_advice_dict(
 ) -> dict:
     total = snapshot_item.memory_total_mb if snapshot_item is not None else 0
     used = snapshot_item.memory_used_mb if snapshot_item is not None else 0
+    memory_known = total > 0
     return {
         "index": index,
         "name": snapshot_item.name if snapshot_item is not None else "unknown",
@@ -111,9 +124,21 @@ def _gpu_advice_dict(
             "sample_count": historical.sample_count,
         },
         "memory": {
-            "used_mb": used or None,
-            "total_mb": total or None,
-            "free_mb": max(0, total - used) if total else None,
+            "used_mb": used if memory_known else None,
+            "total_mb": total if memory_known else None,
+            "free_mb": max(0, total - used) if memory_known else None,
         },
         "source": snapshot_item.source if snapshot_item is not None else "none",
+        "capabilities": {
+            "stable_device_identifier": bool(
+                snapshot_item is not None
+                and has_stable_device_identifier(snapshot_item)
+            ),
+            "process_telemetry": bool(
+                snapshot_item is not None and has_process_telemetry(snapshot_item)
+            ),
+            "process_utilization": bool(
+                snapshot_item is not None and has_process_utilization(snapshot_item)
+            ),
+        },
     }

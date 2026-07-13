@@ -8,12 +8,13 @@ import subprocess
 import time
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from .advisor import GpuAdvice
 from .config import Config
 from .models import Actor
 from .scheduler import list_active
+from .sharing import reservation_share_units
 from .storage import LedgerStore
 from .timeparse import to_iso
 
@@ -44,6 +45,8 @@ def apply_external_allocator(
     start_at: datetime,
     mode: str,
     expected_memory_mb: Optional[int],
+    share_units: int = 1,
+    excluded_gpus: Optional[Sequence[int]] = None,
 ) -> AllocatorDecision:
     if not config.allocator_command:
         return AllocatorDecision(list(advice.order), dict(advice.scores), "builtin")
@@ -57,6 +60,8 @@ def apply_external_allocator(
         start_at=start_at,
         mode=mode,
         expected_memory_mb=expected_memory_mb,
+        share_units=share_units,
+        excluded_gpus=excluded_gpus,
     )
     try:
         returncode, stdout, stderr = _run_allocator_process(
@@ -151,7 +156,7 @@ def _run_allocator_process(argv: List[str], payload: str, timeout_seconds: float
         returncode = process.wait(timeout=remaining)
         _kill_allocator_process_group(process)
         return returncode, stdout.decode("utf-8"), stderr.decode("utf-8", errors="replace")
-    except Exception:
+    except BaseException:
         _kill_allocator_process_group(process)
         raise
     finally:
@@ -207,6 +212,8 @@ def _allocator_payload(
     start_at: datetime,
     mode: str,
     expected_memory_mb: Optional[int],
+    share_units: int,
+    excluded_gpus: Optional[Sequence[int]] = None,
 ) -> dict:
     reservations = list_active(store.load(), start_at)
     return {
@@ -220,10 +227,19 @@ def _allocator_payload(
             "start_at": to_iso(start_at),
             "mode": mode,
             "expected_memory_mb_per_gpu": expected_memory_mb,
+            "share_units_per_gpu": share_units if mode == "shared" else None,
+            "excluded_gpus": list(excluded_gpus or ()),
         },
         "policy": {
             "gpu_count": config.gpu_count,
+            "enabled_gpus": list(config.enabled_gpus),
+            "disabled_gpus": list(config.disabled_gpus),
+            "gpu_priority": {
+                str(gpu): priority for gpu, priority in config.gpu_priority
+            },
+            "granularity_minutes": config.slot_minutes,
             "max_shared_reservations_per_gpu": config.max_shared_users,
+            "shared_capacity_units_per_gpu": config.max_shared_users,
             "shared_memory_reserve_mb": config.shared_memory_reserve_mb,
             "local_score_is_authoritative_for_safety": True,
             "allocator_weight": config.allocator_weight,
@@ -237,12 +253,18 @@ def _allocator_payload(
                 "start_at": item.get("start_at"),
                 "end_at": item.get("end_at"),
                 "expected_memory_mb_per_gpu": item.get("expected_memory_mb"),
+                "share_units_per_gpu": (
+                    reservation_share_units(item, config.max_shared_users)
+                    if item.get("mode") == "shared"
+                    else None
+                ),
             }
             for item in reservations
         ],
         "response_contract": {
             "schema_version": ALLOCATOR_SCHEMA_VERSION,
             "gpu_order": "permutation of every configured GPU index",
+            "eligibility": "disabled and request-excluded GPUs are never selectable",
             "reason": "optional privacy-safe text, max 500 chars",
         },
     }

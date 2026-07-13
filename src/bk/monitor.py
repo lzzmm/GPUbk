@@ -4,30 +4,76 @@ import hashlib
 import json
 import os
 import signal
-import tempfile
+import socket
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Dict, Iterable, Iterator, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from .config import Config
-from .fileio import ensure_directory, open_existing_regular, open_or_create_regular
-from .gpu import GpuSnapshot, snapshot
+from .collector_status import collector_document, safe_hostname
+from .config import Config, validate_monitor_timing
+from .gpu import (
+    GpuSnapshot,
+    has_process_telemetry,
+    has_process_utilization,
+    has_stable_device_identifier,
+    snapshot,
+)
+from .models import BookingError
+from .policy import DaemonPolicyError, PolicyGuardedLedgerStore
 from .scheduler import list_active
-from .storage import FileLock, LedgerStore
+from .storage import LedgerStore
 from .timeparse import parse_iso, to_iso, utc_now
+from .usage_store import TelemetrySink, UsageAuditStore, UsageRetentionPolicy
 from .usage import (
     GPU_LIVE_BUSY,
+    USAGE_SYSTEM,
     ProcessUsage,
     assess_gpu_live_states,
     classify_process_usage,
     summarize_process_command,
 )
+from .workload import describe_workload
 
 
 SnapshotProvider = Callable[[Config], List[GpuSnapshot]]
+MONITOR_BUSY_EXIT_CODE = 75
+MONITOR_AUTH_EXIT_CODE = 77
+
+
+class MonitorBusyError(BookingError):
+    pass
+
+
+class MonitorAuthorizationError(BookingError):
+    pass
+
+
+def monitor_configuration_error(config: Config) -> Optional[str]:
+    if not config.dir_mode & 0o022:
+        return None
+    if config.config_file is None:
+        return "shared monitor requires a trusted external or system configuration file"
+    if config.config_owner_uid != 0:
+        return "shared monitor requires a root-owned configuration file"
+    if config.monitor_uid is None:
+        return "shared monitor requires monitor_uid in the trusted configuration"
+    return None
+
+
+def authorize_monitor(config: Config, uid: Optional[int] = None) -> int:
+    configuration_error = monitor_configuration_error(config)
+    if configuration_error:
+        raise MonitorAuthorizationError(configuration_error)
+    current_uid = os.getuid() if uid is None else uid
+    if config.monitor_uid is not None and current_uid != config.monitor_uid:
+        raise MonitorAuthorizationError(
+            f"monitor is assigned to UID {config.monitor_uid}; current UID is {current_uid}"
+        )
+    return current_uid
 
 
 @dataclass(frozen=True)
@@ -38,149 +84,7 @@ class MonitorSample:
     violation_count: int
     events: Tuple[dict, ...]
     rollups_flushed: int
-
-
-class UsageAuditStore:
-    def __init__(
-        self,
-        data_dir: Path,
-        lock_timeout_seconds: float = 10.0,
-        file_mode: int = 0o600,
-        dir_mode: int = 0o700,
-    ):
-        self.data_dir = data_dir
-        self.lock_timeout_seconds = lock_timeout_seconds
-        self.file_mode = file_mode
-        self.dir_mode = dir_mode
-        self.lock_path = data_dir / "usage.lock"
-        self.state_path = data_dir / "usage-state.json"
-        self.events_path = data_dir / "usage-events.jsonl"
-        self.rollups_path = data_dir / "usage-rollups.jsonl"
-        self.load_path = data_dir / "usage-load.json"
-
-    def ensure(self) -> None:
-        ensure_directory(self.data_dir, self.dir_mode)
-
-    def lock(self) -> FileLock:
-        self.ensure()
-        return FileLock(self.lock_path, self.lock_timeout_seconds, self.file_mode, self.dir_mode)
-
-    def load_state(self) -> Dict[str, dict]:
-        if not self.state_path.exists():
-            return {}
-        try:
-            fd = open_existing_regular(self.state_path)
-            with os.fdopen(fd, "r", encoding="utf-8") as fh:
-                payload = json.load(fh)
-            if payload.get("version") != 1 or not isinstance(payload.get("processes"), dict):
-                return {}
-            return payload["processes"]
-        except (OSError, ValueError, json.JSONDecodeError):
-            return {}
-
-    def save_state(self, processes: Dict[str, dict]) -> None:
-        self.ensure()
-        payload = json.dumps(
-            {"version": 1, "processes": processes},
-            ensure_ascii=False,
-            indent=2,
-            sort_keys=True,
-        ) + "\n"
-        fd, tmp_name = tempfile.mkstemp(prefix=".usage-state.", suffix=".tmp", dir=str(self.data_dir))
-        tmp_path = Path(tmp_name)
-        try:
-            os.fchmod(fd, self.file_mode)
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(payload)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp_path, self.state_path)
-            _fsync_dir(self.data_dir)
-        finally:
-            tmp_path.unlink(missing_ok=True)
-
-    def append_events(self, events: Iterable[dict]) -> int:
-        return self._append_jsonl(self.events_path, events)
-
-    def append_rollups(self, rollups: Iterable[dict]) -> int:
-        return self._append_jsonl(self.rollups_path, rollups)
-
-    def recent_events(self, limit: int = 20) -> List[dict]:
-        return self._recent_jsonl(self.events_path, limit)
-
-    def recent_rollups(self, limit: int = 20) -> List[dict]:
-        return self._recent_jsonl(self.rollups_path, limit)
-
-    def load_load_history(self) -> dict:
-        if not self.load_path.exists():
-            return {"version": 1, "updated_at": None, "gpus": {}}
-        try:
-            fd = open_existing_regular(self.load_path)
-            with os.fdopen(fd, "r", encoding="utf-8") as fh:
-                payload = json.load(fh)
-            if payload.get("version") != 1 or not isinstance(payload.get("gpus"), dict):
-                raise ValueError("invalid load history")
-            return payload
-        except (OSError, ValueError, json.JSONDecodeError):
-            return {"version": 1, "updated_at": None, "gpus": {}}
-
-    def save_load_history(self, history: dict) -> None:
-        self.ensure()
-        payload = json.dumps(history, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-        fd, tmp_name = tempfile.mkstemp(prefix=".usage-load.", suffix=".tmp", dir=str(self.data_dir))
-        tmp_path = Path(tmp_name)
-        try:
-            os.fchmod(fd, self.file_mode)
-            with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                fh.write(payload)
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp_path, self.load_path)
-            _fsync_dir(self.data_dir)
-        finally:
-            tmp_path.unlink(missing_ok=True)
-
-    def clear_unlocked(self) -> dict:
-        result = {
-            "usage_events": _line_count(self.events_path),
-            "usage_rollups": _line_count(self.rollups_path),
-            "usage_state": 1 if self.state_path.exists() else 0,
-            "usage_load": 1 if self.load_path.exists() else 0,
-        }
-        self.events_path.unlink(missing_ok=True)
-        self.rollups_path.unlink(missing_ok=True)
-        self.state_path.unlink(missing_ok=True)
-        self.load_path.unlink(missing_ok=True)
-        return result
-
-    def _append_jsonl(self, path: Path, records: Iterable[dict]) -> int:
-        items = list(records)
-        if not items:
-            return 0
-        self.ensure()
-        fd = open_or_create_regular(path, os.O_WRONLY | os.O_APPEND, self.file_mode)
-        with os.fdopen(fd, "a", encoding="utf-8") as fh:
-            for item in items:
-                fh.write(json.dumps(item, ensure_ascii=False, sort_keys=True) + "\n")
-            fh.flush()
-            os.fsync(fh.fileno())
-        return len(items)
-
-    @staticmethod
-    def _recent_jsonl(path: Path, limit: int) -> List[dict]:
-        if limit < 1 or not path.exists():
-            return []
-        newest_first = []
-        for raw_line in _reverse_lines(path):
-            try:
-                value = json.loads(raw_line)
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
-            if isinstance(value, dict):
-                newest_first.append(value)
-                if len(newest_first) == limit:
-                    break
-        return list(reversed(newest_first))
+    warnings: Tuple[str, ...] = ()
 
 
 class UsageMonitor:
@@ -188,17 +92,25 @@ class UsageMonitor:
         self,
         config: Config,
         ledger_store: LedgerStore,
-        audit_store: UsageAuditStore,
-        interval_seconds: float = 2.0,
-        rollup_seconds: int = 60,
+        audit_store: TelemetrySink,
+        interval_seconds: Optional[float] = None,
+        rollup_seconds: Optional[int] = None,
         snapshot_provider: SnapshotProvider = snapshot,
     ):
-        if interval_seconds < 0.2:
-            raise ValueError("monitor interval must be >= 0.2 seconds")
-        if rollup_seconds < 1:
-            raise ValueError("rollup interval must be >= 1 second")
+        interval_seconds, rollup_seconds = validate_monitor_timing(
+            (
+                config.monitor_interval_seconds
+                if interval_seconds is None
+                else interval_seconds
+            ),
+            config.monitor_rollup_seconds if rollup_seconds is None else rollup_seconds,
+        )
         self.config = config
-        self.ledger_store = ledger_store
+        self.ledger_store = (
+            ledger_store
+            if isinstance(ledger_store, PolicyGuardedLedgerStore)
+            else PolicyGuardedLedgerStore(ledger_store, config, "monitor")
+        )
         self.audit_store = audit_store
         self.interval_seconds = interval_seconds
         self.rollup_seconds = rollup_seconds
@@ -207,24 +119,87 @@ class UsageMonitor:
         self.load_history = audit_store.load_load_history()
         self._rollups: Dict[Tuple[object, ...], dict] = {}
         self._device_rollups: Dict[Tuple[object, ...], dict] = {}
+        self._workload_cache: Dict[Tuple[Optional[int], str, Optional[str]], int] = {}
+        self._next_maintenance_check: Optional[datetime] = None
+        self._retention_policy = UsageRetentionPolicy.from_config(config)
+        self._reported_sink_warnings = 0
+        self._process_telemetry_gap: frozenset[int] = frozenset()
+        self._process_identity_gap: frozenset[int] = frozenset()
+        self._process_utilization_gap: frozenset[int] = frozenset()
+        self._stable_identifier_gap: frozenset[int] = frozenset()
+        self._collector_heartbeat_seconds = max(
+            10.0,
+            float(interval_seconds),
+            min(60.0, float(rollup_seconds)),
+        )
+        self._monitor_id = uuid.uuid4().hex
+        self._hostname = safe_hostname(socket.gethostname())
+        self._started_at = utc_now()
+        self._last_sampled_at = self._started_at
+        self._last_devices: Sequence[GpuSnapshot] = ()
+        self._last_process_gap: frozenset[int] = frozenset(range(config.gpu_count))
+        self._last_identity_gap: frozenset[int] = frozenset(range(config.gpu_count))
+        self._last_utilization_gap: frozenset[int] = frozenset()
+        self._last_stable_identifier_gap: frozenset[int] = frozenset(
+            range(config.gpu_count)
+        )
+        self._next_collector_heartbeat: Optional[datetime] = None
+        self._last_collector_signature: Optional[tuple] = None
+        self._collector_write_failed = False
+        self._collector_extension_warning_reported = False
+        self._pending_warnings: List[str] = []
+        self._closed = False
 
     def collect(self, sampled_at: Optional[datetime] = None) -> MonitorSample:
+        if self._closed:
+            raise RuntimeError("monitor is closed")
         sampled_at = sampled_at or utc_now()
+        ledger = self.ledger_store.load()
+        warnings = self._maintain_storage(sampled_at)
         devices = self.snapshot_provider(self.config)
-        reservations = list_active(self.ledger_store.load(), sampled_at)
+        process_gap, identity_gap, utilization_gap, stable_identifier_gap = (
+            _telemetry_capability_gaps(devices, self.config.gpu_count)
+        )
+        warnings.extend(
+            self._telemetry_gap_warnings(
+                process_gap,
+                identity_gap,
+                utilization_gap,
+                stable_identifier_gap,
+            )
+        )
+        reservations = list_active(ledger, sampled_at)
         usage_by_gpu = classify_process_usage(devices, reservations, sampled_at)
-        current_state = _build_process_state(usage_by_gpu, self.previous_state, sampled_at)
+        workload_ids = _register_sample_workloads(
+            self.audit_store,
+            usage_by_gpu,
+            reservations,
+            self._workload_cache,
+        )
+        current_state = _build_process_state(usage_by_gpu, self.previous_state, sampled_at, workload_ids)
+        current_state = _preserve_unobserved_process_state(
+            current_state, self.previous_state, process_gap
+        )
         events = _state_events(self.previous_state, current_state, sampled_at)
-        if events:
-            self.audit_store.append_events(events)
         if current_state != self.previous_state:
-            self.audit_store.save_state(current_state)
+            self.audit_store.commit_state_transition(events, current_state)
         self.previous_state = current_state
 
-        groups = _usage_groups(devices, usage_by_gpu, reservations, sampled_at)
+        groups = _usage_groups(devices, usage_by_gpu, reservations, sampled_at, workload_ids)
         self._record_groups(groups, sampled_at)
         self._record_device_load(devices, sampled_at)
         flushed = self.flush_rollups(sampled_at)
+        warnings.extend(
+            self._write_collector_status(
+                sampled_at,
+                devices,
+                process_gap,
+                identity_gap,
+                utilization_gap,
+                stable_identifier_gap,
+            )
+        )
+        warnings.extend(self.take_warnings())
         process_count = sum(len(rows) for rows in usage_by_gpu.values())
         violation_count = sum(1 for rows in usage_by_gpu.values() for item in rows if item.violation)
         return MonitorSample(
@@ -234,10 +209,216 @@ class UsageMonitor:
             violation_count=violation_count,
             events=tuple(events),
             rollups_flushed=flushed,
+            warnings=tuple(dict.fromkeys(warnings)),
         )
 
-    def close(self, closed_at: Optional[datetime] = None) -> int:
-        return self.flush_rollups(closed_at or utc_now(), force=True)
+    def _telemetry_gap_warnings(
+        self,
+        process_gap: frozenset[int],
+        identity_gap: frozenset[int],
+        utilization_gap: frozenset[int],
+        stable_identifier_gap: frozenset[int],
+    ) -> List[str]:
+        warnings = []
+        if process_gap != self._process_telemetry_gap:
+            if process_gap:
+                warnings.append(
+                    "process telemetry unavailable for GPU(s) "
+                    + ",".join(str(gpu) for gpu in sorted(process_gap))
+                    + "; preserving prior process state"
+                )
+            elif self._process_telemetry_gap:
+                warnings.append("process telemetry restored for all configured GPUs")
+            self._process_telemetry_gap = process_gap
+        if identity_gap != self._process_identity_gap:
+            if identity_gap:
+                warnings.append(
+                    "process UID attribution unavailable for GPU(s) "
+                    + ",".join(str(gpu) for gpu in sorted(identity_gap))
+                    + "; usage remains unknown and guarded jobs cannot launch safely"
+                )
+            elif self._process_identity_gap:
+                warnings.append(
+                    "process UID attribution restored for all configured GPUs"
+                )
+            self._process_identity_gap = identity_gap
+        if utilization_gap != self._process_utilization_gap:
+            if utilization_gap:
+                warnings.append(
+                    "per-process utilization unavailable for GPU(s) "
+                    + ",".join(str(gpu) for gpu in sorted(utilization_gap))
+                )
+            elif self._process_utilization_gap:
+                warnings.append("per-process utilization restored for all configured GPUs")
+            self._process_utilization_gap = utilization_gap
+        if stable_identifier_gap != self._stable_identifier_gap:
+            if stable_identifier_gap:
+                warnings.append(
+                    "stable device identifier unavailable for GPU(s) "
+                    + ",".join(str(gpu) for gpu in sorted(stable_identifier_gap))
+                    + "; guarded scheduled jobs cannot launch safely"
+                )
+            elif self._stable_identifier_gap:
+                warnings.append(
+                    "stable device identifiers restored for all configured GPUs"
+                )
+            self._stable_identifier_gap = stable_identifier_gap
+        return warnings
+
+    def _write_collector_status(
+        self,
+        sampled_at: datetime,
+        devices: Sequence[GpuSnapshot],
+        process_gap: frozenset[int],
+        identity_gap: frozenset[int],
+        utilization_gap: frozenset[int],
+        stable_identifier_gap: frozenset[int],
+        *,
+        force: bool = False,
+        stopped_at: Optional[datetime] = None,
+    ) -> List[str]:
+        self._last_sampled_at = sampled_at
+        self._last_devices = tuple(devices)
+        self._last_process_gap = process_gap
+        self._last_identity_gap = identity_gap
+        self._last_utilization_gap = utilization_gap
+        self._last_stable_identifier_gap = stable_identifier_gap
+        save = getattr(self.audit_store, "save_collector_status", None)
+        if not callable(save):
+            if self._collector_extension_warning_reported:
+                return []
+            self._collector_extension_warning_reported = True
+            return ["telemetry sink does not expose collector liveness status"]
+        device_status = _collector_devices(devices, self.config.gpu_count)
+        degraded = bool(
+            process_gap
+            or identity_gap
+            or utilization_gap
+            or stable_identifier_gap
+            or any(not item["device_telemetry"] for item in device_status)
+        )
+        status = "stopped" if stopped_at is not None else ("degraded" if degraded else "running")
+        signature = (
+            status,
+            tuple(
+                (
+                    item["gpu"],
+                    item["source"],
+                    item["device_telemetry"],
+                    item["stable_device_identifier"],
+                    item["process_telemetry"],
+                    item["process_utilization"],
+                )
+                for item in device_status
+            ),
+            tuple(sorted(process_gap)),
+            tuple(sorted(identity_gap)),
+            tuple(sorted(utilization_gap)),
+            tuple(sorted(stable_identifier_gap)),
+        )
+        if (
+            not force
+            and signature == self._last_collector_signature
+            and self._next_collector_heartbeat is not None
+            and sampled_at < self._next_collector_heartbeat
+        ):
+            return []
+        written_at = stopped_at or sampled_at
+        payload = collector_document(
+            monitor_id=self._monitor_id,
+            status=status,
+            uid=os.getuid(),
+            pid=os.getpid(),
+            hostname=self._hostname,
+            heartbeat_interval_seconds=self._collector_heartbeat_seconds,
+            sample_interval_seconds=self.interval_seconds,
+            rollup_seconds=self.rollup_seconds,
+            started_at=min(self._started_at, sampled_at),
+            sampled_at=sampled_at,
+            written_at=written_at,
+            stopped_at=stopped_at,
+            devices=device_status,
+            stable_device_identifier_gap=sorted(stable_identifier_gap),
+            process_telemetry_gap=sorted(process_gap),
+            process_identity_gap=sorted(identity_gap),
+            process_utilization_gap=sorted(utilization_gap),
+        )
+        try:
+            save(payload)
+        except (OSError, ValueError) as exc:
+            if self._collector_write_failed:
+                return []
+            self._collector_write_failed = True
+            return [f"collector heartbeat write failed: {exc}"]
+        self._next_collector_heartbeat = sampled_at + timedelta(
+            seconds=self._collector_heartbeat_seconds
+        )
+        self._last_collector_signature = signature
+        if self._collector_write_failed:
+            self._collector_write_failed = False
+            return ["collector heartbeat storage recovered"]
+        return []
+
+    def _maintain_storage(self, sampled_at: datetime) -> List[str]:
+        if self._next_maintenance_check is not None and sampled_at < self._next_maintenance_check:
+            return []
+        self._next_maintenance_check = sampled_at + timedelta(hours=24)
+        try:
+            report = self.audit_store.maintain(self._retention_policy, now=sampled_at)
+        except OSError as exc:
+            return [f"usage maintenance deferred: {exc}"]
+        return [str(item) for item in report.get("blocked", [])]
+
+    def close(
+        self,
+        closed_at: Optional[datetime] = None,
+        *,
+        record_stopped: bool = True,
+    ) -> int:
+        if self._closed:
+            return 0
+        closed = closed_at or utc_now()
+        if closed < self._last_sampled_at:
+            closed = self._last_sampled_at
+        flushed = self.flush_rollups(closed, force=True)
+        if record_stopped:
+            self._pending_warnings.extend(
+                self._write_collector_status(
+                    self._last_sampled_at,
+                    self._last_devices,
+                    self._last_process_gap,
+                    self._last_identity_gap,
+                    self._last_utilization_gap,
+                    self._last_stable_identifier_gap,
+                    force=True,
+                    stopped_at=closed,
+                )
+            )
+        self._closed = True
+        return flushed
+
+    def abort(self) -> None:
+        """Discard buffered telemetry without writing after a policy failure."""
+        self._rollups.clear()
+        self._device_rollups.clear()
+        self._workload_cache.clear()
+        self._pending_warnings.clear()
+        self._closed = True
+
+    def take_warnings(self) -> Tuple[str, ...]:
+        local = tuple(self._pending_warnings)
+        self._pending_warnings.clear()
+        raw = getattr(self.audit_store, "last_warnings", ())
+        if not isinstance(raw, (list, tuple)):
+            return local
+        start = min(self._reported_sink_warnings, len(raw))
+        pending = tuple(str(item) for item in raw[start:])
+        if isinstance(raw, list):
+            raw.clear()
+            self._reported_sink_warnings = 0
+        else:
+            self._reported_sink_warnings = len(raw)
+        return tuple(dict.fromkeys((*local, *pending)))
 
     def flush_rollups(self, at: datetime, force: bool = False) -> int:
         ready = []
@@ -258,7 +439,12 @@ class UsageMonitor:
                 ready_loads.append(_finalize_device_load(aggregate, at, partial=force and at < bucket_end))
                 load_keys.append(key)
         if ready_loads:
-            self.load_history = _merge_device_load_history(self.load_history, ready_loads, at)
+            self.load_history = _merge_device_load_history(
+                self.load_history,
+                ready_loads,
+                at,
+                keep_minutes=self.config.usage_load_window_minutes,
+            )
             self.audit_store.save_load_history(self.load_history)
         for key in load_keys:
             self._device_rollups.pop(key, None)
@@ -290,6 +476,7 @@ class UsageMonitor:
                     "_interval_seconds": self.interval_seconds,
                     "_process_total": 0,
                     "max_process_count": 0,
+                    "_active_samples": 0,
                     "_sm_total": 0.0,
                     "_sm_samples": 0,
                     "max_sm_percent": None,
@@ -298,11 +485,15 @@ class UsageMonitor:
                     "_device_util_total": 0.0,
                     "_device_util_samples": 0,
                     "max_device_util_percent": None,
+                    "_workloads": set(),
+                    "_workload_samples": {},
                 },
             )
             aggregate["sample_count"] += 1
             aggregate["_process_total"] += group["process_count"]
             aggregate["max_process_count"] = max(aggregate["max_process_count"], group["process_count"])
+            if group["process_count"]:
+                aggregate["_active_samples"] += 1
             if group["sm_percent"] is not None:
                 aggregate["_sm_total"] += group["sm_percent"]
                 aggregate["_sm_samples"] += 1
@@ -316,6 +507,11 @@ class UsageMonitor:
                 previous_util = aggregate["max_device_util_percent"]
                 aggregate["max_device_util_percent"] = (
                     group["device_util_percent"] if previous_util is None else max(previous_util, group["device_util_percent"])
+                )
+            aggregate["_workloads"].update(group["workload_ids"])
+            for workload_id in group["workload_ids"]:
+                aggregate["_workload_samples"][workload_id] = (
+                    aggregate["_workload_samples"].get(workload_id, 0) + 1
                 )
 
     def _record_device_load(self, devices: Sequence[GpuSnapshot], sampled_at: datetime) -> None:
@@ -355,26 +551,45 @@ class UsageMonitor:
 def run_monitor(
     config: Config,
     ledger_store: LedgerStore,
-    interval_seconds: float = 2.0,
-    rollup_seconds: int = 60,
+    interval_seconds: Optional[float] = None,
+    rollup_seconds: Optional[int] = None,
     once: bool = False,
     max_samples: Optional[int] = None,
     verbose: bool = False,
 ) -> int:
     if max_samples is not None and max_samples < 1:
         raise ValueError("--samples must be >= 1")
+    authorize_monitor(config)
+    interval_seconds, rollup_seconds = validate_monitor_timing(
+        (
+            config.monitor_interval_seconds
+            if interval_seconds is None
+            else interval_seconds
+        ),
+        config.monitor_rollup_seconds if rollup_seconds is None else rollup_seconds,
+    )
+    daemon_store = PolicyGuardedLedgerStore(ledger_store, config, "monitor")
+    daemon_store.load()
     audit_store = UsageAuditStore(
         config.data_dir,
         config.lock_timeout_seconds,
         config.file_mode,
         config.dir_mode,
+        config.storage_gid,
     )
-    stop_event = threading.Event()
-    previous_handlers = _install_signal_handlers(stop_event)
+    lease = audit_store.lock(timeout_seconds=min(2.0, config.lock_timeout_seconds))
+    try:
+        lease.__enter__()
+    except TimeoutError as exc:
+        raise MonitorBusyError(
+            f"another monitor or telemetry maintenance writer is active for {config.data_dir}"
+        ) from exc
     samples = 0
     try:
-        with audit_store.lock():
-            monitor = UsageMonitor(config, ledger_store, audit_store, interval_seconds, rollup_seconds)
+        stop_event = threading.Event()
+        previous_handlers = _install_signal_handlers(stop_event)
+        try:
+            monitor = UsageMonitor(config, daemon_store, audit_store, interval_seconds, rollup_seconds)
             print(
                 f"monitor started: interval={interval_seconds:g}s rollup={rollup_seconds}s "
                 f"data={config.data_dir}"
@@ -384,18 +599,43 @@ def run_monitor(
                     started = time.monotonic()
                     result = monitor.collect()
                     samples += 1
-                    if once or verbose or result.events:
+                    if once or verbose or result.events or result.warnings:
                         _print_monitor_sample(result)
                     if once or (max_samples is not None and samples >= max_samples):
                         break
                     delay = max(0.0, interval_seconds - (time.monotonic() - started))
                     stop_event.wait(delay)
-            finally:
+            except DaemonPolicyError:
+                monitor.abort()
+                raise
+            except BaseException:
+                _close_failed_monitor(monitor, samples)
+                raise
+            else:
                 flushed = monitor.close()
+                for warning in monitor.take_warnings():
+                    print(f"monitor warning: {warning}")
                 print(f"monitor stopped: samples={samples} partial_rollups={flushed}")
+        finally:
+            _restore_signal_handlers(previous_handlers)
     finally:
-        _restore_signal_handlers(previous_handlers)
+        lease.__exit__(None, None, None)
     return 0
+
+
+def _close_failed_monitor(monitor: UsageMonitor, samples: int) -> None:
+    try:
+        flushed = monitor.close(record_stopped=False)
+        warnings = monitor.take_warnings()
+    except BaseException as exc:
+        print(
+            "monitor warning: crash flush failed "
+            f"({type(exc).__name__}); the original monitor failure is preserved"
+        )
+        return
+    for warning in warnings:
+        print(f"monitor warning: {warning}")
+    print(f"monitor failed: samples={samples} partial_rollups={flushed}")
 
 
 def _install_signal_handlers(stop_event: threading.Event) -> Dict[int, object]:
@@ -424,12 +664,188 @@ def _print_monitor_sample(sample: MonitorSample) -> None:
             f"  {event['event']} gpu={event['gpu']} pid={event['pid']} "
             f"user={event['username']} {event.get('old_status', '-')}->{event.get('status', '-')}"
         )
+    for warning in sample.warnings:
+        print(f"  warning: {warning}")
+
+
+def _register_sample_workloads(
+    sink: TelemetrySink,
+    usage_by_gpu: Dict[int, List[ProcessUsage]],
+    reservations: Sequence[dict],
+    cache: Dict[Tuple[Optional[int], str, Optional[str]], int],
+) -> Dict[Tuple[int, int, str], int]:
+    result = {}
+    for gpu, rows in usage_by_gpu.items():
+        for item in rows:
+            if item.status == USAGE_SYSTEM:
+                continue
+            process = item.process
+            managed_summary = _managed_summary(process.pid, process.uid, reservations)
+            cache_key = (process.uid, process.command, managed_summary)
+            workload_id = cache.get(cache_key)
+            if workload_id is None:
+                descriptor = describe_workload(process.command, managed_summary)
+                workload_id = sink.register_workload(process.uid, descriptor)
+                cache[cache_key] = workload_id
+                if len(cache) > 2048:
+                    cache.pop(next(iter(cache)))
+            result[_process_sample_key(gpu, process.pid, process.host_start_id)] = workload_id
+    return result
+
+
+def _managed_summary(pid: int, uid: Optional[int], reservations: Sequence[dict]) -> Optional[str]:
+    matches = []
+    for reservation in reservations:
+        if uid is None or int(reservation.get("uid", -1)) != uid:
+            continue
+        job = reservation.get("job")
+        if not isinstance(job, dict) or not job.get("summary"):
+            continue
+        runner_pid = _optional_positive_int(job.get("runner_pid"))
+        if runner_pid is None:
+            continue
+        if runner_pid == pid or _pid_descends_from(pid, runner_pid):
+            matches.append(str(job["summary"]))
+    return matches[0] if len(matches) == 1 else None
+
+
+def _pid_descends_from(pid: int, ancestor_pid: int, max_depth: int = 32) -> bool:
+    current = pid
+    seen = set()
+    for _depth in range(max_depth):
+        if current <= 1 or current in seen:
+            return False
+        if current == ancestor_pid:
+            return True
+        seen.add(current)
+        try:
+            raw_stat = (Path("/proc") / str(current) / "stat").read_text(encoding="utf-8")
+            current = _proc_parent_pid(raw_stat)
+        except (OSError, ValueError):
+            return False
+    return False
+
+
+def _proc_parent_pid(raw_stat: str) -> int:
+    command_end = raw_stat.rfind(")")
+    if command_end < 0:
+        raise ValueError("invalid /proc stat record")
+    fields = raw_stat[command_end + 1 :].split()
+    if len(fields) < 2:
+        raise ValueError("invalid /proc stat record")
+    return int(fields[1])
+
+
+def _optional_positive_int(value) -> Optional[int]:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _process_sample_key(gpu: int, pid: int, start_id: str) -> Tuple[int, int, str]:
+    return gpu, pid, start_id
+
+
+def _telemetry_capability_gaps(
+    devices: Sequence[GpuSnapshot], gpu_count: int
+) -> Tuple[
+    frozenset[int],
+    frozenset[int],
+    frozenset[int],
+    frozenset[int],
+]:
+    by_index = {device.index: device for device in devices}
+    process_gap = set()
+    identity_gap = set()
+    utilization_gap = set()
+    stable_identifier_gap = set()
+    for gpu in range(gpu_count):
+        device = by_index.get(gpu)
+        if (
+            device is None
+            or device.source == "none"
+            or not has_process_telemetry(device)
+        ):
+            process_gap.add(gpu)
+            identity_gap.add(gpu)
+        else:
+            if any(process.uid is None for process in device.processes):
+                identity_gap.add(gpu)
+            if not has_process_utilization(device):
+                utilization_gap.add(gpu)
+        if device is None or not has_stable_device_identifier(device):
+            stable_identifier_gap.add(gpu)
+    return (
+        frozenset(process_gap),
+        frozenset(identity_gap),
+        frozenset(utilization_gap),
+        frozenset(stable_identifier_gap),
+    )
+
+
+def _collector_devices(
+    devices: Sequence[GpuSnapshot], gpu_count: int
+) -> List[dict]:
+    by_index = {device.index: device for device in devices}
+    result = []
+    for gpu in range(gpu_count):
+        device = by_index.get(gpu)
+        source = str(device.source if device is not None else "none")
+        source = "".join(
+            character if 0x20 <= ord(character) < 0x7F else "?"
+            for character in source
+        )[:64] or "none"
+        device_telemetry = device is not None and source != "none"
+        process_telemetry = bool(
+            device_telemetry and device is not None and has_process_telemetry(device)
+        )
+        result.append(
+            {
+                "gpu": gpu,
+                "source": source,
+                "device_telemetry": device_telemetry,
+                "stable_device_identifier": bool(
+                    device_telemetry
+                    and device is not None
+                    and has_stable_device_identifier(device)
+                ),
+                "process_telemetry": process_telemetry,
+                "process_utilization": bool(
+                    process_telemetry
+                    and device is not None
+                    and has_process_utilization(device)
+                ),
+            }
+        )
+    return result
+
+
+def _preserve_unobserved_process_state(
+    current: Dict[str, dict],
+    previous: Dict[str, dict],
+    process_gap: frozenset[int],
+) -> Dict[str, dict]:
+    if not process_gap:
+        return current
+    for key, item in previous.items():
+        if not isinstance(item, dict):
+            continue
+        try:
+            gpu = int(item.get("gpu", -1))
+        except (TypeError, ValueError):
+            continue
+        if gpu in process_gap:
+            current.setdefault(key, item)
+    return current
 
 
 def _build_process_state(
     usage_by_gpu: Dict[int, List[ProcessUsage]],
     previous: Dict[str, dict],
     sampled_at: datetime,
+    workload_ids: Dict[Tuple[int, int, str], int],
 ) -> Dict[str, dict]:
     current = {}
     for gpu, rows in usage_by_gpu.items():
@@ -445,6 +861,7 @@ def _build_process_state(
                 "uid": process.uid,
                 "username": process.username,
                 "command": summarize_process_command(process.command),
+                "workload_id": workload_ids.get(_process_sample_key(gpu, process.pid, process.host_start_id)),
                 "kind": process.kind,
                 "status": item.status,
                 "reservation_ids": list(item.reservation_ids),
@@ -462,6 +879,8 @@ def _state_events(previous: Dict[str, dict], current: Dict[str, dict], at: datet
         new = current[key]
         if old.get("status") != new.get("status") or old.get("reservation_ids") != new.get("reservation_ids"):
             events.append(_event("authorization-change", new, at, old_status=old.get("status")))
+        if old.get("workload_id") != new.get("workload_id"):
+            events.append(_event("workload-change", new, at))
     for key in sorted(previous.keys() - current.keys()):
         events.append(_event("process-stop", previous[key], at, old_status=previous[key].get("status")))
     return events
@@ -477,6 +896,7 @@ def _event(event_type: str, item: dict, at: datetime, old_status: Optional[str] 
         "uid": item.get("uid"),
         "username": item.get("username", "?"),
         "command": item.get("command", ""),
+        "workload_id": item.get("workload_id"),
         "kind": item.get("kind", ""),
         "status": item.get("status"),
         "reservation_ids": item.get("reservation_ids", []),
@@ -492,6 +912,7 @@ def _usage_groups(
     usage_by_gpu: Dict[int, List[ProcessUsage]],
     reservations: Sequence[dict],
     at: datetime,
+    workload_ids: Dict[Tuple[int, int, str], int],
 ) -> List[dict]:
     current_reservations = [
         item
@@ -517,6 +938,9 @@ def _usage_groups(
             group = groups.setdefault(key, _empty_group(gpu, process.uid, process.username, item.status))
             group["reservation_ids"].update(item.reservation_ids)
             group["processes"].append(process)
+            workload_id = workload_ids.get(_process_sample_key(gpu, process.pid, process.host_start_id))
+            if workload_id is not None:
+                group["workload_ids"].add(workload_id)
 
     for device in devices:
         if not any(key[0] == device.index for key in groups):
@@ -525,6 +949,7 @@ def _usage_groups(
     result = []
     for group in groups.values():
         processes = group.pop("processes")
+        workload_set = group.pop("workload_ids")
         sm_values = [item.sm_utilization_percent for item in processes if item.sm_utilization_percent is not None]
         sm_percent = 0 if not processes else (sum(sm_values) if sm_values else None)
         device = device_by_gpu.get(group["gpu"])
@@ -533,6 +958,7 @@ def _usage_groups(
         group["sm_percent"] = sm_percent
         group["gpu_memory_mb"] = sum(item.gpu_memory_mb for item in processes)
         group["device_util_percent"] = device.utilization_percent if device is not None else None
+        group["workload_ids"] = sorted(workload_set)
         result.append(group)
     return result
 
@@ -545,6 +971,7 @@ def _empty_group(gpu: int, uid: Optional[int], username: str, status: str) -> di
         "status": status,
         "reservation_ids": set(),
         "processes": [],
+        "workload_ids": set(),
     }
 
 
@@ -564,16 +991,27 @@ def _finalize_rollup(aggregate: dict, flushed_at: datetime, partial: bool) -> di
         "reservation_ids": aggregate["reservation_ids"],
         "sample_count": samples,
         "observed_seconds": round(samples * aggregate.get("_interval_seconds", 0), 3),
+        "active_sample_count": aggregate["_active_samples"],
+        "active_observed_seconds": round(
+            aggregate["_active_samples"] * aggregate.get("_interval_seconds", 0), 3
+        ),
         "avg_process_count": round(aggregate["_process_total"] / samples, 3),
         "max_process_count": aggregate["max_process_count"],
+        "sm_sample_count": sm_samples,
         "avg_sm_percent": round(aggregate["_sm_total"] / sm_samples, 3) if sm_samples else None,
         "max_sm_percent": aggregate["max_sm_percent"],
         "avg_gpu_memory_mb": round(aggregate["_memory_total"] / samples, 3),
         "max_gpu_memory_mb": aggregate["max_gpu_memory_mb"],
+        "device_util_sample_count": device_samples,
         "avg_device_util_percent": (
             round(aggregate["_device_util_total"] / device_samples, 3) if device_samples else None
         ),
         "max_device_util_percent": aggregate["max_device_util_percent"],
+        "workload_ids": sorted(aggregate["_workloads"]),
+        "workload_observed_seconds": {
+            str(workload_id): round(count * aggregate.get("_interval_seconds", 0), 3)
+            for workload_id, count in sorted(aggregate["_workload_samples"].items())
+        },
     }
 
 
@@ -593,20 +1031,38 @@ def _finalize_device_load(aggregate: dict, flushed_at: datetime, partial: bool) 
     }
 
 
-def _merge_device_load_history(history: dict, records: Sequence[dict], at: datetime, keep_per_gpu: int = 120) -> dict:
+def _merge_device_load_history(
+    history: dict,
+    records: Sequence[dict],
+    at: datetime,
+    keep_minutes: int = 120,
+) -> dict:
     raw_gpus = history.get("gpus", {}) if isinstance(history, dict) else {}
     gpus = {str(key): list(value) for key, value in raw_gpus.items() if isinstance(value, list)}
+    cutoff = at.astimezone(timezone.utc) - timedelta(minutes=max(1, keep_minutes))
     for record in records:
         key = str(record["gpu"])
-        existing = [item for item in gpus.get(key, []) if item.get("window_start") != record.get("window_start")]
+        existing = [
+            item
+            for item in gpus.get(key, [])
+            if item.get("window_start") != record.get("window_start")
+            and _record_after_cutoff(item, cutoff)
+        ]
         existing.append(record)
         existing.sort(key=lambda item: str(item.get("window_start", "")))
-        gpus[key] = existing[-keep_per_gpu:]
+        gpus[key] = existing
     return {
         "version": 1,
         "updated_at": to_iso(at),
         "gpus": gpus,
     }
+
+
+def _record_after_cutoff(record: dict, cutoff: datetime) -> bool:
+    try:
+        return parse_iso(str(record["window_end"])) >= cutoff
+    except (KeyError, TypeError, ValueError):
+        return False
 
 
 def _bucket_start(value: datetime, bucket_seconds: int) -> datetime:
@@ -617,42 +1073,3 @@ def _bucket_start(value: datetime, bucket_seconds: int) -> datetime:
 
 def _short_hash(value: str, length: int = 12) -> str:
     return hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()[:length]
-
-
-def _fsync_dir(path: Path) -> None:
-    try:
-        fd = os.open(str(path), os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _line_count(path: Path) -> int:
-    if not path.exists():
-        return 0
-    fd = open_existing_regular(path)
-    with os.fdopen(fd, "r", encoding="utf-8") as fh:
-        return sum(1 for _line in fh)
-
-
-def _reverse_lines(path: Path, chunk_size: int = 64 * 1024) -> Iterator[bytes]:
-    """Yield non-empty binary lines newest-first without scanning the whole file."""
-    fd = open_existing_regular(path)
-    with os.fdopen(fd, "rb") as fh:
-        position = fh.seek(0, os.SEEK_END)
-        remainder = b""
-        while position > 0:
-            read_size = min(chunk_size, position)
-            position -= read_size
-            fh.seek(position)
-            parts = (fh.read(read_size) + remainder).split(b"\n")
-            if position > 0:
-                remainder = parts.pop(0)
-            else:
-                remainder = b""
-            for line in reversed(parts):
-                if line:
-                    yield line

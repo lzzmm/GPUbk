@@ -1,14 +1,17 @@
 [Unit]
-Description=GPUbk per-user scheduled job worker
+Description=GPUBK per-user scheduled job worker
 After=default.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
-EnvironmentFile=-%h/.config/bk/bk.env
+@SERVICE_ENVIRONMENT@
 ExecStart=@PYTHON_EXECUTABLE@ -m bk worker
 Restart=on-failure
+RestartPreventExitStatus=75 78
 RestartSec=5
-TimeoutStopSec=15
+TimeoutStopSec=75
 KillMode=control-group
 NoNewPrivileges=true
 

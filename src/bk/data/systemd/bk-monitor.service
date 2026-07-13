@@ -1,12 +1,15 @@
 [Unit]
-Description=GPUbk usage monitor
+Description=GPUBK usage monitor
 After=default.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
 
 [Service]
 Type=simple
-EnvironmentFile=-%h/.config/bk/bk.env
-ExecStart=@PYTHON_EXECUTABLE@ -m bk monitor --interval 2 --rollup 60
+@SERVICE_ENVIRONMENT@
+ExecStart=@PYTHON_EXECUTABLE@ -m bk monitor
 Restart=on-failure
+RestartPreventExitStatus=75 77 78
 RestartSec=5
 Nice=10
 IOSchedulingClass=idle

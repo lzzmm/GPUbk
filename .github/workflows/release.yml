@@ -20,17 +20,21 @@ jobs:
       version: ${{ steps.package.outputs.version }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.12"
           cache: pip
+      - run: python -m pip install --upgrade 'pip>=26.1.2'
       - run: >-
           python -m pip install -e '.[mcp]'
-          bandit build check-wheel-contents pip-audit ruff twine validate-pyproject
-      - run: python -m compileall -q src tests benchmarks
-      - run: ruff check src tests benchmarks
-      - run: bandit -q -r src/bk --severity-level medium
+          bandit build check-wheel-contents packaging pip-audit ruff twine validate-pyproject
+      - run: python -m compileall -q src tests benchmarks tools
+      - run: ruff check src tests benchmarks tools
+      - run: bandit -q -r src/bk tools --severity-level medium
       - run: PYTHONPATH=src python benchmarks/scheduler_queue.py --days 1
+      - run: PYTHONPATH=src python benchmarks/usage_store.py --days 1
       - run: python -m unittest discover -s tests -p 'test_*.py'
       - run: pip-audit
       - run: validate-pyproject pyproject.toml
@@ -39,18 +43,50 @@ jobs:
         shell: bash
         run: |
           version=$(PYTHONPATH=src python -c 'from bk import __version__; print(__version__)')
-          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "v$version" ]]; then
-            echo "tag $GITHUB_REF_NAME does not match package version $version" >&2
-            exit 1
-          fi
-          if [[ "$GITHUB_REF_TYPE" == "tag" ]] && grep -Fq "## $version - Unreleased" CHANGELOG.md; then
-            echo "CHANGELOG.md still marks $version as Unreleased" >&2
-            exit 1
+          prerelease=$(PYTHONPATH=src python -c 'from bk import __version__; from packaging.version import Version; print(str(Version(__version__).is_prerelease).lower())')
+          base_version=$(PYTHONPATH=src python -c 'from bk import __version__; from packaging.version import Version; print(Version(__version__).base_version)')
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            if [[ "$GITHUB_REF_NAME" != "v$version" ]]; then
+              echo "tag $GITHUB_REF_NAME does not match package version $version" >&2
+              exit 1
+            fi
+            if [[ "$prerelease" == "true" ]]; then
+              echo "tag releases require a final version, not $version" >&2
+              exit 1
+            fi
+            if [[ "$(git cat-file -t "$GITHUB_REF")" != "tag" ]]; then
+              echo "production releases require an annotated tag" >&2
+              exit 1
+            fi
+            git fetch --no-tags --force origin main:refs/remotes/origin/main
+            tagged_commit=$(git rev-parse "${GITHUB_REF}^{commit}")
+            main_commit=$(git rev-parse "refs/remotes/origin/main^{commit}")
+            if [[ "$tagged_commit" != "$main_commit" ]]; then
+              echo "tagged commit must equal the current origin/main tip" >&2
+              exit 1
+            fi
+            escaped_version=${version//./\\.}
+            if ! grep -Eq "^## $escaped_version - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
+              echo "CHANGELOG.md needs a dated heading for $version" >&2
+              exit 1
+            fi
+          else
+            if [[ "$prerelease" != "true" ]]; then
+              echo "manual Release dispatch requires a prerelease version" >&2
+              exit 1
+            fi
+            if ! grep -Fqx "## $base_version - Unreleased" CHANGELOG.md; then
+              echo "CHANGELOG.md needs an Unreleased heading for $base_version" >&2
+              exit 1
+            fi
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - run: python -m build
       - run: python -m twine check dist/*
       - run: check-wheel-contents dist/*.whl
+      - name: Record distribution hashes
+        shell: bash
+        run: (cd dist && sha256sum * > ../SHA256SUMS)
       - name: Smoke-test built wheel
         shell: bash
         run: |
@@ -60,16 +96,87 @@ jobs:
           BK_DATA_DIR=/tmp/gpubk-release-data BK_GPU_COUNT=2 \
             /tmp/gpubk-release-smoke/bin/bk agent context --compact > /tmp/gpubk-release-context.json
           test ! -e /tmp/gpubk-release-data
+      - name: Smoke-test upgrade from last public release
+        shell: bash
+        env:
+          BK_DATA_DIR: /tmp/gpubk-upgrade-data
+          BK_GPU_COUNT: "2"
+          BK_MAX_SHARED_USERS: "4"
+          LAST_PUBLIC_VERSION: "0.1.0"
+        run: |
+          python -m venv /tmp/gpubk-upgrade-smoke
+          upgrade_python=/tmp/gpubk-upgrade-smoke/bin/python
+          upgrade_bk=/tmp/gpubk-upgrade-smoke/bin/bk
+          "$upgrade_python" -m pip install --no-deps "gpubk==$LAST_PUBLIC_VERSION"
+          "$upgrade_bk" 1 10m --json > /tmp/gpubk-upgrade-old-booking.json
+          before=$(sha256sum "$BK_DATA_DIR/ledger.json" "$BK_DATA_DIR/ops.log")
+
+          "$upgrade_python" -m pip install --no-deps --upgrade dist/*.whl
+          test "$("$upgrade_bk" --version)" = "bk ${{ steps.package.outputs.version }}"
+          "$upgrade_bk" list --json > /tmp/gpubk-upgrade-old-list.json
+          "$upgrade_bk" doctor --json > /tmp/gpubk-upgrade-doctor.json
+          after=$(sha256sum "$BK_DATA_DIR/ledger.json" "$BK_DATA_DIR/ops.log")
+          test "$before" = "$after"
+
+          "$upgrade_bk" 1 10m --gpu 0 --share 2 --json \
+            > /tmp/gpubk-upgrade-new-booking.json
+          "$upgrade_bk" list --json > /tmp/gpubk-upgrade-final-list.json
+          "$upgrade_python" - <<'PY'
+          import json
+          from pathlib import Path
+
+          def load(name):
+              return json.loads(Path(name).read_text(encoding="utf-8"))
+
+          old = load("/tmp/gpubk-upgrade-old-list.json")["reservations"]
+          doctor = load("/tmp/gpubk-upgrade-doctor.json")
+          new = load("/tmp/gpubk-upgrade-new-booking.json")["reservation"]
+          final = load("/tmp/gpubk-upgrade-final-list.json")["reservations"]
+          if len(old) != 1 or old[0]["share_units_per_gpu"] != 1:
+              raise SystemExit(f"legacy booking was not preserved: {old!r}")
+          if old[0]["share_capacity_units_per_gpu"] != 4 or not doctor["healthy"]:
+              raise SystemExit(f"legacy ledger failed read-only validation: {doctor!r}")
+          if new["share_units_per_gpu"] != 2 or len(final) != 2:
+              raise SystemExit(f"upgraded ledger rejected a weighted write: {final!r}")
+          PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: python-package-distributions
-          path: dist/
+          path: |
+            dist/
+            SHA256SUMS
+            tools/verify_index_artifacts.py
           if-no-files-found: error
           retention-days: 7
 
-  publish-testpypi:
+  preflight-testpypi:
     if: vars.TESTPYPI_RELEASE_ENABLED == 'true'
     needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require an unused TestPyPI version
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        shell: bash
+        run: |
+          status=$(curl --retry 3 --retry-all-errors --silent --show-error \
+            --output /dev/null --write-out '%{http_code}' \
+            "https://test.pypi.org/pypi/gpubk/$VERSION/json")
+          case "$status" in
+            404) ;;
+            200)
+              echo "gpubk $VERSION already exists on TestPyPI" >&2
+              exit 1
+              ;;
+            *)
+              echo "TestPyPI version check returned HTTP $status" >&2
+              exit 1
+              ;;
+          esac
+
+  publish-testpypi:
+    if: vars.TESTPYPI_RELEASE_ENABLED == 'true'
+    needs: [build, preflight-testpypi]
     runs-on: ubuntu-latest
     environment:
       name: testpypi
@@ -90,6 +197,16 @@ jobs:
     needs: [build, publish-testpypi]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-package-distributions
+      - name: Verify uploaded artifact hashes
+        run: >-
+          python tools/verify_index_artifacts.py
+          --index testpypi
+          --project gpubk
+          --version '${{ needs.build.outputs.version }}'
+          --checksums SHA256SUMS
       - name: Install the uploaded package
         shell: bash
         run: |
@@ -106,12 +223,40 @@ jobs:
           test "$installed" = true
           test "$(/tmp/gpubk-index-smoke/bin/bk --version)" = "bk ${{ needs.build.outputs.version }}"
 
-  publish-pypi:
+  preflight-pypi:
     if: >-
       github.event_name == 'push' &&
       github.ref_type == 'tag' &&
       vars.PYPI_RELEASE_ENABLED == 'true'
     needs: [build, verify-testpypi]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require an unused PyPI version
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        shell: bash
+        run: |
+          status=$(curl --retry 3 --retry-all-errors --silent --show-error \
+            --output /dev/null --write-out '%{http_code}' \
+            "https://pypi.org/pypi/gpubk/$VERSION/json")
+          case "$status" in
+            404) ;;
+            200)
+              echo "gpubk $VERSION already exists on PyPI" >&2
+              exit 1
+              ;;
+            *)
+              echo "PyPI version check returned HTTP $status" >&2
+              exit 1
+              ;;
+          esac
+
+  publish-pypi:
+    if: >-
+      github.event_name == 'push' &&
+      github.ref_type == 'tag' &&
+      vars.PYPI_RELEASE_ENABLED == 'true'
+    needs: [build, verify-testpypi, preflight-pypi]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -131,6 +276,16 @@ jobs:
     needs: [build, publish-pypi]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-package-distributions
+      - name: Verify uploaded artifact hashes
+        run: >-
+          python tools/verify_index_artifacts.py
+          --index pypi
+          --project gpubk
+          --version '${{ needs.build.outputs.version }}'
+          --checksums SHA256SUMS
       - name: Install the uploaded package
         shell: bash
         run: |

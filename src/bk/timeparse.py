@@ -1,12 +1,25 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Union
+
+from .granularity import (
+    DEFAULT_SLOT_MINUTES,
+    ceil_to_slot,
+    floor_to_slot,
+    is_slot_aligned,
+    slot_phrase,
+    validate_slot_minutes,
+)
 
 
 _DURATION_TOKEN_RE = re.compile(r"(?P<num>\d+)(?P<unit>[dhm])")
 _MEMORY_RE = re.compile(r"^(?P<num>\d+(?:\.\d+)?)(?P<unit>g|gb|gib|m|mb|mib)$", re.IGNORECASE)
+_CLOCK_RE = re.compile(
+    r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<meridiem>am|pm)?",
+    re.IGNORECASE,
+)
 
 
 def utc_now() -> datetime:
@@ -33,6 +46,152 @@ def parse_start(value: str) -> datetime:
     if value == "now":
         return utc_now()
     return parse_iso(value)
+
+
+def parse_friendly_start(
+    value: str,
+    now: datetime | None = None,
+    slot_minutes: int = DEFAULT_SLOT_MINUTES,
+    *,
+    allow_past: bool = False,
+) -> datetime:
+    slot_minutes = validate_slot_minutes(slot_minutes)
+    raw = value.strip()
+    current = (now if now is not None else datetime.now(timezone.utc)).astimezone(timezone.utc)
+    current_floor = floor_to_slot(current, slot_minutes)
+    if not raw or raw.lower() == "now":
+        return floor_to_slot(current, slot_minutes)
+    if raw.startswith("+"):
+        try:
+            seconds = parse_duration_seconds(raw[1:])
+        except ValueError as exc:
+            raise ValueError("relative start must look like +30m or +1h30m") from exc
+        return ceil_to_slot(current + timedelta(seconds=seconds), slot_minutes)
+
+    local_now = current.astimezone()
+    local_zone = local_now.tzinfo
+    lowered = raw.lower()
+    day_offset = None
+    clock_text = raw
+    day_aliases = {
+        "today": 0,
+        "tod": 0,
+        "tomorrow": 1,
+        "tom": 1,
+        "tmr": 1,
+        "t": 1,
+    }
+    day_match = re.fullmatch(
+        r"(?P<day>today|tod|tomorrow|tom|tmr|t)\s+(?P<clock>.+)",
+        raw,
+        re.IGNORECASE,
+    )
+    if day_match:
+        day_offset = day_aliases[day_match.group("day").lower()]
+        clock_text = day_match.group("clock").strip()
+    elif lowered.startswith("today "):
+        day_offset = 0
+        clock_text = raw[6:].strip()
+    elif lowered.startswith("tomorrow "):
+        day_offset = 1
+        clock_text = raw[9:].strip()
+
+    if day_offset is not None or _CLOCK_RE.fullmatch(clock_text):
+        hour, minute = _friendly_clock(clock_text)
+        candidate = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if day_offset is not None:
+            candidate += timedelta(days=day_offset)
+            if (
+                not allow_past
+                and candidate.astimezone(timezone.utc) < current_floor
+            ):
+                raise ValueError(f"start time is before the current {slot_phrase(slot_minutes)} interval")
+        elif (
+            not allow_past
+            and candidate.astimezone(timezone.utc) < current_floor
+        ):
+            candidate += timedelta(days=1)
+        return _validate_friendly_boundary(candidate, slot_minutes)
+
+    month_day = re.fullmatch(
+        r"(?P<month>\d{1,2})-(?P<day>\d{1,2})[ T](?P<time>.+)", raw
+    )
+    if month_day:
+        hour, minute = _friendly_clock(month_day.group("time"))
+        try:
+            candidate = datetime(
+                local_now.year,
+                int(month_day.group("month")),
+                int(month_day.group("day")),
+                hour,
+                minute,
+                tzinfo=local_zone,
+            )
+            if (
+                not allow_past
+                and candidate.astimezone(timezone.utc) < current_floor
+            ):
+                candidate = candidate.replace(year=local_now.year + 1)
+        except ValueError as exc:
+            raise ValueError("invalid calendar date") from exc
+        return _validate_friendly_boundary(candidate, slot_minutes)
+
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            "start must be now, +30m, 9, 21, 9am, t 9, tomorrow 09:00, "
+            "07-13 20:00, or ISO 8601"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=local_zone)
+    parsed = _validate_friendly_boundary(parsed, slot_minutes)
+    if (
+        not allow_past
+        and parsed.astimezone(timezone.utc) < current_floor
+    ):
+        raise ValueError(f"start time is before the current {slot_phrase(slot_minutes)} interval")
+    return parsed
+
+
+def normalize_queue_start(
+    value: datetime,
+    now: datetime | None = None,
+    slot_minutes: int = DEFAULT_SLOT_MINUTES,
+) -> datetime:
+    start = value.astimezone(timezone.utc)
+    current = (now or utc_now()).astimezone(timezone.utc)
+    if start <= current:
+        return floor_to_slot(current, slot_minutes)
+    return ceil_to_slot(start, slot_minutes)
+
+
+def _friendly_clock(value: str) -> tuple[int, int]:
+    match = _CLOCK_RE.fullmatch(value.strip())
+    if not match:
+        raise ValueError("clock time must look like 9, 21, 9am, or 20:30")
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute") or 0)
+    meridiem = (match.group("meridiem") or "").lower()
+    if meridiem:
+        if hour < 1 or hour > 12:
+            raise ValueError("12-hour clock must use an hour between 1 and 12")
+        hour = hour % 12 + (12 if meridiem == "pm" else 0)
+    elif hour > 23:
+        raise ValueError("24-hour clock must use an hour between 0 and 23")
+    if minute > 59:
+        raise ValueError("clock time is out of range")
+    return hour, minute
+
+
+def _validate_friendly_boundary(
+    value: datetime,
+    slot_minutes: int = DEFAULT_SLOT_MINUTES,
+) -> datetime:
+    normalized = value.astimezone(timezone.utc).replace(microsecond=0)
+    if not is_slot_aligned(normalized, slot_minutes):
+        raise ValueError(f"start time must align to a {slot_phrase(slot_minutes)} boundary")
+    return normalized
 
 
 def format_local(value: Union[datetime, str]) -> str:

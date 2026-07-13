@@ -3,6 +3,11 @@ include LICENSE
 include README.zh-CN.md
 include RELEASING.md
 include SECURITY.md
+include TELEMETRY.md
+include UPGRADING.md
+recursive-include .github/workflows *.yml
 recursive-include src/bk/data *
 recursive-include tests test_*.py
+recursive-include tests/fixtures *
 recursive-include benchmarks *.py
+recursive-include tools *.py

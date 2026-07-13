@@ -16,14 +16,19 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+      - run: python -m pip install --upgrade 'pip>=26.1.2'
       - run: python -m pip install -e '.[mcp]' bandit coverage ruff pip-audit
-      - run: python -m compileall -q src tests benchmarks
-      - run: ruff check src tests benchmarks
-      - run: bandit -q -r src/bk --severity-level medium
+      - run: python -m compileall -q src tests benchmarks tools
+      - run: ruff check src tests benchmarks tools
+      - run: bandit -q -r src/bk tools --severity-level medium
+      - name: Verify real root-owned admin lifecycle
+        run: sudo env PYTHONPATH="$PWD/src" "$(command -v python)" -m unittest tests.test_admin.AdminRootLifecycleTests
       - run: PYTHONPATH=src python benchmarks/scheduler_queue.py --days 1
+      - run: PYTHONPATH=src python benchmarks/usage_store.py --days 1
       - run: coverage run -m unittest discover -s tests -p 'test_*.py'
       - run: coverage combine
       - run: coverage report
+      - run: python -O -m unittest discover -s tests -p 'test_*.py'
       - run: pip-audit
 
   core:
@@ -52,6 +57,19 @@ jobs:
       - run: python -m pip install '.[mcp]'
       - run: python -m unittest tests.test_mcp_server tests.test_mcp_integration
 
+  gpu-extra:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install '.[gpu]'
+      - run: python -c 'import pynvml; assert hasattr(pynvml, "nvmlDeviceGetComputeRunningProcesses"); assert hasattr(pynvml, "nvmlDeviceGetProcessUtilization")'
+      - run: python -m unittest tests.test_gpu tests.test_diagnostics tests.test_monitor tests.test_advisor
+      - run: BK_DATA_DIR=/tmp/gpubk-gpu-smoke BK_GPU_COUNT=2 python -m bk agent context --compact
+
   package:
     runs-on: ubuntu-latest
     steps:
@@ -74,9 +92,12 @@ jobs:
           with ZipFile(wheel) as archive:
               names = set(archive.namelist())
           required = {
+              "bk/tutorial.py",
               "bk/data/codex-skill/gpubk/SKILL.md",
               "bk/data/codex-skill/gpubk/agents/openai.yaml",
               "bk/data/codex-skill/gpubk/references/protocol.md",
+              "bk/data/systemd/system/gpubk-broker.service",
+              "bk/data/systemd/system/gpubk-monitor.service",
           }
           missing = required - names
           if missing:
@@ -87,6 +108,94 @@ jobs:
           python -m venv /tmp/bk-wheel-smoke
           /tmp/bk-wheel-smoke/bin/python -m pip install --no-deps dist/*.whl
           BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk --version
+          BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 XDG_STATE_HOME=/tmp/bk-wheel-state /tmp/bk-wheel-smoke/bin/bk tutorial > /tmp/bk-tutorial.txt
+          grep -- "GPUBK tutorial 1/" /tmp/bk-tutorial.txt
+          test ! -e /tmp/bk-wheel-data/ledger.json
           BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk agent context --compact > /tmp/bk-context.json
           /tmp/bk-wheel-smoke/bin/bk skill install --target /tmp/bk-wheel-skill
           /tmp/bk-wheel-smoke/bin/bk service show worker | grep -- "-m bk worker"
+          mkdir /tmp/bk-wheel-units
+          BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk service install worker --target-dir /tmp/bk-wheel-units
+          BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk service uninstall worker --target-dir /tmp/bk-wheel-units
+          test ! -e /tmp/bk-wheel-units/bk-worker.service
+          /tmp/bk-wheel-smoke/bin/python - <<'PY'
+          from pathlib import Path
+          from bk.systemd import system_unit_text
+
+          unit = system_unit_text(
+              "broker",
+              service_uid=1001,
+              service_gid=1001,
+              config_file=Path("/etc/gpubk/config.json"),
+              data_dir=Path("/var/lib/gpubk"),
+              socket_directory=Path("/run/gpubk"),
+              python_executable=Path("/opt/gpubk/bin/python"),
+          )
+          assert "User=1001" in unit
+          assert "RuntimeDirectory=gpubk" in unit
+          PY
+      - name: Verify scheduled-command wheel flow
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          root = Path("/tmp/bk-wheel-job-smoke")
+          work = root / "work"
+          work.mkdir(parents=True)
+          executable = "/tmp/bk-wheel-smoke/bin/bk"
+          python = "/tmp/bk-wheel-smoke/bin/python"
+          environment = {
+              **os.environ,
+              "BK_DATA_DIR": str(root / "data"),
+              "BK_JOB_LOG_DIR": str(root / "jobs"),
+              "BK_GPU_COUNT": "2",
+              "BK_WORKER_LIVE_GUARD": "0",
+          }
+
+          def run(*arguments, cwd=None):
+              result = subprocess.run(
+                  arguments,
+                  cwd=cwd,
+                  env=environment,
+                  text=True,
+                  capture_output=True,
+                  timeout=30,
+              )
+              if result.returncode:
+                  raise SystemExit(
+                      f"{arguments!r} failed ({result.returncode}): "
+                      f"stdout={result.stdout!r} stderr={result.stderr!r}"
+                  )
+              return result.stdout
+
+          booking = json.loads(
+              run(
+                  executable,
+                  "1",
+                  "10m",
+                  "--json",
+                  "--",
+                  python,
+                  "-c",
+                  "import os; print('E2E=' + os.environ['CUDA_VISIBLE_DEVICES'] + ':' + "
+                  "os.environ['BK_RESERVED_GPUS'] + ':' + os.environ['BK_RESERVATION_ID'])",
+                  cwd=work,
+              )
+          )
+          reservation = booking["reservation"]
+          run(executable, "worker", "--once", "--quiet", "--poll", "0.1")
+          jobs = json.loads(run(executable, "jobs", "--json"))
+          stored = next(item for item in jobs["jobs"] if item["id"] == reservation["id"])
+          log = run(executable, "job-log", reservation["id"])
+          proof = f"E2E=0:0:{reservation['id']}"
+
+          if reservation["gpus"] != [0] or stored["job"]["status"] != "succeeded":
+              raise SystemExit(f"unexpected scheduled-command result: {stored!r}")
+          if proof not in log:
+              raise SystemExit(f"worker environment proof is missing: {log!r}")
+          if list((root / "jobs" / "specs").glob("*.json")):
+              raise SystemExit("successful worker left a private command spec behind")
+          PY

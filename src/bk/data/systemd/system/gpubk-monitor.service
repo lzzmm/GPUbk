@@ -1,0 +1,37 @@
+[Unit]
+Description=GPUBK GPU usage monitor
+After=local-fs.target gpubk-broker.service
+Wants=gpubk-broker.service
+StartLimitIntervalSec=60
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=@SERVICE_UID@
+Group=@SERVICE_GID@
+@CONFIG_ENVIRONMENT@
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONDONTWRITEBYTECODE=1"
+ExecStart=@PYTHON_EXECUTABLE@ -m bk monitor
+Restart=on-failure
+RestartPreventExitStatus=75 77 78
+RestartSec=5
+WorkingDirectory=@DATA_DIRECTORY@
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectClock=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=@DATA_DIRECTORY@ @SOCKET_DIRECTORY@
+
+[Install]
+WantedBy=multi-user.target

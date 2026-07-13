@@ -7,8 +7,9 @@ from pathlib import Path
 from time import perf_counter
 
 from bk.config import Config
+from bk.granularity import ceil_to_slot
 from bk.models import MODE_EXCLUSIVE
-from bk.scheduler import _ceil_to_granularity, find_earliest_slot
+from bk.scheduler import find_earliest_slot
 from bk.timeparse import to_iso, utc_now
 
 
@@ -18,7 +19,13 @@ def main() -> None:
     parser.add_argument("--days", type=int, default=7)
     parser.add_argument("--slot-minutes", type=int, default=30)
     args = parser.parse_args()
-    start = _ceil_to_granularity(utc_now())
+    config = Config(
+        data_dir=Path("."),
+        gpu_count=args.gpus,
+        queue_search_hours=args.days * 24,
+        slot_minutes=args.slot_minutes,
+    )
+    start = ceil_to_slot(utc_now(), config.slot_minutes)
     slots = args.days * 24 * 60 // args.slot_minutes
     reservations = []
     for slot in range(slots):
@@ -38,7 +45,6 @@ def main() -> None:
                 }
             )
     ledger = {"version": 1, "reservations": reservations}
-    config = Config(data_dir=Path("."), gpu_count=args.gpus, queue_search_hours=args.days * 24)
     before = perf_counter()
     result = find_earliest_slot(
         ledger,

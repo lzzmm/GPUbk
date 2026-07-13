@@ -2,7 +2,7 @@
 
 ## One-time trusted-publisher setup
 
-GPUbk publishes without a stored PyPI API token. Before the first release:
+GPUBK publishes without a stored PyPI API token. Before the first release:
 
 1. In GitHub, create environments named `testpypi` and `pypi`. Require the `lzzmm` reviewer for `pypi`, restrict it to `v*.*.*` tags, and keep `main` protected by the complete CI check set. The public repository currently enforces these rules for administrators too.
 2. In TestPyPI's trusted-publisher settings, add owner `lzzmm`, repository `gpubk`, workflow `release.yml`, and environment `testpypi`.
@@ -13,17 +13,32 @@ GPUbk publishes without a stored PyPI API token. Before the first release:
 
 The publish jobs receive `id-token: write` only inside their protected environments. Both jobs also fail closed behind their corresponding release-enabled variable. Do not add `PYPI_API_TOKEN`, `TWINE_PASSWORD`, or a long-lived upload token to repository secrets.
 
+## Release candidates
+
+Use a unique PEP 440 prerelease such as `0.2.0rc1` in `src/bk/__init__.py` and
+keep the target heading, for example `## 0.2.0 - Unreleased`, in
+`CHANGELOG.md`. Push the candidate branch, wait for CI, then manually dispatch
+the `Release` workflow for that branch. Manual dispatch accepts prereleases
+only and stops after TestPyPI installation verification. It never publishes to
+PyPI.
+
+Test the exact TestPyPI wheel in an isolated environment and data directory.
+Increment the prerelease number for every retry; neither package index permits
+replacing an uploaded file.
+
 ## Every release
 
 1. Confirm the owner-approved Apache-2.0 `LICENSE` is included in both wheel and sdist metadata.
 2. Confirm the `lzzmm` author/maintainer metadata and `https://github.com/lzzmm/gpubk` URLs in `pyproject.toml`.
-3. Update `src/bk/__init__.py` and replace `Unreleased` in the matching `CHANGELOG.md` heading with the release date. Package metadata reads the version from `bk.__version__`.
+3. Replace the candidate version in `src/bk/__init__.py` with the final version and replace `Unreleased` in the matching `CHANGELOG.md` heading with the release date. Package metadata reads the version from `bk.__version__`.
 4. Run core tests:
 
    ```bash
-   python -m compileall -q src tests benchmarks
-   ruff check src tests benchmarks
+   python -m pip install --upgrade pip
+   python -m compileall -q src tests benchmarks tools
+   ruff check src tests benchmarks tools
    PYTHONPATH=src python benchmarks/scheduler_queue.py
+   PYTHONPATH=src python benchmarks/usage_store.py
    coverage run -m unittest discover -s tests -p 'test_*.py'
    coverage combine
    coverage report
@@ -47,16 +62,47 @@ The publish jobs receive `id-token: write` only inside their protected environme
    validate-pyproject pyproject.toml
    ```
 
-7. Install the wheel into a fresh environment. Verify `bk --version`, core zero-dependency installation, `bk skill install`, and `bk-mcp` with the MCP extra.
-8. Run bounded read-only NVML/context/recommendation checks on a real multi-GPU host with an isolated `BK_DATA_DIR`. Do not start workloads or services during release validation.
-9. Commit and push the release metadata, wait for `CI` to pass, then create and push an annotated version tag:
+7. Install the wheel into a fresh environment. Verify `bk --version`, core zero-dependency
+   installation, `bk skill install`, and `bk-mcp` with the MCP extra. In an isolated no-GPU
+   simulation, create a scheduled-command reservation from the wheel, run `bk worker --once`,
+   and verify its terminal state, injected GPU environment, private log, and spec cleanup. Also
+   install the most recent public GPUBK release in a separate environment, create a real ledger,
+   upgrade it with the new wheel, confirm read-only checks do not rewrite the old files, and then
+   create a reservation using the new scheduling fields.
+8. As the configured `monitor_uid`, run `bk doctor --probe --strict` and bounded read-only
+   NVML/context/recommendation checks on a real multi-GPU host with an isolated `BK_DATA_DIR`.
+   The `process-identity` probe must demonstrate numeric ownership visibility for a process from
+   another UID; create no GPU workload merely for this check. Confirm every GPU reports
+   `capabilities.stable_device_identifier=true`; after one bounded `bk monitor --once` sample,
+   confirm `collector.stable_device_identifier_gap=[]` and
+   `collector.process_identity_gap=[]`. Do not start workloads or services during release
+   validation.
+9. Commit and push the release metadata through a pull request, wait for `CI` to pass, and merge it to `main`. Create the annotated tag from that exact `main` commit:
 
    ```bash
-   git tag -a v0.1.0 -m "GPUbk 0.1.0"
-   git push origin v0.1.0
+   VERSION=$(PYTHONPATH=src python -c 'from bk import __version__; print(__version__)')
+   git tag -a "v$VERSION" -m "GPUBK $VERSION"
+   git push origin "v$VERSION"
    ```
 
-10. The `Release` workflow rebuilds and tests the tag, uploads that artifact to TestPyPI, and installs it back from TestPyPI. Only then does the protected `pypi` environment request approval to promote the exact same wheel and sdist.
-11. Approve `pypi` and wait for the PyPI installation smoke test. Download the exact workflow artifact, verify its hashes against PyPI, create a draft GitHub Release for the same tag, attach the wheel and sdist, then publish the draft. Never rebuild an artifact locally for promotion. Release immutability locks the published tag and assets and creates a release attestation.
+   Do not merge another change before the tag workflow starts. Production
+   release tags must be annotated and point exactly at the current
+   `origin/main` tip; an older commit that merely exists in main history is
+   rejected.
 
-Manual `Release` dispatches stop after TestPyPI verification. Use them only with a unique pre-release version such as `0.1.0rc1`; uploaded versions cannot be replaced.
+10. The `Release` workflow rebuilds and tests the tag, records the wheel and sdist SHA-256
+    digests, uploads those artifacts to TestPyPI, verifies both indexed files against the recorded
+    digests, and installs the wheel back from TestPyPI. Only then does the protected `pypi`
+    environment request approval to promote the exact same wheel and sdist.
+11. Approve `pypi` and wait for its automatic digest comparison and installation smoke test.
+    Download the exact workflow artifact, confirm its recorded hashes, create a draft GitHub Release
+    for the same tag, attach the wheel and sdist, then publish the draft. Never rebuild an artifact
+    locally for promotion. Release immutability locks the published tag and assets and creates a
+    release attestation.
+
+The workflow rejects a tag that is lightweight, points anywhere other than the
+current `main` tip, is a prerelease, does not match the package, or still has an
+`Unreleased` changelog heading. It
+also rejects an already-existing TestPyPI or PyPI version before requesting an
+upload. Production publication therefore always starts from a new final-version
+tag; manual dispatch remains the prerelease-only TestPyPI path.

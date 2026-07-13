@@ -8,7 +8,16 @@ from unittest import mock
 
 from bk.config import Config
 from bk.models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, EditRequest
-from bk.scheduler import MAX_EDIT_OPERATIONS_PER_RESERVATION, add_booking, edit_booking, find_available_gpus
+from bk.scheduler import (
+    MAX_EDIT_OPERATIONS_PER_RESERVATION,
+    add_booking,
+    cancel_booking,
+    edit_booking,
+    find_applied_create,
+    find_applied_edit,
+    find_available_gpus,
+    find_earliest_slot,
+)
 from bk.storage import LedgerStore
 from bk.timeparse import parse_iso, utc_now
 
@@ -42,6 +51,8 @@ class SchedulerModeTests(unittest.TestCase):
         preferred_gpus=None,
         allow_queue=False,
         op_id=None,
+        share_units=None,
+        excluded_gpus=None,
     ):
         return BookingRequest(
             actor=Actor(uid=uid, username=f"user{uid}"),
@@ -52,7 +63,113 @@ class SchedulerModeTests(unittest.TestCase):
             preferred_gpus=preferred_gpus,
             allow_queue=allow_queue,
             op_id=op_id,
+            share_units=share_units,
+            excluded_gpus=excluded_gpus,
         )
+
+    def test_administrator_disabled_gpu_is_never_selected(self):
+        config = replace(self.config, gpu_count=2, disabled_gpus=(1,))
+
+        automatic = add_booking(
+            self.store,
+            config,
+            self.request(1001, MODE_SHARED),
+        )
+        self.assertEqual(automatic.reservation["gpus"], [0])
+
+        with self.assertRaisesRegex(BookingError, "disabled by the administrator"):
+            add_booking(
+                self.store,
+                config,
+                self.request(1002, MODE_SHARED, preferred_gpus=[1]),
+            )
+
+    def test_request_exclusions_are_enforced_by_the_scheduler(self):
+        config = replace(self.config, gpu_count=3)
+
+        result = add_booking(
+            self.store,
+            config,
+            self.request(
+                1001,
+                MODE_SHARED,
+                excluded_gpus=[0, 1],
+            ),
+        )
+
+        self.assertEqual(result.reservation["gpus"], [2])
+        with self.assertRaisesRegex(BookingError, "only 1 are eligible"):
+            add_booking(
+                self.store,
+                config,
+                self.request(
+                    1002,
+                    MODE_SHARED,
+                    count=2,
+                    excluded_gpus=[0, 1],
+                ),
+            )
+
+    def test_administrator_priority_precedes_load_only_within_the_same_time(self):
+        config = replace(self.config, gpu_count=2, gpu_priority=((0, 10),))
+        request = replace(
+            self.request(1001, MODE_EXCLUSIVE),
+            gpu_scores={0: -1000.0, 1: 1000.0},
+        )
+
+        preferred = add_booking(self.store, config, request)
+        self.assertEqual(preferred.reservation["gpus"], [1])
+
+        later_store = LedgerStore(Path(self.tmp.name) / "time-first")
+        add_booking(
+            later_store,
+            config,
+            self.request(1002, MODE_EXCLUSIVE, preferred_gpus=[1]),
+        )
+        immediate = add_booking(
+            later_store,
+            config,
+            replace(request, actor=Actor(1003, "user1003"), allow_queue=True),
+        )
+        self.assertEqual(immediate.reservation["gpus"], [0])
+        self.assertEqual(parse_iso(immediate.reservation["start_at"]), self.start)
+
+    def test_edit_exclusion_reallocates_without_changing_gpu_count(self):
+        config = replace(self.config, gpu_count=2)
+        created = add_booking(
+            self.store,
+            config,
+            self.request(1001, MODE_SHARED, preferred_gpus=[0]),
+        )
+
+        edited = edit_booking(
+            self.store,
+            config,
+            EditRequest(
+                actor=Actor(1001, "user1001"),
+                reservation_id=created.reservation["id"],
+                excluded_gpus=[0],
+            ),
+        )
+
+        self.assertEqual(edited.reservation["gpus"], [1])
+
+    def test_operation_id_binds_request_exclusions(self):
+        config = replace(self.config, gpu_count=2)
+        first = self.request(
+            1001,
+            MODE_SHARED,
+            op_id="exclude-retry",
+            excluded_gpus=[0],
+        )
+        add_booking(self.store, config, first)
+
+        with self.assertRaisesRegex(BookingError, "different write"):
+            add_booking(
+                self.store,
+                config,
+                replace(first, excluded_gpus=[1]),
+            )
 
     def test_shared_allows_configured_number_of_users(self):
         first = add_booking(self.store, self.config, self.request(1001, MODE_SHARED))
@@ -86,6 +203,40 @@ class SchedulerModeTests(unittest.TestCase):
         self.assertFalse(second.created)
         self.assertEqual(first.reservation["id"], second.reservation["id"])
 
+    def test_legacy_job_digest_aliases_require_valid_job_metadata(self):
+        request = replace(
+            self.request(1001, MODE_SHARED),
+            job_digest_aliases=["0" * 64],
+        )
+
+        with self.assertRaisesRegex(BookingError, "require job metadata"):
+            add_booking(self.store, self.config, request)
+
+        self.assertFalse(self.store.ledger_path.exists())
+
+    def test_legacy_job_digest_aliases_are_bounded_and_validated(self):
+        base = replace(
+            self.request(1001, MODE_SHARED),
+            job_spec_id="00000000-0000-0000-0000-000000000001",
+            job_digest="0" * 64,
+            job_summary="python train.py",
+        )
+
+        with self.assertRaisesRegex(BookingError, "at most 4"):
+            add_booking(
+                self.store,
+                self.config,
+                replace(base, job_digest_aliases=[f"{index:064x}" for index in range(5)]),
+            )
+        with self.assertRaisesRegex(BookingError, "invalid legacy"):
+            add_booking(
+                self.store,
+                self.config,
+                replace(base, job_digest_aliases=["not-a-digest"]),
+            )
+
+        self.assertFalse(self.store.ledger_path.exists())
+
     def test_exclusive_duplicate_is_idempotent(self):
         first = add_booking(self.store, self.config, self.request(1001, MODE_EXCLUSIVE))
         second = add_booking(self.store, self.config, self.request(1001, MODE_EXCLUSIVE))
@@ -106,6 +257,11 @@ class SchedulerModeTests(unittest.TestCase):
             self.config,
             self.request(1001, MODE_SHARED, op_id="agent-create-1"),
         )
+        replayed = find_applied_create(
+            self.store.load(),
+            self.config,
+            self.request(1001, MODE_SHARED, op_id="agent-create-1"),
+        )
         with self.assertRaisesRegex(BookingError, "different write"):
             add_booking(
                 self.store,
@@ -118,6 +274,74 @@ class SchedulerModeTests(unittest.TestCase):
                 ),
             )
 
+        self.assertFalse(retried.created)
+        self.assertFalse(replayed.created)
+        self.assertEqual(retried.reservation["id"], first.reservation["id"])
+        self.assertEqual(replayed.reservation["id"], first.reservation["id"])
+        self.assertEqual(len(self.store.load()["reservations"]), 1)
+
+    def test_create_operation_retry_remains_idempotent_after_its_start(self):
+        request = self.request(
+            1001,
+            MODE_EXCLUSIVE,
+            op_id="agent-create-before-start",
+        )
+        with mock.patch(
+            "bk.scheduler.utc_now",
+            return_value=self.start - timedelta(hours=1),
+        ):
+            first = add_booking(self.store, self.config, request)
+        with mock.patch(
+            "bk.scheduler.utc_now",
+            return_value=self.start + timedelta(minutes=5),
+        ):
+            retried = add_booking(self.store, self.config, request)
+
+        self.assertTrue(first.created)
+        self.assertFalse(retried.created)
+        self.assertEqual(first.reservation["id"], retried.reservation["id"])
+
+    def test_operation_id_signature_includes_share_units(self):
+        config = replace(self.config, max_shared_users=4)
+        add_booking(
+            self.store,
+            config,
+            self.request(
+                1001,
+                MODE_SHARED,
+                op_id="agent-share-create",
+                share_units=1,
+            ),
+        )
+
+        with self.assertRaisesRegex(BookingError, "different write"):
+            add_booking(
+                self.store,
+                config,
+                self.request(
+                    1001,
+                    MODE_SHARED,
+                    op_id="agent-share-create",
+                    share_units=2,
+                ),
+            )
+
+    def test_implicit_now_operation_id_remains_idempotent_across_a_slot_boundary(self):
+        request_time = self.start + timedelta(minutes=1)
+        request = self.request(
+            1001,
+            MODE_SHARED,
+            start=request_time,
+            allow_queue=True,
+            op_id="agent-now-across-boundary",
+        )
+
+        with mock.patch("bk.scheduler.utc_now", return_value=request_time):
+            first = add_booking(self.store, self.config, request)
+        with mock.patch("bk.scheduler.utc_now", return_value=request_time + timedelta(minutes=5)):
+            retried = add_booking(self.store, self.config, request)
+
+        self.assertTrue(first.created)
         self.assertFalse(retried.created)
         self.assertEqual(retried.reservation["id"], first.reservation["id"])
         self.assertEqual(len(self.store.load()["reservations"]), 1)
@@ -134,6 +358,7 @@ class SchedulerModeTests(unittest.TestCase):
 
         first = edit_booking(self.store, self.config, request)
         retried = edit_booking(self.store, self.config, request)
+        replayed = find_applied_edit(self.store.load(), self.config, request)
         with self.assertRaisesRegex(BookingError, "different write"):
             edit_booking(
                 self.store,
@@ -154,7 +379,9 @@ class SchedulerModeTests(unittest.TestCase):
 
         self.assertTrue(first.created)
         self.assertFalse(retried.created)
+        self.assertFalse(replayed.created)
         self.assertEqual(first.reservation["end_at"], retried.reservation["end_at"])
+        self.assertEqual(first.reservation["end_at"], replayed.reservation["end_at"])
         self.assertEqual(len(first.reservation["edit_operations"]), 1)
         self.assertEqual(len(self.store.log_path.read_text(encoding="utf-8").splitlines()), 2)
 
@@ -210,6 +437,98 @@ class SchedulerModeTests(unittest.TestCase):
 
         self.assertTrue(third.queued)
         self.assertEqual(parse_iso(third.reservation["start_at"]), self.start + timedelta(hours=1))
+
+    def test_weighted_share_leaves_only_the_remaining_capacity(self):
+        config = replace(self.config, max_shared_users=4)
+        first = add_booking(
+            self.store,
+            config,
+            self.request(1001, MODE_SHARED, allow_queue=True, share_units=3),
+        )
+        second = add_booking(
+            self.store,
+            config,
+            self.request(1002, MODE_SHARED, allow_queue=True),
+        )
+        third = add_booking(
+            self.store,
+            config,
+            self.request(1003, MODE_SHARED, allow_queue=True),
+        )
+
+        self.assertEqual(first.reservation["share_units"], 3)
+        self.assertFalse(second.queued)
+        self.assertEqual(second.reservation["share_units"], 1)
+        self.assertTrue(third.queued)
+        self.assertEqual(parse_iso(third.reservation["start_at"]), self.start + timedelta(hours=1))
+
+    def test_legacy_record_without_share_units_counts_as_one(self):
+        config = replace(self.config, max_shared_users=4)
+        legacy = add_booking(self.store, config, self.request(1001, MODE_SHARED)).reservation
+
+        def remove_new_field(ledger):
+            ledger["reservations"][0].pop("share_units")
+            return ledger, None, [], True
+
+        self.store.transaction(remove_new_field)
+        weighted = add_booking(
+            self.store,
+            config,
+            self.request(1002, MODE_SHARED, share_units=3),
+        )
+
+        self.assertTrue(weighted.created)
+        self.assertNotIn("share_units", next(item for item in self.store.load()["reservations"] if item["id"] == legacy["id"]))
+        with self.assertRaisesRegex(BookingError, "shared capacity full"):
+            add_booking(self.store, config, self.request(1003, MODE_SHARED))
+
+    def test_editing_share_units_rechecks_overlapping_capacity(self):
+        config = replace(self.config, max_shared_users=4)
+        mine = add_booking(self.store, config, self.request(1001, MODE_SHARED)).reservation
+        add_booking(
+            self.store,
+            config,
+            self.request(1002, MODE_SHARED, share_units=2),
+        )
+
+        with self.assertRaisesRegex(BookingError, "shared capacity full"):
+            edit_booking(
+                self.store,
+                config,
+                EditRequest(
+                    actor=Actor(1001, "user1001"),
+                    reservation_id=mine["id"],
+                    share_units=3,
+                    update_share_units=True,
+                ),
+            )
+
+        stored = next(item for item in self.store.load()["reservations"] if item["id"] == mine["id"])
+        self.assertEqual(stored["share_units"], 1)
+
+    def test_explicit_memory_is_not_multiplied_by_share_units(self):
+        config = replace(self.config, max_shared_users=4)
+        capacities = {0: 24 * 1024}
+        add_booking(
+            self.store,
+            config,
+            replace(
+                self.request(1001, MODE_SHARED, share_units=3),
+                expected_memory_mb=4 * 1024,
+                gpu_memory_capacity_mb=capacities,
+            ),
+        )
+        second = add_booking(
+            self.store,
+            config,
+            replace(
+                self.request(1002, MODE_SHARED),
+                expected_memory_mb=4 * 1024,
+                gpu_memory_capacity_mb=capacities,
+            ),
+        )
+
+        self.assertTrue(second.created)
 
     def test_third_shared_user_queues_after_shared_capacity_frees(self):
         add_booking(self.store, self.config, self.request(1001, MODE_SHARED, allow_queue=True))
@@ -284,6 +603,58 @@ class SchedulerModeTests(unittest.TestCase):
                 )
 
         self.assertEqual(self.store.load(), before)
+
+    def test_queued_edit_does_not_silently_move_an_explicit_past_start(self):
+        actor = Actor(uid=1001, username="user1001")
+        created = add_booking(self.store, self.config, self.request(actor.uid, MODE_SHARED))
+        now = self.start - timedelta(minutes=30)
+        before = self.store.load()
+
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            with self.assertRaisesRegex(
+                BookingError,
+                "earliest editable slot",
+            ):
+                edit_booking(
+                    self.store,
+                    self.config,
+                    EditRequest(
+                        actor=actor,
+                        reservation_id=created.reservation["id"],
+                        start_at=now - timedelta(minutes=5),
+                        allow_queue=True,
+                    ),
+                )
+
+        self.assertEqual(self.store.load(), before)
+
+    def test_edit_rejects_explicit_zero_duration_and_gpu_count(self):
+        actor = Actor(uid=1001, username="user1001")
+        created = add_booking(self.store, self.config, self.request(actor.uid, MODE_SHARED))
+        before = self.store.load()
+
+        for request, message in (
+            (
+                EditRequest(
+                    actor=actor,
+                    reservation_id=created.reservation["id"],
+                    duration_seconds=0,
+                ),
+                "duration must be positive",
+            ),
+            (
+                EditRequest(
+                    actor=actor,
+                    reservation_id=created.reservation["id"],
+                    count=0,
+                ),
+                "GPU count must be >= 1",
+            ),
+        ):
+            with self.subTest(message=message):
+                with self.assertRaisesRegex(BookingError, message):
+                    edit_booking(self.store, self.config, request)
+                self.assertEqual(self.store.load(), before)
 
     def test_preferred_gpu_queues_on_that_gpu_while_auto_can_choose_another(self):
         config = Config(data_dir=Path(self.tmp.name), gpu_count=2, max_shared_users=2)
@@ -383,15 +754,124 @@ class SchedulerModeTests(unittest.TestCase):
                 ),
             )
 
-    def test_implicit_now_start_is_rounded_up_to_five_minute_grid(self):
-        unaligned = self.start + timedelta(minutes=1)
-        result = add_booking(
-            self.store,
-            self.config,
-            self.request(1001, MODE_SHARED, start=unaligned, allow_queue=True),
-        )
+    def test_implicit_now_start_uses_the_current_five_minute_slot(self):
+        now = self.start + timedelta(minutes=1, seconds=17)
 
-        self.assertEqual(int(parse_iso(result.reservation["start_at"]).timestamp()) % 300, 0)
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            result = add_booking(
+                self.store,
+                self.config,
+                self.request(1001, MODE_SHARED, start=now, allow_queue=True),
+            )
+
+        self.assertEqual(parse_iso(result.reservation["start_at"]), self.start)
+        self.assertEqual(parse_iso(result.reservation["end_at"]), self.start + timedelta(hours=1))
+
+    def test_implicit_now_ignores_legacy_end_before_now_inside_the_current_slot(self):
+        now = self.start + timedelta(minutes=1, seconds=17)
+        legacy_end = self.start + timedelta(seconds=30)
+        ledger = {
+            "version": 1,
+            "reservations": [
+                {
+                    "id": "legacy-sub-slot-end",
+                    "uid": 1009,
+                    "username": "legacy",
+                    "gpus": [0],
+                    "mode": MODE_EXCLUSIVE,
+                    "start_at": (self.start - timedelta(hours=1)).isoformat(),
+                    "end_at": legacy_end.isoformat(),
+                    "status": "active",
+                }
+            ],
+        }
+
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            slot = find_earliest_slot(
+                ledger,
+                self.config,
+                1,
+                now,
+                timedelta(hours=1),
+                MODE_EXCLUSIVE,
+                1001,
+                allow_queue=True,
+            )
+
+        self.assertIsNotNone(slot)
+        self.assertEqual(slot[0], self.start)
+
+    def test_implicit_now_queues_while_legacy_record_is_still_active(self):
+        now = self.start + timedelta(minutes=1, seconds=17)
+        legacy_end = self.start + timedelta(minutes=2)
+        ledger = {
+            "version": 1,
+            "reservations": [
+                {
+                    "id": "legacy-still-active",
+                    "uid": 1009,
+                    "username": "legacy",
+                    "gpus": [0],
+                    "mode": MODE_EXCLUSIVE,
+                    "start_at": (self.start - timedelta(hours=1)).isoformat(),
+                    "end_at": legacy_end.isoformat(),
+                    "status": "active",
+                }
+            ],
+        }
+
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            slot = find_earliest_slot(
+                ledger,
+                self.config,
+                1,
+                now,
+                timedelta(hours=1),
+                MODE_EXCLUSIVE,
+                1001,
+                allow_queue=True,
+            )
+
+        self.assertIsNotNone(slot)
+        self.assertEqual(slot[0], self.start + timedelta(minutes=5))
+
+    def test_exact_create_rejects_before_but_allows_the_current_slot(self):
+        now = self.start + timedelta(minutes=1, seconds=17)
+        before = self.store.load()
+
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            with self.assertRaisesRegex(BookingError, "current booking slice"):
+                add_booking(
+                    self.store,
+                    self.config,
+                    self.request(
+                        1001,
+                        MODE_EXCLUSIVE,
+                        start=self.start - timedelta(minutes=5),
+                    ),
+                )
+
+        self.assertEqual(self.store.load(), before)
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            created = add_booking(
+                self.store,
+                self.config,
+                self.request(1001, MODE_EXCLUSIVE, start=self.start),
+            )
+        self.assertEqual(parse_iso(created.reservation["start_at"]), self.start)
+
+    def test_future_unaligned_queue_start_is_still_rounded_up(self):
+        now = self.start - timedelta(minutes=30)
+        requested = self.start + timedelta(minutes=1)
+
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            result = add_booking(
+                self.store,
+                self.config,
+                self.request(1001, MODE_SHARED, start=requested, allow_queue=True),
+            )
+
+        self.assertEqual(parse_iso(result.reservation["start_at"]), self.start + timedelta(minutes=5))
 
     def test_explicit_start_and_duration_must_match_five_minute_grid(self):
         with self.assertRaisesRegex(BookingError, "5-minute boundary"):
@@ -399,6 +879,78 @@ class SchedulerModeTests(unittest.TestCase):
 
         with self.assertRaisesRegex(BookingError, "multiple of 5 minutes"):
             add_booking(self.store, self.config, self.request(1001, MODE_SHARED, duration_seconds=60))
+
+    def test_configured_ten_minute_grid_controls_create_and_queue_candidates(self):
+        config = Config(
+            data_dir=Path(self.tmp.name),
+            gpu_count=1,
+            max_shared_users=2,
+            slot_minutes=10,
+        )
+        now = datetime(2030, 1, 1, 12, 47, 23, tzinfo=self.start.tzinfo)
+
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            created = add_booking(
+                self.store,
+                config,
+                self.request(
+                    1001,
+                    MODE_SHARED,
+                    start=now,
+                    duration_seconds=20 * 60,
+                    allow_queue=True,
+                ),
+            )
+
+        self.assertEqual(parse_iso(created.reservation["start_at"]), now.replace(minute=40, second=0))
+        with self.assertRaisesRegex(BookingError, "multiple of 10 minutes"):
+            add_booking(
+                self.store,
+                config,
+                self.request(1002, MODE_SHARED, duration_seconds=5 * 60),
+            )
+        with self.assertRaisesRegex(BookingError, "10-minute boundary"):
+            add_booking(
+                self.store,
+                config,
+                self.request(
+                    1002,
+                    MODE_SHARED,
+                    start=datetime(2030, 1, 2, 12, 45, tzinfo=self.start.tzinfo),
+                    duration_seconds=20 * 60,
+                ),
+            )
+
+        legacy_end = datetime(2030, 1, 2, 12, 45, tzinfo=self.start.tzinfo)
+        ledger = {
+            "version": 1,
+            "reservations": [
+                {
+                    "id": "legacy-five-minute-end",
+                    "uid": 1009,
+                    "username": "legacy",
+                    "gpus": [0],
+                    "mode": MODE_EXCLUSIVE,
+                    "start_at": (legacy_end - timedelta(minutes=5)).isoformat(),
+                    "end_at": legacy_end.isoformat(),
+                    "status": "active",
+                }
+            ],
+        }
+        with mock.patch("bk.scheduler.utc_now", return_value=legacy_end - timedelta(hours=1)):
+            slot = find_earliest_slot(
+                ledger,
+                config,
+                1,
+                legacy_end - timedelta(minutes=5),
+                timedelta(minutes=20),
+                MODE_EXCLUSIVE,
+                1001,
+                allow_queue=True,
+            )
+
+        self.assertIsNotNone(slot)
+        self.assertEqual(slot[0], datetime(2030, 1, 2, 12, 50, tzinfo=self.start.tzinfo))
 
     def test_new_booking_prunes_old_terminal_records_but_keeps_audit_log(self):
         now = utc_now()
@@ -417,10 +969,16 @@ class SchedulerModeTests(unittest.TestCase):
             "created_at": old.isoformat(),
             "updated_at": old.isoformat(),
         }
-        old_cancelled = {**old_record, "id": "old-cancelled", "status": "cancelled"}
+        old_cancelled = {
+            **old_record,
+            "id": "old-cancelled",
+            "op_id": "old-cancelled-op",
+            "status": "cancelled",
+        }
         recent_cancelled = {
             **old_record,
             "id": "recent-cancelled",
+            "op_id": "recent-cancelled-op",
             "status": "cancelled",
             "updated_at": recent.isoformat(),
         }
@@ -430,6 +988,8 @@ class SchedulerModeTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.store.log_path.write_text('{"event_id":"historic-audit"}\n', encoding="utf-8")
+        self.store.ledger_path.chmod(0o600)
+        self.store.log_path.chmod(0o600)
         config = replace(self.config, ledger_retention_days=30)
 
         created = add_booking(self.store, config, self.request(2000, MODE_SHARED))
@@ -437,6 +997,68 @@ class SchedulerModeTests(unittest.TestCase):
         ids = {item["id"] for item in self.store.load()["reservations"]}
         self.assertEqual(ids, {"recent-cancelled", created.reservation["id"]})
         self.assertIn("historic-audit", self.store.log_path.read_text(encoding="utf-8"))
+
+    def test_maintenance_marks_expired_running_job_uncertain(self):
+        now = utc_now()
+        record = {
+            "id": "expired-running",
+            "uid": 1001,
+            "username": "user1001",
+            "gpus": [0],
+            "mode": MODE_SHARED,
+            "start_at": (now - timedelta(minutes=10)).isoformat(),
+            "end_at": (now - timedelta(minutes=5)).isoformat(),
+            "status": "active",
+            "created_at": (now - timedelta(minutes=10)).isoformat(),
+            "updated_at": (now - timedelta(minutes=10)).isoformat(),
+            "job": {"status": "running", "summary": "python train.py"},
+        }
+        self.store.ensure()
+        self.store.ledger_path.write_text(
+            json.dumps({"version": 1, "reservations": [record]}),
+            encoding="utf-8",
+        )
+        self.store.ledger_path.chmod(0o600)
+
+        add_booking(self.store, self.config, self.request(2000, MODE_SHARED))
+
+        stored = next(
+            item for item in self.store.load()["reservations"] if item["id"] == "expired-running"
+        )
+        self.assertEqual(stored["status"], "expired")
+        self.assertEqual(stored["job"]["status"], "uncertain")
+        self.assertEqual(stored["job"]["recovery_state"], "expired-unverified")
+
+    def test_cancellation_preserves_claim_for_crash_recovery(self):
+        actor = Actor(1001, "user1001")
+        created = add_booking(
+            self.store,
+            self.config,
+            BookingRequest(
+                actor=actor,
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=self.start,
+                job_spec_id="00000000-0000-0000-0000-000000000001",
+                job_digest="0" * 64,
+                job_summary="python train.py",
+            ),
+        ).reservation
+
+        def mark_claimed(ledger):
+            item = next(value for value in ledger["reservations"] if value["id"] == created["id"])
+            item["job"]["status"] = "claimed"
+            item["job"]["claim_token"] = "claim-token"
+            item["job"]["worker_lease_id"] = "old-worker"
+            return ledger, None, [], True
+
+        self.store.transaction(mark_claimed)
+
+        cancelled = cancel_booking(self.store, created["id"], actor)
+
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["job"]["status"], "claimed")
+        self.assertIsNotNone(cancelled["job"]["cancel_requested_at"])
 
 
 if __name__ == "__main__":
