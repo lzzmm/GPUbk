@@ -541,6 +541,19 @@ sudo systemctl enable --now gpubk-broker.service gpubk-monitor.service
 bk doctor --probe --require-monitor --strict
 ```
 
+If `ln` reports `File exists`, do not force-replace the path. Inspect it first:
+
+```bash
+ls -l /usr/local/bin/bk
+readlink -f /usr/local/bin/bk
+```
+
+When the second command prints `/opt/gpubk/bin/bk`, the existing link is already
+correct and can be kept; package upgrades update its target in place. Otherwise,
+remove it with `sudo unlink /usr/local/bin/bk` only after confirming that it is a
+stale symbolic link, then create the link again. Never use `ln -sf` over an
+unknown regular file.
+
 On Debian or Ubuntu, install `python3-venv` first if `venv` is unavailable. The
 initializer detects the GPUs and uses the account that invoked `sudo` as the
 broker and monitor owner. It creates the same production paths used by a normal
@@ -655,7 +668,7 @@ bk broker --check
 bk doctor --probe --require-monitor --strict
 ```
 
-See [UPGRADING.md](UPGRADING.md) for service restart, rollback, and release-specific
+See [UPGRADING.md](https://github.com/lzzmm/gpubk/blob/main/UPGRADING.md) for service restart, rollback, and release-specific
 checks.
 
 Stop and disable the tracked services before uninstalling. GPUBK verifies each

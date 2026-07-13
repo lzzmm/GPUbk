@@ -9,7 +9,7 @@ audit-tail response uses `schema_version: "gpubk.audit.v1"`; worker liveness use
 ```bash
 bk agent context --compact
 bk info --compact
-bk agent recommend COUNT DURATION [--mode s|x] [--start ISO] [--gpu 0,1] [--mem 12g] [--share SLOTS] --compact
+bk agent recommend COUNT DURATION [--mode s|x] [--start ISO] [--gpu 0,1 | --exclude-gpu 7] [--mem 12g] [--share SLOTS] --compact
 bk COUNT DURATION [--mem 12g] [--share SLOTS] --op-id ID --json
 bk agent edit RESERVATION --duration 2h [--share SLOTS] --op-id ID --compact
 bk agent cancel RESERVATION --compact
@@ -30,6 +30,11 @@ Recommendation fields:
 - Context `administrator` and `bk info` use `gpubk.administrator.v1`. They expose the selected
   Linux administrator account and sanitized GECOS contact fields so an Agent can direct an
   operational issue to a human; they are not authentication or authorization data.
+- Context policy exposes `enabled_gpus`, `disabled_gpus`, and integer `gpu_priority` tiers.
+  Disabled GPUs remain visible for monitoring and history but are never legal placements. Larger
+  priority values are less preferred only among otherwise-equivalent choices; the earliest legal
+  start remains authoritative. Request `exclude_gpus` further removes devices from one automatic
+  recommendation or write and is mutually exclusive with a fixed GPU list.
 - `available`: whether the requested semantics have a legal slot.
 - `recommendation.gpus`, `start_at`, `end_at`, `queued`, `confidence`.
 - Context GPU entries include model name, temperature, live status, physical VRAM, recent load
@@ -145,7 +150,9 @@ Each retained reservation keeps at most 256 idempotent edit intents so malformed
 
 ## External Allocator
 
-Input uses `schema_version: "bk.allocator.v1"` and includes a privacy-safe request, policy (including `granularity_minutes`), built-in scores, per-GPU telemetry/history, and active reservation windows.
+Input uses `schema_version: "bk.allocator.v1"` and includes a privacy-safe request, policy
+(including `granularity_minutes`, enabled/disabled GPUs, and priority tiers), built-in scores,
+per-GPU telemetry/history, request exclusions, and active reservation windows.
 
 Return exactly one JSON object:
 
@@ -157,7 +164,9 @@ Return exactly one JSON object:
 }
 ```
 
-`gpu_order` must be a complete permutation. It is blended into local scores and cannot bypass
-deterministic placement validation. GPUBK rejects ledger-policy mismatch before invoking the
+`gpu_order` must be a complete permutation of every configured index, including entries that are
+currently ineligible. GPUBK filters administrator-disabled and request-excluded GPUs locally. The
+remaining order is blended into local scores and cannot bypass deterministic placement
+validation. GPUBK rejects ledger-policy mismatch before invoking the
 allocator. Timeout, malformed output, nonzero exit, and ordinary execution errors use built-in
 fallback ordering; process interrupts terminate the allocator process group before propagating.

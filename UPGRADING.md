@@ -33,6 +33,10 @@ new processes and reinstall the recorded version, for example:
 sudo /opt/gpubk/bin/python -m pip install 'gpubk[gpu]==PREVIOUS_VERSION'
 ```
 
+The `/usr/local/bin/bk` symbolic link does not need to be recreated during a
+routine upgrade. If it already resolves to `/opt/gpubk/bin/bk`, leave it in
+place; do not use a force-link command over an unknown existing path.
+
 Then restart and verify again. The root-owned install manifest, configuration,
 reservations, audit log, and usage history remain in place throughout. Running
 `bk admin services install --yes` after the package update refreshes tracked

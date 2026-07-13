@@ -43,6 +43,22 @@ class BundledSkillTests(unittest.TestCase):
         self.assertIn("bk agent edit", text)
         self.assertIn("collector.fresh", text)
         self.assertIn("--require-monitor", text)
+        self.assertIn("--exclude-gpu", text)
+        self.assertIn("policy.disabled_gpus", text)
+
+        protocol = (
+            Path(__file__).parents[1]
+            / "src"
+            / "bk"
+            / "data"
+            / "codex-skill"
+            / "gpubk"
+            / "references"
+            / "protocol.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("enabled_gpus", protocol)
+        self.assertIn("disabled_gpus", protocol)
+        self.assertIn("request-excluded", protocol)
 
     def test_install_is_complete_and_refuses_accidental_overwrite(self):
         with tempfile.TemporaryDirectory() as tmp:

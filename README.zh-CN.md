@@ -461,6 +461,17 @@ sudo systemctl enable --now gpubk-broker.service gpubk-monitor.service
 bk doctor --probe --require-monitor --strict
 ```
 
+若 `ln` 提示 `File exists`，不要强制覆盖，先检查：
+
+```bash
+ls -l /usr/local/bin/bk
+readlink -f /usr/local/bin/bk
+```
+
+如果第二条输出 `/opt/gpubk/bin/bk`，现有链接已经正确，保留即可；以后升级只会更新其
+目标环境。否则，只有在确认它是旧软链接后才执行 `sudo unlink /usr/local/bin/bk`，然后
+重新创建链接。不要对未知普通文件使用 `ln -sf`。
+
 Debian/Ubuntu 若没有 `venv`，先安装 `python3-venv`。初始化会探测真实 GPU，并默认把
 发起 `sudo` 的管理员账号作为 broker 和 monitor 的运行账号。它创建的就是正式部署路径：
 `/etc/gpubk`、`/var/lib/gpubk` 和 `/run/gpubk`，不会新建账号或用户组。受跟踪的
