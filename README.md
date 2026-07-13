@@ -465,6 +465,11 @@ bk-mcp                       # same as: bk mcp
 bk skill install            # installs the bundled Codex Skill
 ```
 
+The default destination is `$CODEX_HOME/skills/gpubk` when `CODEX_HOME` is
+absolute, otherwise `$HOME/.codex/skills/gpubk`. `--force` refuses a symbolic
+link or an active working-directory tree and restores the previous Skill if the
+staged replacement fails.
+
 The MCP server provides context, recommendation, create, list, edit, cancel,
 private-spec cleanup, and private job-log tools. It listens on stdio only; each
 user runs their own process. Tool schemas include read-only, idempotent,

@@ -394,6 +394,10 @@ bk-mcp                       # 等同于 bk mcp
 bk skill install            # 安装 wheel 内置的 Codex Skill
 ```
 
+`CODEX_HOME` 为绝对路径时，默认安装到 `$CODEX_HOME/skills/gpubk`；否则使用
+`$HOME/.codex/skills/gpubk`。`--force` 会拒绝符号链接和当前工作目录所在的目录树；
+暂存替换失败时会恢复原有 Skill。
+
 MCP 提供 context、recommend、create、list、edit、cancel、私有 spec 清理和私有
 任务日志工具。它只使用 stdio，不监听网络端口；每位用户运行自己的 MCP 进程。工具
 schema 标明 read-only、idempotent、destructive 和 closed-world 属性。

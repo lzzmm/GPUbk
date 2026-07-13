@@ -73,6 +73,9 @@ Supported security boundaries:
   unobserved telemetry as current.
 - Telemetry stores only sanitized workload labels and keyed identities, not raw arguments,
   environments, stdout, or absolute script paths.
+- Bundled Skill installation ignores relative `CODEX_HOME` values, rejects force-replacing a
+  symbolic link or the active working-directory tree, and rolls back a failed staged replacement
+  before reporting failure.
 - Closed telemetry partitions carry record counts and SHA-256 checksums. Unknown future
   fields block compaction instead of being discarded.
 - Open telemetry partitions validate complete batches before append, roll back detected

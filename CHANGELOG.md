@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Make bundled Codex Skill installation resolve to an absolute per-user directory, reject
+  force-replacing symbolic links or an active working tree, and restore the previous Skill when
+  staged replacement fails.
 - Exercise the built zero-dependency wheel through a complete simulated scheduled-command flow
   in package CI, including booking, worker execution, GPU environment injection, terminal state,
   private logging, and command-spec cleanup.
