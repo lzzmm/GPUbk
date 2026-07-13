@@ -97,6 +97,40 @@ class SchedulerModeTests(unittest.TestCase):
         self.assertFalse(second.created)
         self.assertEqual(first.reservation["id"], second.reservation["id"])
 
+    def test_legacy_job_digest_aliases_require_valid_job_metadata(self):
+        request = replace(
+            self.request(1001, MODE_SHARED),
+            job_digest_aliases=["0" * 64],
+        )
+
+        with self.assertRaisesRegex(BookingError, "require job metadata"):
+            add_booking(self.store, self.config, request)
+
+        self.assertFalse(self.store.ledger_path.exists())
+
+    def test_legacy_job_digest_aliases_are_bounded_and_validated(self):
+        base = replace(
+            self.request(1001, MODE_SHARED),
+            job_spec_id="00000000-0000-0000-0000-000000000001",
+            job_digest="0" * 64,
+            job_summary="python train.py",
+        )
+
+        with self.assertRaisesRegex(BookingError, "at most 4"):
+            add_booking(
+                self.store,
+                self.config,
+                replace(base, job_digest_aliases=[f"{index:064x}" for index in range(5)]),
+            )
+        with self.assertRaisesRegex(BookingError, "invalid legacy"):
+            add_booking(
+                self.store,
+                self.config,
+                replace(base, job_digest_aliases=["not-a-digest"]),
+            )
+
+        self.assertFalse(self.store.ledger_path.exists())
+
     def test_exclusive_duplicate_is_idempotent(self):
         first = add_booking(self.store, self.config, self.request(1001, MODE_EXCLUSIVE))
         second = add_booking(self.store, self.config, self.request(1001, MODE_EXCLUSIVE))

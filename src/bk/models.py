@@ -45,6 +45,7 @@ class BookingRequest:
     job_spec_id: Optional[str] = None
     job_digest: Optional[str] = None
     job_summary: Optional[str] = None
+    job_digest_aliases: Optional[List[str]] = None
     expected_memory_mb: Optional[int] = None
     gpu_memory_capacity_mb: Optional[Dict[int, int]] = None
     share_units: Optional[int] = None

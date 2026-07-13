@@ -46,8 +46,8 @@ Use shared mode for workloads that can coexist within both capacity-unit and VRA
 ## Create Safely
 
 - Generate one stable operation ID for each create or edit intent and reuse it only for exact retries.
-- Never reuse an operation ID for changed fields, command arguments, or working directory; GPUbk
-  verifies the private command digest and rejects mismatched reuse instead of silently applying it.
+- Never reuse an operation ID for changed fields, command arguments, working directory, or
+  submission `PATH`; GPUbk verifies the private command digest and rejects mismatched reuse.
 - Never pass, invent, or override a UID. GPUbk derives identity from the local process.
 - Do not retry a write with a new operation ID after an ambiguous response; inspect reservations first.
 - After an interrupted scheduled-command submission, retry with the same operation ID and exact
@@ -56,7 +56,9 @@ Use shared mode for workloads that can coexist within both capacity-unit and VRA
   confirmation. GPUbk skipped new live probes, external allocation, and private-spec creation;
   `unknown` live fields are intentional and do not prove that the command can launch now.
 - Do not cancel or edit another user's reservation.
-- Do not expose secrets in command arguments. GPUbk stores commands privately, but process environments or user scripts are preferable for credentials.
+- GPUbk snapshots only `PATH` for a scheduled command, not the rest of the Agent environment.
+  Put required variables and credentials in a user-owned wrapper or configuration file; do not
+  expose secrets in command arguments.
 
 To schedule a command:
 

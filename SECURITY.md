@@ -24,7 +24,9 @@ Supported security boundaries:
   closes the case where the complete tree is internally consistent but belongs to the wrong Unix
   group. Ordinary environment variables cannot replace the trusted value; once enabled, the
   ledger policy also rejects clients which omit or change it.
-- Scheduled command arguments live in UID-owned `0600` specs, not the shared ledger.
+- Scheduled command arguments, working directory, and a bounded `PATH` snapshot live in signed,
+  UID-owned `0600` specs, not the shared ledger. No other submission environment is captured;
+  `PATH` may reveal private directory names and therefore remains private with the command.
 - Terminal and expired private command specs are pruned by the owning UID; unreferenced specs
   receive a 24-hour race-safety grace period.
 - Direct job stdout/stderr uses UID-owned rolling logs with configurable per-job, age, and

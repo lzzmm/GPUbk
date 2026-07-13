@@ -218,8 +218,14 @@ GPU slots. This avoids assuming that NVML indices equal CUDA ordinals. A real
 NVML device without a valid stable identifier remains pending instead of being
 launched on a guessed device. Numeric launch tokens remain only for simulation
 and the explicitly unsafe `worker_live_guard=false` compatibility path.
-Commands and working directories stay in UID-owned `0600` job specs; they are
-not written to the shared ledger.
+Commands, working directories, and the submitting process's `PATH` stay in
+UID-owned `0600` job specs; they are signed by the digest and are not written to
+the shared ledger. Capturing `PATH` keeps a bare command such as `python` bound
+to the same search path when a systemd worker starts outside the interactive
+shell. GPUbk deliberately captures no other environment variable. Load project
+variables and credentials from a user-owned wrapper or configuration file.
+Changing `PATH` while retrying the same operation ID is a different command
+intent and is rejected. Existing v1 private specs remain readable.
 On a real GPU host, guarded scheduled commands require the `gpu` extra: the
 `nvidia-smi` fallback has no trustworthy process list and therefore stays
 pending rather than guessing that a device is free.

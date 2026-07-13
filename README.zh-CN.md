@@ -197,9 +197,13 @@ worker 会设置 `CUDA_VISIBLE_DEVICES`、`CUDA_DEVICE_ORDER`、
 通过的稳定 GPU UUID 写入 `CUDA_VISIBLE_DEVICES`，而 `BK_RESERVED_GPUS` 继续保留用户
 看到的数字卡位，从而不假设 NVML 编号与 CUDA ordinal 一致。真实 NVML 设备若缺少合法
 稳定标识，任务会继续等待而不会猜一张卡启动；数字启动标识只保留给模拟环境和显式接受
-风险的 `worker_live_guard=false` 兼容路径。命令和工作目录保存在当前 UID 所有的
-`0600` 私有文件里，不会写入共享台账。worker 使用 `shell=False`，并持续监管命令
-所在的进程组，直到它退出或预约结束；任务脚本不应自行 daemonize 或创建新 session。
+风险的 `worker_live_guard=false` 兼容路径。命令、工作目录和提交进程当时的 `PATH`
+保存在当前 UID 所有的 `0600` 私有文件里，并共同参与摘要签名，不会写入共享台账。
+因此 systemd worker 即使不在原交互 shell 中启动，`python` 这类裸命令仍按预约时的路径
+查找。GPUbk 不会自动复制其他环境变量；项目变量和凭据应由用户私有 wrapper 或配置文件
+加载。同一 operation ID 若换了 `PATH` 再提交会被视为不同命令并拒绝；旧 v1 私有 spec
+仍可读取。worker 使用 `shell=False`，并持续监管命令所在的进程组，直到它退出或预约
+结束；任务脚本不应自行 daemonize 或创建新 session。
 真实 GPU 主机上的受保护定时任务需要安装 `gpu` extra；`nvidia-smi` 回退没有可信的
 进程列表，因此任务会保持等待，而不会猜测设备为空闲。
 确实需要 shell 语法时应明确调用 shell：

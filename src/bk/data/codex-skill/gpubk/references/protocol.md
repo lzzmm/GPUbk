@@ -56,8 +56,10 @@ Recommendation fields:
   same-UID process group was stopped after worker loss, but job status remains `uncertain` because
   earlier side effects cannot be disproved. `remote-unverified`, `unverified`, and
   `termination-unverified` must never trigger automatic retry.
-- Context capabilities advertise `single_worker_lease`, `scheduled_job_crash_recovery`, and
-  `worker_liveness`, `worker_instance_binding`, `daemon_policy_guard`, and `collector_liveness`.
+- Context capabilities advertise `single_worker_lease`, `scheduled_job_crash_recovery`,
+  `scheduled_job_path_snapshot`, `worker_liveness`, `worker_instance_binding`,
+  `daemon_policy_guard`, and `collector_liveness`. A path snapshot means only the submitting
+  process's `PATH` is signed into the private job spec; no other Agent environment is inherited.
   Worker exit `75` means the UID-private lease is already held; do not retry in a tight loop.
   Context `policy.daemon_policy_exit_code` is `78`; worker or monitor exit `78` is a persistent
   ledger-policy mismatch that requires operator repair and must not be automatically retried.
@@ -123,7 +125,8 @@ read-only; create and edit are idempotent writes because they require operation 
 destructive and non-idempotent; private-spec cleanup is destructive but idempotent; all tools are
 closed-world local operations.
 
-An operation ID identifies one immutable write intent for the current UID. Exact retries return
+An operation ID identifies one immutable write intent for the current UID, including a scheduled
+command's submission `PATH`. Exact retries return
 `status=exists`, including confirmation after the original start; reusing that ID with another
 reservation, different fields, different command arguments, or a different working directory
 returns a structured error. The shared ledger stores only the command digest and public summary.

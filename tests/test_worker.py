@@ -29,6 +29,7 @@ from bk.worker import (
     delete_job_spec,
     job_log_path,
     job_spec_path,
+    job_submission_identity,
     prepare_job_spec,
     retry_job,
     run_worker,
@@ -116,6 +117,86 @@ class ScheduledJobTests(unittest.TestCase):
         self.assertEqual(output["cuda"], "0")
         self.assertEqual(output["rid"], mine["id"])
         self.assertFalse(job_spec_path(self.config, mine["job"]["spec_id"]).exists())
+
+    def test_worker_restores_the_booking_path_for_a_bare_executable(self):
+        bin_dir = Path(self.tmp.name) / "booking-bin"
+        bin_dir.mkdir()
+        executable = bin_dir / "gpubk-path-probe"
+        marker = self.work_dir / "captured-path"
+        executable.write_text(
+            "#!/bin/sh\nprintf 'captured' > \"$1\"\n",
+            encoding="utf-8",
+        )
+        executable.chmod(0o700)
+
+        with mock.patch.dict(os.environ, {"PATH": str(bin_dir)}):
+            reservation = self.booking(
+                command=[executable.name, str(marker)],
+            )
+
+        spec_path = job_spec_path(self.config, reservation["job"]["spec_id"])
+        payload = json.loads(spec_path.read_text(encoding="utf-8"))
+        self.assertEqual(payload["version"], 2)
+        self.assertEqual(payload["environment"], {"PATH": str(bin_dir)})
+
+        with mock.patch.dict(os.environ, {"PATH": "/path-not-used-by-booking"}):
+            summary = run_worker(
+                self.config,
+                self.store,
+                self.actor,
+                once=True,
+                poll_seconds=0.1,
+                quiet=True,
+            )
+
+        self.assertEqual(summary.succeeded, 1)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "captured")
+
+    def test_worker_executes_a_legacy_v1_private_spec(self):
+        marker = self.work_dir / "legacy-v1"
+        command = [
+            sys.executable,
+            "-c",
+            f"open({str(marker)!r}, 'w').write('legacy')",
+        ]
+        reservation = self.booking(command=command)
+        spec_path = job_spec_path(self.config, reservation["job"]["spec_id"])
+        payload = json.loads(spec_path.read_text(encoding="utf-8"))
+        identity = job_submission_identity(
+            self.actor,
+            command,
+            str(self.work_dir),
+            execution_environment={"PATH": "/ignored-for-v1"},
+        )
+        legacy_digest = identity.legacy_digests[0]
+        payload["version"] = 1
+        payload.pop("environment")
+        payload["digest"] = legacy_digest
+        spec_path.write_text(json.dumps(payload), encoding="utf-8")
+        spec_path.chmod(0o600)
+
+        def set_legacy_digest(ledger):
+            item = next(
+                value
+                for value in ledger["reservations"]
+                if value["id"] == reservation["id"]
+            )
+            item["job"]["digest"] = legacy_digest
+            return ledger, None, [], True
+
+        self.store.transaction(set_legacy_digest)
+
+        summary = run_worker(
+            self.config,
+            self.store,
+            self.actor,
+            once=True,
+            poll_seconds=0.1,
+            quiet=True,
+        )
+
+        self.assertEqual(summary.succeeded, 1)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "legacy")
 
     def test_worker_rejects_policy_mismatch_before_acquiring_private_lease(self):
         add_booking(
@@ -1348,6 +1429,56 @@ class ScheduledJobTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(spec_path.stat().st_mode), 0o600)
         self.assertIn(secret, spec_path.read_text(encoding="utf-8"))
 
+    def test_private_spec_captures_only_path_from_the_submission_environment(self):
+        secret = "must-not-enter-private-spec"
+        spec = prepare_job_spec(
+            self.config,
+            self.actor,
+            [sys.executable, "-c", "print('safe')"],
+            str(self.work_dir),
+            execution_environment={
+                "PATH": "/opt/experiment/bin:/usr/bin",
+                "API_TOKEN": secret,
+            },
+        )
+
+        payload = json.loads(
+            job_spec_path(self.config, spec.spec_id).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            payload["environment"],
+            {"PATH": "/opt/experiment/bin:/usr/bin"},
+        )
+        self.assertNotIn(secret, json.dumps(payload))
+
+    def test_private_spec_rejects_a_control_character_in_path(self):
+        with self.assertRaisesRegex(BookingError, "control character"):
+            prepare_job_spec(
+                self.config,
+                self.actor,
+                [sys.executable, "-c", "print('safe')"],
+                str(self.work_dir),
+                execution_environment={"PATH": "/usr/bin\n/untrusted"},
+            )
+
+    def test_private_spec_rejects_an_unencodable_or_oversized_path(self):
+        with self.assertRaisesRegex(BookingError, "valid UTF-8"):
+            prepare_job_spec(
+                self.config,
+                self.actor,
+                [sys.executable, "-c", "print('safe')"],
+                str(self.work_dir),
+                execution_environment={"PATH": "/usr/bin/\udcff"},
+            )
+        with self.assertRaisesRegex(BookingError, "must not exceed"):
+            prepare_job_spec(
+                self.config,
+                self.actor,
+                [sys.executable, "-c", "print('safe')"],
+                str(self.work_dir),
+                execution_environment={"PATH": "x" * (32 * 1024 + 1)},
+            )
+
     def test_tampered_private_spec_is_rejected_before_execution(self):
         marker = self.work_dir / "tampered"
         reservation = self.booking(command=[sys.executable, "-c", "print('safe')"])
@@ -1363,6 +1494,39 @@ class ScheduledJobTests(unittest.TestCase):
 
         summary = run_worker(
             self.config, self.store, self.actor, once=True, poll_seconds=0.1, quiet=True
+        )
+
+        stored = next(
+            item
+            for item in self.store.load()["reservations"]
+            if item["id"] == reservation["id"]
+        )
+        self.assertEqual(summary.failed, 1)
+        self.assertEqual(stored["job"]["status"], "failed")
+        self.assertFalse(marker.exists())
+
+    def test_tampered_private_path_is_rejected_before_execution(self):
+        marker = self.work_dir / "tampered-path"
+        reservation = self.booking(
+            command=[
+                sys.executable,
+                "-c",
+                f"open({str(marker)!r}, 'w').write('bad')",
+            ]
+        )
+        spec_path = job_spec_path(self.config, reservation["job"]["spec_id"])
+        payload = json.loads(spec_path.read_text(encoding="utf-8"))
+        payload["environment"]["PATH"] = "/tampered"
+        spec_path.write_text(json.dumps(payload), encoding="utf-8")
+        spec_path.chmod(0o600)
+
+        summary = run_worker(
+            self.config,
+            self.store,
+            self.actor,
+            once=True,
+            poll_seconds=0.1,
+            quiet=True,
         )
 
         stored = next(

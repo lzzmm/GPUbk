@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Snapshot the submitting process's `PATH` in a signed, UID-private v2 scheduled-command spec so
+  bare executables keep the same lookup semantics under a restarted systemd worker. No other
+  environment variable is captured; v1 specs, operation-ID replays, and exact duplicates remain
+  compatible, while changing `PATH` is treated as a different new command intent.
 - Add a read-only Linux procfs deployment probe for cross-UID process ownership visibility.
   Strict preflight now requires the configured monitor account and refuses to claim production
   readiness when process attribution is blocked or has not been demonstrated on the target host.

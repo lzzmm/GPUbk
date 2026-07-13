@@ -15,7 +15,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from .config import DEFAULT_WORKER_TERMINATION_GRACE_SECONDS, Config
 from .fileio import open_existing_regular_at
@@ -59,6 +59,9 @@ WORKER_WAITING_EXIT_CODE = 3
 WORKER_BUSY_EXIT_CODE = 75
 JOB_SPEC_CLEANUP_INTERVAL_SECONDS = 5 * 60
 JOB_SPEC_ORPHAN_GRACE_SECONDS = 24 * 60 * 60
+JOB_SPEC_VERSION = 2
+LEGACY_JOB_SPEC_VERSION = 1
+MAX_JOB_PATH_BYTES = 32 * 1024
 
 
 @dataclass
@@ -95,6 +98,7 @@ class JobSpecReference:
 class JobSubmissionIdentity:
     digest: str
     summary: str
+    legacy_digests: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -120,20 +124,24 @@ def prepare_job_spec(
     actor: Actor,
     command_argv: List[str],
     working_directory: str,
+    *,
+    execution_environment: Optional[Mapping[str, str]] = None,
 ) -> JobSpecReference:
-    argv, cwd, identity = _job_submission_components(
+    argv, cwd, environment, identity = _job_submission_components(
         actor,
         command_argv,
         working_directory,
         require_working_directory=True,
+        execution_environment=execution_environment,
     )
     spec_id = str(uuid.uuid4())
     payload = {
-        "version": 1,
+        "version": JOB_SPEC_VERSION,
         "spec_id": spec_id,
         "uid": actor.uid,
         "argv": argv,
         "cwd": cwd,
+        "environment": environment,
         "created_at": to_iso(utc_now()),
     }
     payload["digest"] = identity.digest
@@ -187,13 +195,16 @@ def job_submission_identity(
     actor: Actor,
     command_argv: List[str],
     working_directory: str,
+    *,
+    execution_environment: Optional[Mapping[str, str]] = None,
 ) -> JobSubmissionIdentity:
     """Fingerprint a retry intent without requiring its old working directory to remain."""
-    _argv, _cwd, identity = _job_submission_components(
+    _argv, _cwd, _environment, identity = _job_submission_components(
         actor,
         command_argv,
         working_directory,
         require_working_directory=False,
+        execution_environment=execution_environment,
     )
     return identity
 
@@ -202,15 +213,26 @@ def validate_job_submission(
     actor: Actor,
     command_argv: List[str],
     working_directory: str,
+    *,
+    execution_environment: Optional[Mapping[str, str]] = None,
 ) -> JobSubmissionIdentity:
     """Validate a new command submission without writing its private spec."""
-    _argv, _cwd, identity = _job_submission_components(
+    _argv, _cwd, _environment, identity = _job_submission_components(
         actor,
         command_argv,
         working_directory,
         require_working_directory=True,
+        execution_environment=execution_environment,
     )
     return identity
+
+
+def capture_job_environment(
+    process_environment: Optional[Mapping[str, str]] = None,
+) -> Dict[str, str]:
+    """Capture the minimal non-secret environment needed for reproducible command lookup."""
+    source = os.environ if process_environment is None else process_environment
+    return _validate_job_environment({"PATH": source.get("PATH", os.defpath)})
 
 
 def delete_job_spec(config: Config, spec_id: str) -> bool:
@@ -902,7 +924,7 @@ def _start_claimed_job(
     process: Optional[subprocess.Popen] = None
     log_pump: Optional[JobLogPump] = None
     try:
-        argv, cwd = _validated_job_payload(config, actor, job)
+        argv, cwd, job_environment = _validated_job_payload(config, actor, job)
         header = {
             "event": "bk-job-start",
             "timestamp": to_iso(utc_now()),
@@ -919,6 +941,7 @@ def _start_claimed_job(
         )
 
         env = os.environ.copy()
+        env.update(job_environment)
         reserved_gpus = tuple(str(item) for item in reservation.get("gpus", []))
         launch_devices = tuple(cuda_visible_devices or ())
         if len(launch_devices) != len(reserved_gpus):
@@ -1013,7 +1036,7 @@ def _start_claimed_job(
 
 def _validated_job_payload(
     config: Config, actor: Actor, job: dict
-) -> Tuple[List[str], str]:
+) -> Tuple[List[str], str, Dict[str, str]]:
     if job.get("spec_id") is not None:
         payload = _read_job_spec(config, actor, str(job["spec_id"]))
         expected_digest = str(job.get("digest", ""))
@@ -1026,12 +1049,19 @@ def _validated_job_payload(
             raise BookingError("private job spec is internally inconsistent")
         raw_argv = payload.get("argv")
         cwd = payload.get("cwd")
-        return _validate_submission_payload(raw_argv, cwd)
+        argv, normalized_cwd = _validate_submission_payload(raw_argv, cwd)
+        environment = (
+            _validate_job_environment(payload.get("environment"))
+            if payload.get("version") == JOB_SPEC_VERSION
+            else {}
+        )
+        return argv, normalized_cwd, environment
 
     # Compatibility for pre-0.2 ledgers. New bookings never store argv in shared data.
     raw_argv = job.get("argv")
     cwd = job.get("cwd")
-    return _validate_submission_payload(raw_argv, cwd)
+    argv, normalized_cwd = _validate_submission_payload(raw_argv, cwd)
+    return argv, normalized_cwd, {}
 
 
 def _validate_submission_payload(
@@ -1069,7 +1099,8 @@ def _job_submission_components(
     working_directory: str,
     *,
     require_working_directory: bool,
-) -> Tuple[List[str], str, JobSubmissionIdentity]:
+    execution_environment: Optional[Mapping[str, str]],
+) -> Tuple[List[str], str, Dict[str, str], JobSubmissionIdentity]:
     if actor.uid != os.getuid():
         raise BookingError("job spec actor must match the current process UID")
     argv, cwd = _validate_submission_payload(
@@ -1077,15 +1108,34 @@ def _job_submission_components(
         working_directory,
         require_working_directory=require_working_directory,
     )
-    digest = _job_spec_digest(
+    environment = capture_job_environment(execution_environment)
+    legacy_digest = _job_spec_digest(
         {
-            "version": 1,
+            "version": LEGACY_JOB_SPEC_VERSION,
             "uid": actor.uid,
             "argv": argv,
             "cwd": cwd,
         }
     )
-    return argv, cwd, JobSubmissionIdentity(digest, _job_command_summary(argv))
+    digest = _job_spec_digest(
+        {
+            "version": JOB_SPEC_VERSION,
+            "uid": actor.uid,
+            "argv": argv,
+            "cwd": cwd,
+            "environment": environment,
+        }
+    )
+    return (
+        argv,
+        cwd,
+        environment,
+        JobSubmissionIdentity(
+            digest,
+            _job_command_summary(argv),
+            (legacy_digest,) if legacy_digest != digest else (),
+        ),
+    )
 
 
 def _read_job_spec(config: Config, actor: Actor, spec_id: str) -> dict:
@@ -1116,7 +1166,13 @@ def _read_job_spec(config: Config, actor: Actor, spec_id: str) -> dict:
     finally:
         if fd >= 0:
             os.close(fd)
-    if not isinstance(payload, dict) or payload.get("version") != 1:
+    version = payload.get("version") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or isinstance(version, bool)
+        or not isinstance(version, int)
+        or version not in {LEGACY_JOB_SPEC_VERSION, JOB_SPEC_VERSION}
+    ):
         raise BookingError("invalid private job spec")
     if int(payload.get("uid", -1)) != actor.uid or payload.get("spec_id") != spec_id:
         raise BookingError("private job spec identity mismatch")
@@ -1130,8 +1186,27 @@ def _job_spec_digest(payload: dict) -> str:
         "argv": payload.get("argv"),
         "cwd": payload.get("cwd"),
     }
+    if payload.get("version") == JOB_SPEC_VERSION:
+        signed["environment"] = payload.get("environment")
     raw = json.dumps(signed, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _validate_job_environment(raw: object) -> Dict[str, str]:
+    if not isinstance(raw, Mapping) or set(raw) != {"PATH"}:
+        raise BookingError("job environment must contain only PATH")
+    path = raw.get("PATH")
+    if not isinstance(path, str):
+        raise BookingError("job PATH must be text")
+    try:
+        path_bytes = path.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise BookingError("job PATH must be valid UTF-8 text") from exc
+    if len(path_bytes) > MAX_JOB_PATH_BYTES:
+        raise BookingError(f"job PATH must not exceed {MAX_JOB_PATH_BYTES} bytes")
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in path):
+        raise BookingError("job PATH contains a control character")
+    return {"PATH": path}
 
 
 def _job_command_summary(argv: List[str]) -> str:

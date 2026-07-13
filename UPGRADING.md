@@ -81,6 +81,11 @@ worker for that UID must use the same private `BK_JOB_LOG_DIR`.
 Restart every worker after upgrading. A lease written by an older worker has no
 data-directory instance binding, so current clients intentionally report it as
 `unverified` until the worker restarts and rewrites the lease.
+New scheduled commands use a signed v2 private spec that snapshots only the
+submitting process's `PATH`; a pre-upgrade worker cannot read that format. Stop
+or restart old workers before accepting new scheduled commands. Current workers
+continue to execute queued v1 specs, and exact v1 operation-ID retries and
+duplicates remain recognizable without rewriting their private files.
 Restart the monitor during this upgrade. A legacy `gpubk.collector.v1` heartbeat
 without the additive stable-device-identifier or process-identity capability is
 intentionally shown as degraded until the current monitor replaces it.

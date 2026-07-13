@@ -27,7 +27,7 @@ from bk.service import (
 )
 from bk.storage import LedgerStore
 from bk.usage_store import UsageAuditStore
-from bk.worker import job_spec_path
+from bk.worker import job_spec_path, job_submission_identity
 
 
 class AgentServiceTests(unittest.TestCase):
@@ -99,6 +99,7 @@ class AgentServiceTests(unittest.TestCase):
         self.assertTrue(context["capabilities"]["worker_instance_binding"])
         self.assertTrue(context["capabilities"]["daemon_policy_guard"])
         self.assertTrue(context["capabilities"]["scheduled_job_crash_recovery"])
+        self.assertTrue(context["capabilities"]["scheduled_job_path_snapshot"])
         self.assertTrue(context["capabilities"]["weighted_shared_capacity"])
         self.assertTrue(context["capabilities"]["private_job_spec_cleanup"])
         self.assertTrue(context["capabilities"]["bounded_private_job_logs"])
@@ -666,6 +667,56 @@ class AgentServiceTests(unittest.TestCase):
         history_store.assert_not_called()
         self.assertEqual(len(list((config.job_log_dir / "specs").glob("*.json"))), 1)
 
+    def test_explicit_duplicate_accepts_a_legacy_v1_command_digest(self):
+        actor = Actor(os.getuid(), "current")
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            job_log_dir=self.data_dir / "private-jobs",
+        )
+        command = [sys.executable, "-c", "print('legacy duplicate')"]
+        identity = job_submission_identity(
+            actor,
+            command,
+            self.tmp.name,
+            execution_environment={"PATH": "/new-worker-path"},
+        )
+        first = add_booking(
+            self.store,
+            config,
+            BookingRequest(
+                actor=actor,
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=self.start,
+                preferred_gpus=[0],
+                job_spec_id="00000000-0000-0000-0000-000000000001",
+                job_digest=identity.legacy_digests[0],
+                job_summary=identity.summary,
+            ),
+        )
+
+        with mock.patch.dict(os.environ, {"PATH": "/different-current-path"}):
+            duplicate = submit_booking(
+                config,
+                self.store,
+                actor,
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=self.start,
+                preferred_gpus=[0],
+                command_argv=command,
+                working_directory=self.tmp.name,
+                allow_queue=False,
+                advice=self.advice,
+            )
+
+        self.assertFalse(duplicate.result.created)
+        self.assertEqual(duplicate.result.reservation["id"], first.reservation["id"])
+        self.assertEqual(len(self.store.load()["reservations"]), 1)
+        self.assertEqual(list((config.job_log_dir / "specs").glob("*.json")), [])
+
     def test_scheduled_job_operation_id_rejects_a_different_private_command(self):
         actor = Actor(os.getuid(), "current")
         config = Config(
@@ -709,6 +760,39 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(len(self.store.load()["reservations"]), 1)
         self.assertEqual(len(list((config.job_log_dir / "specs").glob("*.json"))), 1)
 
+    def test_scheduled_job_operation_id_rejects_a_different_submission_path(self):
+        actor = Actor(os.getuid(), "current")
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            job_log_dir=self.data_dir / "private-jobs",
+        )
+        common = {
+            "count": 1,
+            "duration_seconds": 30 * 60,
+            "start_at": self.start,
+            "command_argv": [sys.executable, "-c", "print('same command')"],
+            "working_directory": self.tmp.name,
+            "allow_queue": False,
+            "operation_id": "scheduled-path-mismatch",
+            "advice": self.advice,
+        }
+        with mock.patch.dict(os.environ, {"PATH": "/environment/one"}):
+            submit_booking(config, self.store, actor, **common)
+
+        with (
+            mock.patch.dict(os.environ, {"PATH": "/environment/two"}),
+            mock.patch("bk.service._allocation_decision") as allocator,
+            mock.patch("bk.service.prepare_job_spec") as prepare,
+        ):
+            with self.assertRaisesRegex(BookingError, "different write"):
+                submit_booking(config, self.store, actor, **common)
+
+        allocator.assert_not_called()
+        prepare.assert_not_called()
+        self.assertEqual(len(self.store.load()["reservations"]), 1)
+
     def test_scheduled_job_retry_does_not_attempt_unused_spec_cleanup(self):
         actor = Actor(os.getuid(), "current")
         config = Config(
@@ -740,6 +824,64 @@ class AgentServiceTests(unittest.TestCase):
         self.assertIsNone(self.store.last_warning)
         self.assertFalse(any("cleanup" in warning for warning in payload["warnings"]))
         delete.assert_not_called()
+
+    def test_scheduled_job_retry_accepts_a_legacy_v1_command_digest(self):
+        actor = Actor(os.getuid(), "current")
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            job_log_dir=self.data_dir / "private-jobs",
+        )
+        command = [sys.executable, "-c", "print('legacy')"]
+        identity = job_submission_identity(
+            actor,
+            command,
+            self.tmp.name,
+            execution_environment={"PATH": "/new-worker-path"},
+        )
+        legacy_digest = identity.legacy_digests[0]
+        operation_id = "legacy-v1-command-replay"
+        first = add_booking(
+            self.store,
+            config,
+            BookingRequest(
+                actor=actor,
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=self.start,
+                preferred_gpus=[0],
+                op_id=operation_id,
+                job_spec_id="00000000-0000-0000-0000-000000000001",
+                job_digest=legacy_digest,
+                job_summary=identity.summary,
+            ),
+        )
+
+        with (
+            mock.patch("bk.service._allocation_decision") as allocator,
+            mock.patch("bk.service.prepare_job_spec") as prepare,
+            mock.patch.dict(os.environ, {"PATH": "/different-current-path"}),
+        ):
+            replay = submit_booking(
+                config,
+                self.store,
+                actor,
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=self.start,
+                preferred_gpus=[0],
+                command_argv=command,
+                working_directory=self.tmp.name,
+                allow_queue=False,
+                operation_id=operation_id,
+            )
+
+        self.assertFalse(replay.result.created)
+        self.assertEqual(replay.result.reservation["id"], first.reservation["id"])
+        self.assertEqual(replay.allocator.source, "idempotent-replay")
+        allocator.assert_not_called()
+        prepare.assert_not_called()
 
     def test_scheduled_job_retry_survives_a_removed_working_directory(self):
         actor = Actor(os.getuid(), "current")

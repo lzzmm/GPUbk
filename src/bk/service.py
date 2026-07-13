@@ -40,6 +40,7 @@ from .worker import (
     WORKER_BUSY_EXIT_CODE,
     WORKER_WAITING_EXIT_CODE,
     JobSpecCleanupResult,
+    capture_job_environment,
     cleanup_job_specs,
     delete_job_spec,
     job_submission_identity,
@@ -103,13 +104,15 @@ def submit_booking(
     )
     if command_argv is not None and working_directory is None:
         working_directory = os.getcwd()
+    job_environment = capture_job_environment() if command_argv is not None else None
     job_identity = (
         job_submission_identity(
             actor,
             command_argv,
             str(working_directory),
+            execution_environment=job_environment,
         )
-        if operation_id is not None and command_argv is not None
+        if command_argv is not None
         else None
     )
     ledger = store.load()
@@ -130,6 +133,9 @@ def submit_booking(
             allow_queue=allow_queue,
             job_digest=job_identity.digest if job_identity else None,
             job_summary=job_identity.summary if job_identity else None,
+            job_digest_aliases=(
+                list(job_identity.legacy_digests) if job_identity else None
+            ),
             expected_memory_mb=expected_memory_mb,
             share_units=effective_share_units if mode == MODE_SHARED else None,
         ),
@@ -143,7 +149,12 @@ def submit_booking(
             generated_at,
         )
     if command_argv is not None:
-        validate_job_submission(actor, command_argv, str(working_directory))
+        validate_job_submission(
+            actor,
+            command_argv,
+            str(working_directory),
+            execution_environment=job_environment,
+        )
     gpu_advice = advice or build_gpu_advice(config)
     allocator = _allocation_decision(
         config,
@@ -159,7 +170,13 @@ def submit_booking(
         effective_share_units,
     )
     job_spec = (
-        prepare_job_spec(config, actor, command_argv, str(working_directory))
+        prepare_job_spec(
+            config,
+            actor,
+            command_argv,
+            str(working_directory),
+            execution_environment=job_environment,
+        )
         if command_argv is not None
         else None
     )
@@ -183,6 +200,9 @@ def submit_booking(
                 job_spec_id=job_spec.spec_id if job_spec else None,
                 job_digest=job_spec.digest if job_spec else None,
                 job_summary=job_spec.summary if job_spec else None,
+                job_digest_aliases=(
+                    list(job_identity.legacy_digests) if job_identity else None
+                ),
                 expected_memory_mb=expected_memory_mb,
                 gpu_memory_capacity_mb=gpu_advice.memory_capacities_mb,
                 share_units=effective_share_units if mode == MODE_SHARED else None,
@@ -528,6 +548,7 @@ def build_agent_context(
             "idempotent_edit_history_limit": MAX_EDIT_OPERATIONS_PER_RESERVATION,
             "structured_cancel": True,
             "scheduled_jobs": True,
+            "scheduled_job_path_snapshot": True,
             "scheduled_job_live_guard": config.worker_live_guard,
             "single_worker_lease": True,
             "worker_liveness": True,

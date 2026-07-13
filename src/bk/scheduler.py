@@ -55,6 +55,9 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
         raise BookingError("duration must be positive")
     _validate_duration_granularity(request.duration_seconds, config.slot_minutes)
     job_metadata = _normalize_job_metadata(request.job_spec_id, request.job_digest, request.job_summary)
+    job_digest_aliases = _normalize_job_digest_aliases(request.job_digest_aliases or ())
+    if job_metadata is None and job_digest_aliases:
+        raise BookingError("legacy job digest aliases require job metadata")
     op_id = _normalize_operation_id(request.op_id)
     expected_memory_mb = _normalize_expected_memory(request.expected_memory_mb)
     share_units = _request_share_units(request.mode, request.share_units, config.max_shared_users)
@@ -101,6 +104,7 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
                         expected_memory_mb,
                         job_metadata,
                         share_units,
+                        job_digest_aliases=job_digest_aliases,
                     )
                 ):
                     raise BookingError("operation ID was already used for a different write")
@@ -118,6 +122,7 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
                     expected_memory_mb,
                     job_metadata,
                     share_units,
+                    job_digest_aliases,
                 )
                 if duplicate is not None:
                     return ledger, BookingResult(duplicate, False, "duplicate request ignored"), [], changed
@@ -133,6 +138,7 @@ def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> 
                     expected_memory_mb,
                     job_metadata,
                     share_units,
+                    job_digest_aliases,
                 )
                 if duplicate is not None:
                     return ledger, BookingResult(duplicate, False, "duplicate request ignored"), [], changed
@@ -226,6 +232,11 @@ def find_applied_create(
         raise BookingError("duration must be positive")
     _validate_duration_granularity(request.duration_seconds, config.slot_minutes)
     job_intent = _normalize_job_intent(request.job_digest, request.job_summary)
+    normalized_job_digest_aliases = _normalize_job_digest_aliases(
+        request.job_digest_aliases or ()
+    )
+    if job_intent is None and normalized_job_digest_aliases:
+        raise BookingError("legacy job digest aliases require job metadata")
     expected_memory_mb = _normalize_expected_memory(request.expected_memory_mb)
     share_units = _request_share_units(
         request.mode,
@@ -268,6 +279,7 @@ def find_applied_create(
             expected_memory_mb,
             job_intent,
             share_units,
+            job_digest_aliases=normalized_job_digest_aliases,
         )
     ):
         raise BookingError("operation ID was already used for a different write")
@@ -1049,6 +1061,7 @@ def _find_exact_duplicate(
     expected_memory_mb: Optional[int],
     job_metadata: Optional[dict],
     share_units: int,
+    job_digest_aliases: Sequence[str] = (),
 ) -> Optional[dict]:
     normalized_gpus = sorted(gpus)
     for item in list_active(ledger, start):
@@ -1058,7 +1071,13 @@ def _find_exact_duplicate(
             continue
         if sorted(item.get("gpus", [])) != normalized_gpus:
             continue
-        if not _same_request_metadata(item, expected_memory_mb, job_metadata, share_units):
+        if not _same_request_metadata(
+            item,
+            expected_memory_mb,
+            job_metadata,
+            share_units,
+            job_digest_aliases=job_digest_aliases,
+        ):
             continue
         if parse_iso(item["start_at"]) == start and parse_iso(item["end_at"]) == end:
             return item
@@ -1075,6 +1094,7 @@ def _find_auto_duplicate(
     expected_memory_mb: Optional[int],
     job_metadata: Optional[dict],
     share_units: int,
+    job_digest_aliases: Sequence[str] = (),
 ) -> Optional[dict]:
     for item in list_active(ledger, start):
         if int(item.get("uid")) != uid:
@@ -1083,7 +1103,13 @@ def _find_auto_duplicate(
             continue
         if len(item.get("gpus", [])) != count:
             continue
-        if not _same_request_metadata(item, expected_memory_mb, job_metadata, share_units):
+        if not _same_request_metadata(
+            item,
+            expected_memory_mb,
+            job_metadata,
+            share_units,
+            job_digest_aliases=job_digest_aliases,
+        ):
             continue
         if parse_iso(item["start_at"]) == start and parse_iso(item["end_at"]) == end:
             return item
@@ -1095,6 +1121,8 @@ def _same_request_metadata(
     expected_memory_mb: Optional[int],
     job_metadata: Optional[dict],
     share_units: int,
+    *,
+    job_digest_aliases: Sequence[str] = (),
 ) -> bool:
     stored_memory = reservation.get("expected_memory_mb")
     try:
@@ -1115,7 +1143,21 @@ def _same_request_metadata(
         return not isinstance(job, dict)
     if not isinstance(job, dict):
         return False
-    return job.get("digest") == job_metadata.get("digest")
+    accepted_digests = {job_metadata.get("digest"), *job_digest_aliases}
+    return job.get("digest") in accepted_digests
+
+
+def _normalize_job_digest_aliases(values: Sequence[str]) -> Tuple[str, ...]:
+    if isinstance(values, (str, bytes)) or len(values) > 4:
+        raise BookingError("legacy job spec digest aliases must contain at most 4 values")
+    normalized = []
+    for value in values:
+        digest = str(value).lower()
+        if re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise BookingError("invalid legacy job spec digest")
+        if digest not in normalized:
+            normalized.append(digest)
+    return tuple(normalized)
 
 
 def _find_reservation(ledger: dict, reservation_id: str) -> Optional[dict]:
