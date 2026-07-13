@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Bind each UID-private worker lease to a privacy-safe data-directory instance ID, so a worker
+  serving another ledger or an old worker without the matching instance lock cannot falsely
+  satisfy scheduled-command readiness checks in CLI, TUI, Agent, or MCP views.
 - Verify setgid GID inheritance during deployment preflight, report numeric group drift across
   existing ledger, backup, and telemetry paths, and fail every shared write path before mutation
   when an existing or newly created managed path does not retain the data directory's group; add

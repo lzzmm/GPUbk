@@ -57,11 +57,13 @@ Recommendation fields:
   earlier side effects cannot be disproved. `remote-unverified`, `unverified`, and
   `termination-unverified` must never trigger automatic retry.
 - Context capabilities advertise `single_worker_lease`, `scheduled_job_crash_recovery`, and
-  `worker_liveness` plus `collector_liveness`.
+  `worker_liveness`, `worker_instance_binding`, and `collector_liveness`.
   Worker exit `75` means the UID-private lease is already held; do not retry in a tight loop.
 - Context `worker` and `bk jobs --json` embed `gpubk.worker.v1`. Only `state=running` with
-  `running=true` is a positive liveness result, based on the UID-private kernel lock. `lease`
-  metadata is diagnostic and may be absent or stale. `bk worker --status --require-running`
+  `running=true`, `lease_held=true`, and `instance_match=true` is a positive liveness result,
+  based on the UID-private global lock and matching digest-named instance lock. `lease` metadata
+  is diagnostic and may be absent or stale. `other-instance` means the lock owner serves another
+  ledger; `unverified` means its instance cannot be proven. `bk worker --status --require-running`
   returns exit 2 for every non-running state without starting a worker or writing storage.
 - Context policy exposes `worker_max_parallel` and `worker_effective_max_parallel`. The latter is
   the topology-bounded default concurrency for scheduled commands, including legal same-GPU
@@ -75,8 +77,9 @@ Recommendation fields:
 Create and edit return the same `kind=booking_result` shape through JSON CLI and MCP: `status`, a
 privacy-safe `reservation`, per-GPU `allocation.selected` explanations, allocator source/reason,
 `worker`, and warnings. `worker` is the current `gpubk.worker.v1` result for a scheduled command
-and `null` when the reservation has no command. Only `worker.running=true` proves that unattended
-launch is currently available. Status is `created`, `updated`, `queued`, or retry-safe `exists`.
+and `null` when the reservation has no command. Only `worker.running=true` together with
+`lease_held=true` and `instance_match=true` proves that unattended launch is currently available.
+Status is `created`, `updated`, `queued`, or retry-safe `exists`.
 
 Cancellation returns `kind=cancellation_result`, the cancelled reservation, and
 `private_job_cleanup`. A non-null cleanup warning means cancellation committed but the owning UID

@@ -73,6 +73,9 @@ Review generated units with `bk service show monitor` and
 `bk service show worker` before enabling them. Start exactly one trusted
 monitor for a shared data directory. Each UID may run one worker, and every
 worker for that UID must use the same private `BK_JOB_LOG_DIR`.
+Restart every worker after upgrading. A lease written by an older worker has no
+data-directory instance binding, so current clients intentionally report it as
+`unverified` until the worker restarts and rewrites the lease.
 Restart the monitor during this upgrade. A legacy `gpubk.collector.v1` heartbeat
 without the additive stable-device-identifier capability is intentionally shown
 as degraded until the current monitor replaces it.

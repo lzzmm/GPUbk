@@ -38,8 +38,11 @@ from .timeparse import parse_iso, to_iso, utc_now
 MIB = 1024 * 1024
 LOG_READ_CHUNK_BYTES = 64 * 1024
 WORKER_LEASE_FILENAME = "worker.lock"
+WORKER_INSTANCE_LEASE_PREFIX = "worker.instance."
+WORKER_INSTANCE_LEASE_SUFFIX = ".lock"
 WORKER_LEASE_RETRY_SECONDS = 0.01
 WORKER_LEASE_ATTEMPTS = 3
+WORKER_INSTANCE_ID_DOMAIN = b"gpubk.worker.instance.v1\0"
 
 
 class WorkerBusyError(BookingError):
@@ -47,22 +50,27 @@ class WorkerBusyError(BookingError):
 
 
 class JobWorkerLease:
-    def __init__(self, fd: int, path: Path, worker_id: str):
+    def __init__(
+        self,
+        fd: int,
+        path: Path,
+        worker_id: str,
+        instance_fd: int,
+        instance_path: Path,
+    ):
         self.fd = fd
         self.path = path
         self.worker_id = worker_id
+        self.instance_fd = instance_fd
+        self.instance_path = instance_path
 
     def release(self) -> None:
-        if self.fd < 0:
-            return
+        instance_fd = self.instance_fd
+        self.instance_fd = -1
         fd = self.fd
         self.fd = -1
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        finally:
-            os.close(fd)
+        _release_worker_lock_fd(instance_fd)
+        _release_worker_lock_fd(fd)
 
     def __enter__(self) -> JobWorkerLease:
         return self
@@ -279,6 +287,23 @@ def job_log_root(config: Config) -> Path:
     return config.job_log_dir or (Path.home() / ".local" / "state" / "bk" / "jobs")
 
 
+def worker_instance_id(config: Config) -> str:
+    data_dir = os.path.realpath(
+        os.path.abspath(os.fspath(config.data_dir.expanduser()))
+    )
+    digest = hashlib.sha256()
+    digest.update(WORKER_INSTANCE_ID_DOMAIN)
+    digest.update(os.fsencode(data_dir))
+    return digest.hexdigest()
+
+
+def worker_instance_lease_path(config: Config) -> Path:
+    instance_id = worker_instance_id(config)
+    return job_log_root(config) / (
+        f"{WORKER_INSTANCE_LEASE_PREFIX}{instance_id}{WORKER_INSTANCE_LEASE_SUFFIX}"
+    )
+
+
 def ensure_job_log_dir(config: Config, actor: Actor) -> Path:
     path = job_log_root(config)
     if not path.is_absolute():
@@ -297,7 +322,9 @@ def acquire_job_worker_lease(
         raise BookingError("worker lease actor must match the current process UID")
     root = ensure_job_log_dir(config, actor)
     path = root / WORKER_LEASE_FILENAME
+    instance_path = worker_instance_lease_path(config)
     fd = open_or_create_regular(path, os.O_RDWR, 0o600)
+    instance_fd = -1
     try:
         metadata = os.fstat(fd)
         if metadata.st_uid != actor.uid:
@@ -306,6 +333,18 @@ def acquire_job_worker_lease(
             raise BookingError(f"worker lease is accessible by group or other users: {path}")
         os.fchmod(fd, 0o600)
         _acquire_worker_lock(fd, root)
+        instance_fd = open_or_create_regular(instance_path, os.O_RDWR, 0o600)
+        instance_metadata = os.fstat(instance_fd)
+        if instance_metadata.st_uid != actor.uid:
+            raise BookingError(
+                f"worker instance lease is not owned by UID {actor.uid}: {instance_path}"
+            )
+        if stat.S_IMODE(instance_metadata.st_mode) & 0o077:
+            raise BookingError(
+                f"worker instance lease is accessible by group or other users: {instance_path}"
+            )
+        os.fchmod(instance_fd, 0o600)
+        _acquire_worker_lock(instance_fd, root)
         payload = json.dumps(
             {
                 "version": 1,
@@ -314,6 +353,7 @@ def acquire_job_worker_lease(
                 "hostname": hostname,
                 "uid": actor.uid,
                 "acquired_at": to_iso(utc_now()),
+                "instance_id": worker_instance_id(config),
             },
             ensure_ascii=True,
             sort_keys=True,
@@ -323,13 +363,10 @@ def acquire_job_worker_lease(
         if os.write(fd, payload) != len(payload):
             raise OSError("short write while recording the worker lease")
         os.fsync(fd)
-        return JobWorkerLease(fd, path, worker_id)
+        return JobWorkerLease(fd, path, worker_id, instance_fd, instance_path)
     except Exception:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        os.close(fd)
+        _release_worker_lock_fd(instance_fd)
+        _release_worker_lock_fd(fd)
         raise
 
 
@@ -342,6 +379,19 @@ def _acquire_worker_lock(fd: int, root: Path) -> None:
             if attempt == WORKER_LEASE_ATTEMPTS - 1:
                 raise WorkerBusyError(f"another worker is active for {root}") from exc
             time.sleep(WORKER_LEASE_RETRY_SECONDS)
+
+
+def _release_worker_lock_fd(fd: int) -> None:
+    if fd < 0:
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
 
 
 def ensure_private_directory(path: Path, actor: Actor) -> None:

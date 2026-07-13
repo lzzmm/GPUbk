@@ -18,6 +18,8 @@ from bk.joblogs import (
     job_log_path,
     read_job_log_tail,
     rotated_job_log_path,
+    worker_instance_id,
+    worker_instance_lease_path,
 )
 from bk.models import Actor
 
@@ -61,6 +63,7 @@ class JobLogTests(unittest.TestCase):
             with self.assertRaisesRegex(WorkerBusyError, "another worker"):
                 acquire_job_worker_lease(self.config, self.actor, "worker-2", "host-a")
             self.assertEqual((self.root / "worker.lock").stat().st_mode & 0o777, 0o600)
+            self.assertEqual(first.instance_path.stat().st_mode & 0o777, 0o600)
         finally:
             first.release()
 
@@ -68,6 +71,18 @@ class JobLogTests(unittest.TestCase):
         second.release()
         payload = (self.root / "worker.lock").read_text(encoding="utf-8")
         self.assertIn('"worker_id": "worker-3"', payload)
+        self.assertIn(f'"instance_id": "{worker_instance_id(self.config)}"', payload)
+
+    def test_worker_instance_id_is_path_normalized_and_data_directory_specific(self):
+        equivalent = replace(
+            self.config,
+            data_dir=self.config.data_dir.parent / "other" / ".." / "data",
+        )
+        different = replace(self.config, data_dir=self.config.data_dir.parent / "data-b")
+
+        self.assertEqual(worker_instance_id(self.config), worker_instance_id(equivalent))
+        self.assertNotEqual(worker_instance_id(self.config), worker_instance_id(different))
+        self.assertEqual(len(worker_instance_id(self.config)), 64)
 
     def test_worker_lease_rejects_symbolic_link_redirection(self):
         target = self.root.parent / "outside-worker-lock"
@@ -101,11 +116,51 @@ class JobLogTests(unittest.TestCase):
             lease.release()
 
         path = self.root / "worker.lock"
-        self.assertEqual(attempts, 2)
+        self.assertEqual(attempts, 3)
         self.assertIn(
             '"worker_id": "worker-after-probe"',
             path.read_text(encoding="utf-8"),
         )
+
+    def test_occupied_instance_lease_releases_global_lease_after_failure(self):
+        instance_path = worker_instance_lease_path(self.config)
+        instance_path.touch(mode=0o600)
+        instance_path.chmod(0o600)
+        instance_fd = os.open(instance_path, os.O_RDWR)
+        fcntl.flock(instance_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with self.assertRaisesRegex(WorkerBusyError, "another worker"):
+                acquire_job_worker_lease(self.config, self.actor, "blocked", "host-a")
+        finally:
+            fcntl.flock(instance_fd, fcntl.LOCK_UN)
+            os.close(instance_fd)
+
+        recovered = acquire_job_worker_lease(self.config, self.actor, "recovered", "host-a")
+        recovered.release()
+
+    def test_worker_lease_short_write_releases_both_kernel_locks(self):
+        with mock.patch("bk.joblogs.os.write", return_value=0):
+            with self.assertRaisesRegex(OSError, "short write"):
+                acquire_job_worker_lease(self.config, self.actor, "failed", "host-a")
+
+        recovered = acquire_job_worker_lease(self.config, self.actor, "recovered", "host-a")
+        recovered.release()
+
+    def test_instance_close_failure_still_releases_global_worker_lock(self):
+        lease = acquire_job_worker_lease(self.config, self.actor, "first", "host-a")
+        instance_fd = lease.instance_fd
+        real_close = os.close
+
+        def close_then_fail(fd):
+            real_close(fd)
+            if fd == instance_fd:
+                raise OSError("reported instance close failure")
+
+        with mock.patch("bk.joblogs.os.close", side_effect=close_then_fail):
+            lease.release()
+
+        recovered = acquire_job_worker_lease(self.config, self.actor, "recovered", "host-a")
+        recovered.release()
 
     def test_new_job_log_propagates_directory_fsync_failure_and_closes_file(self):
         path = job_log_path(self.config, str(uuid.uuid4()))

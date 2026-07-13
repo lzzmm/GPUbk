@@ -1047,6 +1047,14 @@ def _worker_status_line(status: dict) -> str:
     if state == "running":
         suffix = f"; {status['warning']}" if status.get("warning") else ""
         return f"worker: running (kernel lease held; metadata unavailable{suffix})"
+    if state == "other-instance":
+        return (
+            "worker: other instance (lease held for another data directory; "
+            "start or restart the worker with this configuration)"
+        )
+    if state == "unverified":
+        warning = str(status.get("warning") or "worker identity is unavailable")
+        return f"worker: unverified (kernel lease held; {warning})"
     if state == "stopped" and isinstance(lease, dict):
         return (
             f"worker: stopped (last pid={lease.get('pid')} host={lease.get('hostname')} "

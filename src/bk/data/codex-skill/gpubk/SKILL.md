@@ -96,9 +96,10 @@ configured safety cap is bounded by GPU shared capacity. Do not interpret it as 
 Budget around `policy.worker_termination_grace_seconds`: scheduled commands receive TERM before
 `end_at` and cannot consume that warning window as guaranteed compute time.
 Before promising unattended execution, check `context.worker.running` or run
-`bk worker --status --json`. Only `state=running` with `running=true` proves that the kernel lease
-is held; PID, hostname, and acquisition time are diagnostic metadata. `stopped`, `not-seen`,
-`invalid`, and `unavailable` do not prove that a scheduled command will launch.
+`bk worker --status --json`. Only `state=running` with `running=true`, `lease_held=true`, and
+`instance_match=true` proves that the kernel lease belongs to this data directory; PID, hostname,
+and acquisition time are diagnostic metadata. `stopped`, `not-seen`, `other-instance`,
+`unverified`, `invalid`, and `unavailable` do not prove that a scheduled command will launch.
 Create and edit `booking_result` payloads include this same `worker` document when the reservation
 has a command, and `null` otherwise. Surface any worker warning immediately; booking success is not
 evidence of unattended command execution.

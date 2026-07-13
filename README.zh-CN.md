@@ -126,9 +126,9 @@ bk slots x 1 30m --limit 3
 不会偷偷降低指定粒度。`--from` 可以指定过去时间，历史视图只读，会显示保留期内
 已过期的预约，但不会显示已取消的预约。
 
-当前 UID 存在待领取、已领取或运行中的预约脚本时，`bk st` 还会显示由内核锁证明的
-私有 worker 状态；脚本不能启动时会明确告警。普通预约和已经终结的任务不会触发这次
-私有目录探测。
+当前 UID 存在待领取、已领取或运行中的预约脚本时，`bk st` 还会显示由内核锁和当前
+实例绑定共同证明的私有 worker 状态；脚本不能启动时会明确告警。普通预约和已经终结
+的任务不会触发这次私有目录探测。
 
 `bk add` 和不带修改参数的 `bk edit ID` 都是可恢复的引导流程，支持上述自然时间；
 输入错误时只重新询问当前字段，还可以输入 `back` 或 `cancel`，写入前会用当地时间
@@ -237,10 +237,12 @@ worker 可以并发启动多条到期命令，包括同一 GPU 上合法的 shar
 另一次成功的台账读取。未更新的持久化任务状态会在重启后诚实地恢复为 `uncertain`，
 不会被误报为完成，也不会自动重复执行。
 
-`bk worker --status` 不创建或修改私有存储，并报告 `running`、`stopped`、`not-seen`
-或不安全/不可用状态。只有内核锁能证明 `running`；文件里的 PID、主机名和获取时间仅供
-诊断。加 `--json` 可得到 `gpubk.worker.v1`，加 `--require-running` 则在租约未被持有时
-返回状态码 2。`bk jobs --json` 与 Agent/MCP 上下文也会暴露同一份当前 UID 状态。
+`bk worker --status` 不创建或修改私有存储，并报告 `running`、`stopped`、`not-seen`、
+`other-instance`、`unverified` 或不安全/不可用状态。只有全局内核锁和以当前数据目录摘要
+命名的实例锁都被持有，才能证明 `running`；文件里的 PID、主机名、获取时间和摘要文本
+仅供诊断。加 `--json` 可得到 `gpubk.worker.v1`，加 `--require-running` 则在当前实例的
+租约未被持有时返回状态码 2。`bk jobs --json` 与 Agent/MCP 上下文也会暴露同一份当前
+UID 状态。
 新增或编辑带脚本的预约时也会立即检查该租约；未证明 worker 在线时，普通 CLI 会明确
 告警，JSON/MCP 的 `booking_result.worker` 则返回同一份 `gpubk.worker.v1`（不带脚本的
 预约为 `null`）。预约创建成功本身不代表脚本能够无人值守启动。
@@ -276,7 +278,8 @@ sudo loginctl enable-linger <worker用户>
 `BK_CONFIG_FILE`，以及 `BK_WORKER_MAX_PARALLEL` 等明确启用的非敏感配置覆盖。写入
 unit 前会先校验并规范化数值，allocator 命令绝不会被固化。可用
 `bk service show worker` 检查；任一路径或覆盖项变化后使用 `--force` 重新安装。
-同一 UID 的所有 worker 必须使用同一个私有目录，使租约只有一个权威位置。没有被
+同一 UID 的所有 worker 必须使用同一个私有目录，使租约只有一个权威位置。服务于其他
+`BK_DATA_DIR` 的 worker 会显示为 `other-instance`，不会冒充当前账本已就绪。没有被
 固化覆盖的策略会在每次服务启动时从选定配置文件重新读取；共享部署应优先使用可信
 配置文件，而不是依赖 shell 环境变量。
 worker 持久启动失败在 60 秒内最多重试 3 次；普通子任务失败只写入任务状态，不会让

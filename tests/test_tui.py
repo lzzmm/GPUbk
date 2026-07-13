@@ -223,6 +223,8 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertEqual(_worker_label({"state": "running", "running": False}), "ERR")
         self.assertEqual(_worker_label({"state": "not-seen"}), "OFF")
         self.assertEqual(_worker_label({"state": "stopped"}), "STOP")
+        self.assertEqual(_worker_label({"state": "other-instance"}), "OTHER")
+        self.assertEqual(_worker_label({"state": "unverified"}), "UNVER")
         self.assertEqual(_worker_label({"state": "unavailable"}), "N/A")
         self.assertEqual(_worker_label({"state": "future-state"}), "ERR")
         self.assertEqual(_worker_label(None), "ERR")

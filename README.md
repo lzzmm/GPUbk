@@ -136,9 +136,9 @@ resolution. A past `--from` is read-only and includes retained expired
 reservations; cancelled reservations remain hidden.
 
 When the current UID has a pending, claimed, or running scheduled command,
-`bk st` also reports the private worker's kernel-proven state and warns if the
-command cannot launch. Terminal jobs and ordinary reservations do not trigger
-that private-directory probe.
+`bk st` also reports the private worker's instance-bound, kernel-proven state
+and warns if the command cannot launch. Terminal jobs and ordinary reservations
+do not trigger that private-directory probe.
 
 `bk add` and a flag-free `bk edit ID` are recoverable guided flows. They accept
 the same natural time forms, re-prompt an invalid field, support `back` and
@@ -271,11 +271,13 @@ its final process-group KILL and reap no longer depends on another successful
 ledger read. The unchanged durable job state is intentionally recovered as
 `uncertain` after restart rather than being reported as completed or retried.
 
-`bk worker --status` reports `running`, `stopped`, `not-seen`, or an unsafe/
-unavailable state without creating or modifying private storage. `running` is
-proved by the kernel lock; the recorded PID, hostname, and acquisition time are
-diagnostic metadata only. Add `--json` for `gpubk.worker.v1`, or
-`--require-running` to return status 2 unless the lease is actively held.
+`bk worker --status` reports `running`, `stopped`, `not-seen`, `other-instance`,
+`unverified`, or an unsafe/unavailable state without creating or modifying
+private storage. `running` requires both the global kernel lock and a
+privacy-safe, digest-named instance lock for the configured data directory. The
+recorded PID, hostname, acquisition time, and digest text are diagnostic
+metadata only. Add `--json` for `gpubk.worker.v1`, or `--require-running` to
+return status 2 unless this exact instance's lease is actively held.
 `bk jobs --json` and Agent/MCP context expose the same current-UID status.
 Creating or editing a reservation with a scheduled command also checks this
 lease immediately. Human output warns when no worker is proven running;
@@ -321,9 +323,11 @@ validated and normalized before they enter the unit; allocator commands are
 never captured. Review the snapshot with `bk service show worker`; reinstall
 with `--force` after changing any captured path or override.
 Every worker invocation for one UID must use that same private path so the lease
-has one authority. Settings without a captured override are reloaded from the
-selected configuration path whenever the service starts. A trusted config file
-is preferable to shell overrides for shared deployments.
+has one authority. A worker serving another `BK_DATA_DIR` is reported as
+`other-instance`, never as ready for the current ledger. Settings without a
+captured override are reloaded from the selected configuration path whenever
+the service starts. A trusted config file is preferable to shell overrides for
+shared deployments.
 Persistent worker startup failures are bounded to three attempts per 60 seconds;
 ordinary child-command failures are recorded without terminating the long-lived
 worker.

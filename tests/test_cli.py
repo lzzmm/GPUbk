@@ -1972,6 +1972,36 @@ class CliTests(unittest.TestCase):
             self.assertEqual(stopped.returncode, 0, stopped.stderr)
             self.assertIn("worker: stopped", stopped.stdout)
 
+            other_config = Config(
+                data_dir=root / "other-data",
+                gpu_count=1,
+                job_log_dir=job_dir,
+            )
+            other_lease = acquire_job_worker_lease(
+                other_config,
+                current_actor(),
+                "other-holder",
+                "test-host",
+            )
+            try:
+                other_status = self.run_bk(
+                    ["worker", "--status", "--require-running", "--json"],
+                    data_dir,
+                    env,
+                )
+                other_human = self.run_bk(["worker", "--status"], data_dir, env)
+            finally:
+                other_lease.release()
+
+            self.assertEqual(other_status.returncode, 2, other_status.stderr)
+            other_payload = json.loads(other_status.stdout)
+            self.assertEqual(other_payload["state"], "other-instance")
+            self.assertFalse(other_payload["running"])
+            self.assertTrue(other_payload["lease_held"])
+            self.assertFalse(other_payload["instance_match"])
+            self.assertEqual(other_human.returncode, 0, other_human.stderr)
+            self.assertIn("worker: other instance", other_human.stdout)
+
     def test_service_unit_captures_effective_data_and_job_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

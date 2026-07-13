@@ -88,6 +88,7 @@ class AgentServiceTests(unittest.TestCase):
         self.assertTrue(context["capabilities"]["scheduled_job_live_guard"])
         self.assertTrue(context["capabilities"]["single_worker_lease"])
         self.assertTrue(context["capabilities"]["worker_liveness"])
+        self.assertTrue(context["capabilities"]["worker_instance_binding"])
         self.assertTrue(context["capabilities"]["scheduled_job_crash_recovery"])
         self.assertTrue(context["capabilities"]["weighted_shared_capacity"])
         self.assertTrue(context["capabilities"]["private_job_spec_cleanup"])
@@ -527,6 +528,46 @@ class AgentServiceTests(unittest.TestCase):
         self.assertEqual(submission.worker_status["state"], "running")
         self.assertTrue(submission.worker_status["running"])
         self.assertFalse(any("scheduled command worker" in warning for warning in payload["warnings"]))
+
+    def test_scheduled_job_submission_rejects_worker_readiness_from_another_instance(self):
+        actor = Actor(os.getuid(), "current")
+        job_dir = self.data_dir / "private-jobs"
+        config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            job_log_dir=job_dir,
+        )
+        other = Config(
+            data_dir=self.data_dir / "other-ledger",
+            gpu_count=2,
+            max_shared_users=2,
+            job_log_dir=job_dir,
+        )
+        lease = acquire_job_worker_lease(other, actor, "other-worker", "gpu-host")
+        try:
+            submission = submit_booking(
+                config,
+                self.store,
+                actor,
+                count=1,
+                duration_seconds=30 * 60,
+                start_at=self.start,
+                command_argv=[sys.executable, "-c", "print('private')"],
+                working_directory=self.tmp.name,
+                allow_queue=False,
+                advice=self.advice,
+            )
+        finally:
+            lease.release()
+
+        payload = booking_result_payload("created", submission, actor)
+
+        self.assertEqual(submission.worker_status["state"], "other-instance")
+        self.assertFalse(submission.worker_status["running"])
+        self.assertTrue(
+            any("another data directory" in warning for warning in payload["warnings"])
+        )
 
     def test_cancellation_removes_the_current_uids_pending_private_job_spec(self):
         actor = Actor(os.getuid(), "current")

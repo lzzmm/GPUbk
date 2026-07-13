@@ -390,6 +390,7 @@ def build_agent_context(
             "scheduled_job_live_guard": config.worker_live_guard,
             "single_worker_lease": True,
             "worker_liveness": True,
+            "worker_instance_binding": True,
             "scheduled_job_crash_recovery": True,
             "private_job_specs": True,
             "private_job_spec_cleanup": True,
@@ -722,6 +723,16 @@ def scheduled_job_worker_warning(status: Optional[dict]) -> Optional[str]:
         return (
             "scheduled command worker status is invalid; run `bk w --status --json` "
             "and repair the private job directory before relying on automatic launch"
+        )
+    if state == "other-instance":
+        return (
+            "scheduled command worker serves another data directory; start or restart "
+            "it with this BK_DATA_DIR before relying on automatic launch"
+        )
+    if state == "unverified":
+        return (
+            "scheduled command worker identity is unverified; restart it with the current "
+            "GPUbk version before relying on automatic launch"
         )
     return (
         f"scheduled command worker status is {state}; verify `bk w --status --json` "

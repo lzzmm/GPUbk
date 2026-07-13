@@ -36,8 +36,9 @@ Supported security boundaries:
   matches same-UID processes by the exact reservation environment marker and rechecks identity
   before TERM/KILL. Cross-host or unverifiable processes are never signalled and remain uncertain.
 - Worker status probes the same UID-private kernel lock without creating or modifying storage.
-  Lease PID, hostname, and timestamps are diagnostics only and never replace lock ownership as
-  liveness evidence.
+  A second kernel lease named by a privacy-safe instance digest binds the worker to the configured
+  data directory. Positive readiness requires both the global and matching instance lock; lease
+  PID, hostname, timestamps, and digest text are diagnostics only.
 - Scheduled jobs re-check live process authorization and physical VRAM immediately before
   launch; this reduces races but cannot replace kernel device access control.
 - Scheduled process groups receive TERM during the configured final grace window and KILL at the
@@ -112,8 +113,9 @@ Administrator responsibilities:
 - Enabling systemd linger allows an account's user manager and background services to run
   without an active login. Grant it only to the selected monitor account and users who need
   unattended workers; disable it when that requirement ends.
-- Keep one canonical `BK_JOB_LOG_DIR` per UID. The worker lease cannot coordinate invocations
-  deliberately pointed at different private directories.
+- Keep one canonical `BK_JOB_LOG_DIR` per UID. The worker lease binds its owner to one data
+  directory, but cannot coordinate invocations deliberately pointed at different private
+  directories.
 - Keep `worker_live_guard=true` on shared servers. Disabling it restores direct launch behavior
   and accepts collisions with activity that appeared after booking.
 - Run `bk doctor --probe --strict` on the target mount before enabling services. Its lock check is

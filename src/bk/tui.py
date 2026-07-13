@@ -788,6 +788,8 @@ def _worker_label(status: object) -> str:
         "idle": "IDLE",
         "not-seen": "OFF",
         "stopped": "STOP",
+        "other-instance": "OTHER",
+        "unverified": "UNVER",
         "unavailable": "N/A",
     }.get(state, "ERR")
 

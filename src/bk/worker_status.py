@@ -8,7 +8,13 @@ from typing import Iterable, Optional
 
 from .config import MAX_UID, Config
 from .fileio import open_existing_regular
-from .joblogs import WORKER_LEASE_FILENAME, job_log_root, validate_private_directory
+from .joblogs import (
+    WORKER_LEASE_FILENAME,
+    job_log_root,
+    validate_private_directory,
+    worker_instance_id,
+    worker_instance_lease_path,
+)
 from .models import (
     JOB_CANCELLED,
     JOB_FAILED,
@@ -28,6 +34,7 @@ MAX_WORKER_LEASE_BYTES = 16 * 1024
 MAX_WORKER_ID_LENGTH = 128
 MAX_HOSTNAME_LENGTH = 255
 MAX_PID = 2**31 - 1
+WORKER_INSTANCE_ID_LENGTH = 64
 WORKER_TERMINAL_JOB_STATES = frozenset(
     {
         JOB_SUCCEEDED,
@@ -79,7 +86,13 @@ def inspect_worker_status(
     try:
         root.lstat()
     except FileNotFoundError:
-        return _status("not-seen", checked_at, running=False, lease_present=False)
+        return _status(
+            "not-seen",
+            checked_at,
+            running=False,
+            lease_present=False,
+            lease_held=False,
+        )
     except OSError as exc:
         return _invalid(checked_at, f"cannot inspect private job directory {root}: {exc}")
 
@@ -92,7 +105,13 @@ def inspect_worker_status(
     try:
         fd = open_existing_regular(path, expected_mode=0o600)
     except FileNotFoundError:
-        return _status("not-seen", checked_at, running=False, lease_present=False)
+        return _status(
+            "not-seen",
+            checked_at,
+            running=False,
+            lease_present=False,
+            lease_held=False,
+        )
     except OSError as exc:
         return _invalid(checked_at, f"cannot safely inspect worker lease: {exc}", lease_present=True)
 
@@ -114,9 +133,9 @@ def inspect_worker_status(
         raw, read_warning = _read_lease_bytes(fd)
         try:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-            running = False
+            lease_held = False
         except BlockingIOError:
-            running = True
+            lease_held = True
         except OSError as exc:
             return _invalid(
                 checked_at,
@@ -126,18 +145,79 @@ def inspect_worker_status(
     finally:
         os.close(fd)
 
-    lease, validation_warning = _parse_lease(raw, actor.uid) if raw is not None else (None, None)
-    warning = read_warning or validation_warning
+    lease, validation_warning, recorded_instance_match = (
+        _parse_lease(raw, actor.uid, worker_instance_id(config))
+        if raw is not None
+        else (None, None, None)
+    )
+    instance_lease_held, instance_warning = (
+        _inspect_instance_lease(config, actor)
+        if lease_held
+        else (None, None)
+    )
+    if lease is not None and (not lease_held or instance_lease_held is True):
+        validation_warning = None
+    warning = read_warning or validation_warning or instance_warning
+    metadata_valid = lease is not None
+    if lease_held:
+        if instance_lease_held is True:
+            state = "running"
+            ready = True
+            instance_match = True
+        elif recorded_instance_match is False:
+            state = "other-instance"
+            ready = False
+            instance_match = False
+        else:
+            state = "unverified"
+            ready = None
+            instance_match = None
+    else:
+        state = "stopped"
+        ready = False
+        instance_match = None
     return _status(
-        "running" if running else "stopped",
+        state,
         checked_at,
-        running=running,
+        running=ready,
         lease_present=True,
         lease=lease,
-        metadata_valid=warning is None,
+        lease_held=lease_held,
+        instance_lease_held=instance_lease_held,
+        metadata_valid=metadata_valid,
+        instance_match=instance_match,
         warning=warning,
         evidence="kernel-flock",
     )
+
+
+def _inspect_instance_lease(
+    config: Config,
+    actor: Actor,
+) -> tuple[Optional[bool], Optional[str]]:
+    path = worker_instance_lease_path(config)
+    try:
+        fd = open_existing_regular(path, expected_mode=0o600)
+    except FileNotFoundError:
+        return False, None
+    except OSError as exc:
+        return None, f"cannot safely inspect worker instance lease: {exc}"
+    try:
+        try:
+            metadata = os.fstat(fd)
+        except OSError as exc:
+            return None, f"cannot inspect worker instance lease: {exc}"
+        if metadata.st_uid != actor.uid:
+            return None, f"worker instance lease is not owned by UID {actor.uid}"
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            return False, None
+        except BlockingIOError:
+            return True, None
+        except OSError as exc:
+            return None, f"cannot probe worker instance lease lock: {exc}"
+    finally:
+        os.close(fd)
 
 
 def _read_lease_bytes(fd: int) -> tuple[Optional[bytes], Optional[str]]:
@@ -162,7 +242,11 @@ def _read_lease_bytes(fd: int) -> tuple[Optional[bytes], Optional[str]]:
     return bytes(data), None
 
 
-def _parse_lease(raw: bytes, expected_uid: int) -> tuple[Optional[dict], Optional[str]]:
+def _parse_lease(
+    raw: bytes,
+    expected_uid: int,
+    expected_instance_id: str,
+) -> tuple[Optional[dict], Optional[str], Optional[bool]]:
     try:
         payload = json.loads(raw.decode("utf-8"))
         if not isinstance(payload, dict):
@@ -179,6 +263,20 @@ def _parse_lease(raw: bytes, expected_uid: int) -> tuple[Optional[dict], Optiona
         if not isinstance(acquired_at, str):
             raise ValueError("acquired_at must be a timestamp string")
         parse_iso(acquired_at)
+        if "instance_id" in payload:
+            instance_id = _bounded_instance_id(payload["instance_id"])
+            instance_match = instance_id == expected_instance_id
+            instance_warning = (
+                None
+                if instance_match
+                else "worker lease belongs to another GPUbk data directory"
+            )
+        else:
+            instance_id = None
+            instance_match = None
+            instance_warning = (
+                "worker lease predates data-directory binding; restart the worker"
+            )
     except (
         UnicodeDecodeError,
         json.JSONDecodeError,
@@ -186,14 +284,17 @@ def _parse_lease(raw: bytes, expected_uid: int) -> tuple[Optional[dict], Optiona
         OverflowError,
         RecursionError,
     ) as exc:
-        return None, f"invalid worker lease metadata: {exc}"
-    return {
+        return None, f"invalid worker lease metadata: {exc}", None
+    lease = {
         "worker_id": worker_id,
         "pid": pid,
         "uid": uid,
         "hostname": hostname,
         "acquired_at": acquired_at,
-    }, None
+    }
+    if instance_id is not None:
+        lease["instance_id"] = instance_id
+    return lease, instance_warning, instance_match
 
 
 def _bounded_text(value: object, name: str, maximum: int) -> str:
@@ -207,6 +308,16 @@ def _bounded_text(value: object, name: str, maximum: int) -> str:
 def _bounded_int(value: object, name: str, minimum: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
         raise ValueError(f"{name} must be an integer from {minimum} to {maximum}")
+    return value
+
+
+def _bounded_instance_id(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != WORKER_INSTANCE_ID_LENGTH
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError("instance_id must be a lowercase SHA-256 digest")
     return value
 
 
@@ -227,7 +338,10 @@ def _status(
     running: Optional[bool],
     lease_present: Optional[bool],
     lease: Optional[dict] = None,
+    lease_held: Optional[bool] = None,
+    instance_lease_held: Optional[bool] = None,
     metadata_valid: Optional[bool] = None,
+    instance_match: Optional[bool] = None,
     warning: Optional[str] = None,
     evidence: Optional[str] = None,
 ) -> dict:
@@ -236,7 +350,10 @@ def _status(
         "state": state,
         "running": running,
         "lease_present": lease_present,
+        "lease_held": lease_held,
+        "instance_lease_held": instance_lease_held,
         "metadata_valid": metadata_valid,
+        "instance_match": instance_match,
         "evidence": evidence,
         "checked_at": checked_at,
         "lease": lease,
