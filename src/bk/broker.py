@@ -280,7 +280,11 @@ class BrokerServer:
         self.store.load()
         self._remove_stale_socket()
         listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        previous_umask = os.umask(0o077)
+        # A client may observe the socket as soon as bind() creates its path.
+        # Give it the final mode immediately; chmod below remains a verified
+        # repair step for platforms with unusual Unix-socket mode behavior.
+        bind_umask = 0o777 & ~self.config.broker_socket_mode
+        previous_umask = os.umask(bind_umask)
         try:
             listener.bind(str(self.socket_path))
         finally:
