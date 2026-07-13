@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Add a read-only Linux procfs deployment probe for cross-UID process ownership visibility.
+  Strict preflight now requires the configured monitor account and refuses to claim production
+  readiness when process attribution is blocked or has not been demonstrated on the target host.
 - Degrade collector health when an observed GPU process cannot be attributed to a numeric UID.
   The additive `process_identity_gap` field reaches doctor, Agent, TUI, and usage APIs; legacy v1
   heartbeats remain readable but are conservative until a current monitor replaces them.

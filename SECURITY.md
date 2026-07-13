@@ -140,8 +140,10 @@ Administrator responsibilities:
 - Treat daemon exit `78` as configuration drift. Compare the trusted file and `bk config` output
   with the ledger policy; never work around it by weakening capacity, storage, memory, or
   granularity settings in a user environment.
-- Run `bk doctor --probe --strict` on the target mount before enabling services. Its lock check is
-  cross-process on one host; shared NFS/FUSE deployments still require a second-host lock test.
+- Run `bk doctor --probe --strict` as the configured `monitor_uid` on the target host before
+  enabling services. Its procfs check requires visible numeric ownership for at least one process
+  from another UID; a quiet host reports this capability as unproven rather than ready. Its lock
+  check is cross-process on one host; shared NFS/FUSE deployments still require a second-host test.
 - After enabling the monitor, run `bk doctor --require-monitor --strict`. Preflight intentionally
   permits a missing heartbeat because the service may not have started yet; post-start verification
   must not.

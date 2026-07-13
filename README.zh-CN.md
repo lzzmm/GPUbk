@@ -521,6 +521,11 @@ bk doctor --probe --strict
 bk doctor --probe --json --strict
 ```
 
+这些命令应由 `monitor_uid` 指定的账号执行。在 Linux 上，预检会确认该账号能读取另一
+UID 进程的数字所有者。受限的 `hidepid` 或容器 `/proc` 策略会让探针失败；若当前没有
+任何其他 UID 的可见进程，则返回 `warn`，因为跨用户归属能力尚未得到实证。此时可在
+另一位普通实验室用户存在任意进程时重跑预检，不需要启动 GPU 任务。
+
 启用 monitor 后，再单独验证长驻写入者确实健康：
 
 ```bash

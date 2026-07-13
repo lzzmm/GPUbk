@@ -28,6 +28,7 @@ from .storage import FileLock
 DOCTOR_SCHEMA_VERSION = "gpubk.doctor.v1"
 MIN_FREE_BYTES = 100 * 1024 * 1024
 MIN_FREE_RATIO = 0.01
+MAX_PROC_IDENTITY_CANDIDATES = 100_000
 
 _CHILD_LOCK_PROBE = """
 import fcntl
@@ -67,6 +68,7 @@ def run_deployment_probes(config: Config) -> list[dict]:
     else:
         for name in ("atomic-replace", "process-lock", "disk-space"):
             checks.append(_result(name, "fail", "data directory is not ready"))
+    checks.append(_probe_process_identity(config))
     checks.append(_probe_gpu(config))
     return checks
 
@@ -221,6 +223,87 @@ def _probe_disk_space(config: Config) -> dict:
         free_bytes=usage.free,
         total_bytes=usage.total,
         free_ratio=round(free_ratio, 6),
+    )
+
+
+def _probe_process_identity(config: Config) -> dict:
+    if not sys.platform.startswith("linux"):
+        return _result(
+            "process-identity",
+            "pass",
+            "Linux procfs identity visibility is not applicable on this host",
+            applicable=False,
+            platform=sys.platform,
+        )
+    current_uid = os.getuid()
+    if config.monitor_uid is not None and current_uid != config.monitor_uid:
+        return _result(
+            "process-identity",
+            "fail",
+            "run the deployment probe as the configured monitor UID",
+            current_uid=current_uid,
+            monitor_uid=config.monitor_uid,
+        )
+
+    candidates = 0
+    examined = 0
+    inaccessible = 0
+    try:
+        with os.scandir("/proc") as entries:
+            for entry in entries:
+                if not entry.name.isdigit():
+                    continue
+                candidates += 1
+                if candidates > MAX_PROC_IDENTITY_CANDIDATES:
+                    break
+                try:
+                    metadata = entry.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                except PermissionError:
+                    inaccessible += 1
+                    continue
+                except OSError:
+                    continue
+                if not stat.S_ISDIR(metadata.st_mode):
+                    continue
+                examined += 1
+                if metadata.st_uid != current_uid:
+                    return _result(
+                        "process-identity",
+                        "pass",
+                        "numeric ownership of another UID's process is visible",
+                        current_uid=current_uid,
+                        sample_pid=int(entry.name),
+                        sample_uid=metadata.st_uid,
+                        candidate_processes=candidates,
+                        examined_processes=examined,
+                    )
+    except OSError as exc:
+        return _result(
+            "process-identity",
+            "fail",
+            f"cannot inspect Linux procfs: {exc}",
+            current_uid=current_uid,
+        )
+
+    if inaccessible:
+        return _result(
+            "process-identity",
+            "fail",
+            "procfs denied process metadata needed for numeric UID attribution",
+            current_uid=current_uid,
+            candidate_processes=candidates,
+            examined_processes=examined,
+            inaccessible_processes=inaccessible,
+        )
+    return _result(
+        "process-identity",
+        "warn",
+        "no process owned by another UID was visible; cross-user attribution is unproven",
+        current_uid=current_uid,
+        candidate_processes=candidates,
+        examined_processes=examined,
     )
 
 

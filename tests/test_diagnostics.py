@@ -1,3 +1,4 @@
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -5,11 +6,23 @@ from types import SimpleNamespace
 from unittest import mock
 
 from bk.config import Config
-from bk.diagnostics import probes_ready, run_deployment_probes
+from bk.diagnostics import _probe_process_identity, probes_ready, run_deployment_probes
 from bk.gpu import GpuSnapshot
 
 
 class DeploymentDiagnosticsTests(unittest.TestCase):
+    def setUp(self):
+        patcher = mock.patch(
+            "bk.diagnostics._probe_process_identity",
+            return_value={
+                "name": "process-identity",
+                "status": "pass",
+                "message": "test process identity probe",
+            },
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_preflight_verifies_storage_lock_and_nvml_without_leaving_probe_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "shared"
@@ -37,7 +50,14 @@ class DeploymentDiagnosticsTests(unittest.TestCase):
             self.assertTrue(probes_ready(checks), checks)
             self.assertEqual(
                 [item["name"] for item in checks],
-                ["data-directory", "atomic-replace", "process-lock", "disk-space", "gpu-telemetry"],
+                [
+                    "data-directory",
+                    "atomic-replace",
+                    "process-lock",
+                    "disk-space",
+                    "process-identity",
+                    "gpu-telemetry",
+                ],
             )
             self.assertEqual(list(data_dir.glob(".gpubk-probe-*")), [])
 
@@ -263,6 +283,95 @@ class DeploymentDiagnosticsTests(unittest.TestCase):
             self.assertEqual(directory["actual_gid"], actual_gid)
             self.assertEqual(checks[1]["message"], "data directory is not ready")
             self.assertEqual(list(data_dir.glob(".gpubk-probe-*")), [])
+
+    def test_process_identity_probe_accepts_visible_foreign_uid(self):
+        config = Config(data_dir=Path("/tmp/gpubk-diagnostics"), monitor_uid=1001)
+        entries = [
+            self._proc_entry("100", 1001),
+            self._proc_entry("1", 0),
+        ]
+        scanner = mock.MagicMock()
+        scanner.__enter__.return_value = iter(entries)
+
+        with (
+            mock.patch("bk.diagnostics.sys.platform", "linux"),
+            mock.patch("bk.diagnostics.os.getuid", return_value=1001),
+            mock.patch("bk.diagnostics.os.scandir", return_value=scanner),
+        ):
+            result = _probe_process_identity(config)
+
+        self.assertEqual(result["status"], "pass")
+        self.assertEqual(result["sample_pid"], 1)
+        self.assertEqual(result["sample_uid"], 0)
+
+    def test_process_identity_probe_does_not_claim_same_uid_only_visibility(self):
+        config = Config(data_dir=Path("/tmp/gpubk-diagnostics"), monitor_uid=1001)
+        scanner = mock.MagicMock()
+        scanner.__enter__.return_value = iter([self._proc_entry("100", 1001)])
+
+        with (
+            mock.patch("bk.diagnostics.sys.platform", "linux"),
+            mock.patch("bk.diagnostics.os.getuid", return_value=1001),
+            mock.patch("bk.diagnostics.os.scandir", return_value=scanner),
+        ):
+            result = _probe_process_identity(config)
+
+        self.assertEqual(result["status"], "warn")
+        self.assertIn("unproven", result["message"])
+        self.assertFalse(probes_ready([result]))
+
+    def test_process_identity_probe_fails_for_wrong_monitor_uid(self):
+        config = Config(data_dir=Path("/tmp/gpubk-diagnostics"), monitor_uid=1002)
+
+        with (
+            mock.patch("bk.diagnostics.sys.platform", "linux"),
+            mock.patch("bk.diagnostics.os.getuid", return_value=1001),
+            mock.patch("bk.diagnostics.os.scandir") as scanner,
+        ):
+            result = _probe_process_identity(config)
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["monitor_uid"], 1002)
+        scanner.assert_not_called()
+
+    def test_process_identity_probe_fails_when_proc_metadata_is_denied(self):
+        config = Config(data_dir=Path("/tmp/gpubk-diagnostics"), monitor_uid=1001)
+        denied = self._proc_entry("1", 0)
+        denied.stat.side_effect = PermissionError("hidden by procfs policy")
+        scanner = mock.MagicMock()
+        scanner.__enter__.return_value = iter(
+            [self._proc_entry("100", 1001), denied]
+        )
+
+        with (
+            mock.patch("bk.diagnostics.sys.platform", "linux"),
+            mock.patch("bk.diagnostics.os.getuid", return_value=1001),
+            mock.patch("bk.diagnostics.os.scandir", return_value=scanner),
+        ):
+            result = _probe_process_identity(config)
+
+        self.assertEqual(result["status"], "fail")
+        self.assertEqual(result["inaccessible_processes"], 1)
+        self.assertEqual(result["candidate_processes"], 2)
+
+    def test_process_identity_probe_reports_non_linux_as_not_applicable(self):
+        config = Config(data_dir=Path("/tmp/gpubk-diagnostics"))
+
+        with mock.patch("bk.diagnostics.sys.platform", "darwin"):
+            result = _probe_process_identity(config)
+
+        self.assertEqual(result["status"], "pass")
+        self.assertFalse(result["applicable"])
+
+    @staticmethod
+    def _proc_entry(pid: str, uid: int):
+        entry = mock.MagicMock()
+        entry.name = pid
+        entry.stat.return_value = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o555,
+            st_uid=uid,
+        )
+        return entry
 
 
 if __name__ == "__main__":

@@ -615,6 +615,13 @@ bk doctor --probe --strict
 bk doctor --probe --json --strict
 ```
 
+Run these commands as the account selected by `monitor_uid`. On Linux, preflight
+checks that this account can read numeric ownership for a process belonging to
+another UID. A restrictive `hidepid` or container procfs policy fails the probe;
+if no other UID currently has a visible process, the result is `warn` because
+cross-user attribution has not yet been demonstrated. Rerun the probe while an
+ordinary process from another lab user exists; no GPU workload is required.
+
 After enabling the monitor, verify the long-running writer separately:
 
 ```bash
