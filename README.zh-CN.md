@@ -420,38 +420,59 @@ allocator 进程组再继续抛出中断。完整格式见
 sudo bk admin init
 ```
 
-命令会自动探测 GPU 数量、先展示全部变更并要求确认。默认使用**开放协作模式**：所有
-本机账号都能使用 GPUbk，不创建新 Unix 用户组；root 配置写入
-`/etc/gpubk/config.json`，共享数据默认放在 `/var/lib/gpubk`。
+命令会自动探测 GPU 数量、先展示全部变更并要求确认。默认允许所有本机账号通过 Unix
+socket 使用 GPUbk；只有一个已有的非 root 服务账号能写台账。普通用户无需 `sudo`，
+也不能绕过 `bk` 直接替换台账文件。默认不需要新建用户组。
+
+第一次可回滚试用可以直接把自己的账号作为服务账号；正式部署建议使用专用 `gpubk`
+账号。
 
 常用的非交互形式：
 
 ```bash
-bk admin init --dry-run --gpu-count 8       # 不需要 root，不写文件
-sudo bk admin init --yes                    # 接受探测结果与默认值
-sudo bk admin init --data-dir /data2/shared/gpubk
-sudo bk admin init --access group --group gpuusers
+bk admin init --dry-run --gpu-count 8 --service-user "$USER"
+sudo bk admin init --yes --service-user "$USER"
+sudo bk admin init --yes --service-user gpubk --data-dir /data2/shared/gpubk
+sudo bk admin init --yes --service-user gpubk --access group --group gpuusers
 ```
 
-用户组模式是可选项，并且只使用已经存在的组；初始化命令不会擅自创建组或修改成员关系。
-它也拒绝对非空数据目录直接更换策略。初始化完成后预约立即可用，但不会偷偷启动 monitor
-或修改 systemd linger 策略。
+用户组模式只是可选地限制谁能连接 socket；初始化命令不会创建账号、用户组或修改成员。
+台账文件固定为 `0644`、目录为 `0755`，均归服务账号所有：所有用户可以查看排期，但只有
+broker 能修改。broker 从内核提供的对端凭据识别 UID，不信任客户端传来的用户名或 UID。
 
-开放模式使用 `0666` 文件和 `0777` 目录。这里不能使用 sticky bit，因为不同用户必须
-原子替换同一个公共台账。因此开放模式会把所有本机账号视为可信参与者，他们也能绕过
-GPUbk 直接替换共享数据。若只信任部分账号，请选择用户组模式；若本机用户彼此不可信，
-应采用本地 broker 或内核强制隔离，而不是继续放宽文件权限。
-
-### 手工配置用户组模式
-
-等价的高级配置从为已有实验室用户组创建 setgid 目录开始：
+第一次试用时，在第二个终端前台启动 broker：
 
 ```bash
-sudo install -d -m 2770 -o root -g gpuusers /data2/shared/bk
-sudo install -d -m 0755 -o root -g root /etc/gpubk
+sudo -u "$USER" bk broker                 # 初始化时使用了 --service-user "$USER"
+# 或：sudo -u gpubk /bk/的绝对路径 broker
 ```
 
-将 root 管理的配置放在 `/etc/gpubk/config.json`，不要与组可写台账目录同置：
+然后用普通用户体验：
+
+```bash
+bk config                                # storage transport 应显示 broker
+bk doctor --probe --strict               # 校验 socket 身份与连通性
+bk 1 30m
+bk l
+bk t
+```
+
+卸载前先在 broker 终端按 `Ctrl+C`。非空数据必须显式给出 `--purge-data`：
+
+```bash
+sudo bk admin uninstall --dry-run --purge-data
+sudo bk admin uninstall --purge-data --yes
+python3 -m pip uninstall gpubk
+```
+
+卸载清单会恢复安装前已有空目录的权限和被替换的旧配置。如果 broker 仍在运行、配置被
+外部修改，或待删除目录中出现未知文件，卸载会拒绝继续。GPUbk 从不创建账号和用户组，
+所以卸载也不会删除它们。
+
+### 配置与生产说明
+
+`bk admin init` 会把 root 管理的配置放在服务账号所有的台账目录之外。生成的配置除调度
+参数外，还包含 broker 身份和 socket 策略：
 
 ```json
 {
@@ -485,17 +506,14 @@ sudo install -d -m 0755 -o root -g root /etc/gpubk
   "worker_live_guard": true,
   "monitor_interval_seconds": 2,
   "monitor_rollup_seconds": 60,
-  "monitor_uid": 1001,
-  "storage_gid": 1002,
+  "monitor_uid": 991,
+  "broker_socket": "/run/gpubk/broker.sock",
+  "broker_uid": 991,
+  "broker_socket_mode": "0666",
   "tui_refresh_seconds": 1,
-  "file_mode": "0660",
-  "dir_mode": "2770"
+  "file_mode": "0644",
+  "dir_mode": "0755"
 }
-```
-
-```bash
-sudo chown root:root /etc/gpubk/config.json
-sudo chmod 0644 /etc/gpubk/config.json
 ```
 
 当 `BK_DATA_DIR` 与 `BK_CONFIG_FILE` 都未设置时，GPUbk 会自动发现
@@ -512,21 +530,14 @@ XDG 目录规范，只采用非空绝对路径；相对或空值分别回退到 
 仍会使用同一组路径。显式 `BK_JOB_LOG_DIR` 或 `job_log_dir` 必须为绝对路径（开头的
 `~` 会先展开）。
 
-请用 `id -u <monitor账号>` 的结果替换 `1001`，用
-`getent group gpuusers | cut -d: -f3` 的结果替换 `1002`。`storage_gid` 可省略；
-配置后会把数据根目录本身绑定到实验室组的数字 GID，避免整棵目录树一致地落入错误组
-却仍显示健康。该字段要求 `dir_mode` 带 setgid 位。配置文件及其每一级目录必须由 root
-或当前 UID 所有，并且不可被 group/other 写入。
-即使文件自身是 root 所有的 `0644`，只要它位于 `/data2/shared/bk` 这种组可写目录中，
-目录成员仍能通过 rename 替换它。GPUbk 会按文件描述符逐级固定并验证配置路径，拒绝
-这种部署。显式选择 `BK_DATA_DIR` 时，单用户安装继续兼容
-`$BK_DATA_DIR/config.json` 默认路径。
+请用 `id -u <服务账号>` 的结果替换 `991`。可选用户组模式下才会出现 `broker_gid`，
+它只约束 socket，不改变台账所有权。配置文件及其每一级目录必须由 root 所有，并且
+不可被 group/other 写入。broker 安全字段只接受这份可信外部配置。显式选择
+`BK_DATA_DIR` 时，单用户安装继续兼容 `$BK_DATA_DIR/config.json` 默认路径。
 
-向 group 或 other 可写目录写入遥测的 monitor 会执行更严格的检查：必须使用可信且
-root-owned 的外部或系统配置，配置 `monitor_uid`，且进程 UID 必须完全一致。退出码
-`77` 表示当前
-进程不是指定写入者。实际执行遥测维护和迁移也要求同一角色，dry-run 仍可由普通用户
-查看。单用户私有目录不要求配置该角色。
+monitor 由配置中的服务 UID 运行，直接写服务账号所有的利用率历史目录。退出码 `77`
+表示当前进程不是指定 monitor 写入者。每位用户的 worker 仍把命令描述和日志放在自己的
+XDG state 目录中，只有受限的任务状态更新通过 broker 写回公共台账。
 任一守护进程返回 `78` 都表示其生效策略与台账不一致。不要改限制后盲目重试；先检查
 `bk config`，修复可信配置，必要时重新安装固化配置的 service，再启动守护进程。
 
@@ -545,9 +556,8 @@ bk config
 bk config --json
 ```
 
-环境变量可覆盖普通文件值，单次命令参数再覆盖对应默认值。安全角色 `monitor_uid` 和
-`storage_gid` 只能来自配置文件，不能用环境变量替换。启用 `storage_gid` 后会在下一次
-写入时绑定到台账，此后所有客户端必须使用相同的可信 GID。新配置应声明
+环境变量可覆盖普通文件值，单次命令参数再覆盖对应默认值。安全字段 `monitor_uid`、
+`broker_socket`、`broker_uid` 和 `broker_gid` 只能来自配置文件，不能用环境变量替换。新配置应声明
 `"config_version": 1`，旧的无版本配置仍可兼容读取。未知字段、错误类型、NaN/Infinity、
 不安全路径和越界数值会直接报错，不再静默忽略。JSON 报告只列出当前生效的环境变量名，
 不会输出外部分配器命令内容。
@@ -570,10 +580,9 @@ bk doctor --probe --strict
 bk doctor --probe --json --strict
 ```
 
-这些命令应由 `monitor_uid` 指定的账号执行。在 Linux 上，预检会确认该账号能读取另一
-UID 进程的数字所有者。受限的 `hidepid` 或容器 `/proc` 策略会让探针失败；若当前没有
-任何其他 UID 的可见进程，则返回 `warn`，因为跨用户归属能力尚未得到实证。此时可在
-另一位普通实验室用户存在任意进程时重跑预检，不需要启动 GPU 任务。
+普通用户运行时，预检会验证台账只读权限和内核认证的 broker 连接。服务账号还应再运行
+一次，用于验证原子替换、文件锁、GPU 遥测和跨用户进程归属。受限的 `hidepid` 策略可能
+阻止后者完成。
 
 启用 monitor 后，再单独验证长驻写入者确实健康：
 
@@ -592,22 +601,21 @@ bk doctor --require-worker --json --strict
 检查当前用户的完整部署时可同时使用两个 `--require-*` 参数。普通 `doctor` 会只读报告
 隐私安全的 worker 状态，但不会强制纯预约用户启用可选服务，也不会创建私有目录。
 
-共享数据目录模式下会禁用 `bk reset`。需要退役或重建共享台账时，管理员必须先停止
-所有 GPUbk 写入者并完成备份，再通过受控的文件系统流程处理。该命令仅保留给私有目录
-和可丢弃的模拟数据。
+broker 存储模式下会禁用 `bk reset`。试部署退役请使用带安装清单校验的
+`bk admin uninstall`；`bk reset` 仅保留给私有目录和可丢弃的模拟数据。
 
-预检会创建随机命名的临时文件，验证同目录原子替换与目录 fsync、同机跨进程
-`flock`、配置权限、setgid GID 继承、剩余空间和真实 GPU 探测，随后删除所有临时文件。探测到的 GPU
+服务账号运行预检时会创建随机命名的临时文件，验证同目录原子替换与目录 fsync、同机
+跨进程 `flock`、权限、剩余空间和真实 GPU 探测，随后删除临时文件。普通用户只执行
+只读检查和 broker 身份验证。探测到的 GPU
 编号必须严格等于 `0..gpu_count-1`；每张 NVML 设备都必须返回有效显存、进程列表和
 CUDA 可用的稳定 GPU 标识及进程级利用率。拓扑不匹配、缺少稳定标识或缺少进程列表
 会失败；缺少进程级利用率、模拟环境或
 `nvidia-smi` 回退会在 strict 模式下作为警告失败。JSON 中的 `healthy` 只表示只读
 台账检查，未运行 `--probe` 时 `ready` 保持为 `null`。
 普通 `doctor` 不会初始化存储、加锁、恢复待处理事务，也不会跟随受管路径上的符号
-链接或硬链接别名；它会报告台账、备份和遥测目录树中的权限及 GID 漂移。配置权限位
-或 setgid 组发生漂移时，写命令会在修改数据前失败，而不会静默执行 `chmod` 或
-`chgrp`。setgid 模式以数据目录的数字 GID 作为所有受管目录和文件的继承基准。
-只有显式指定 `--probe` 才会写入临时文件。
+链接或硬链接别名；它会报告台账、备份和遥测目录树中的权限漂移。权限或所有者发生漂移
+时，写命令会在修改数据前失败，而不会静默修复非空目录。只有服务账号显式指定
+`--probe` 才会写入临时文件。
 若 NFS/FUSE 被多台机器共同挂载，
 仍需从第二台机器验证跨主机锁传播，因为单机测试无法证明这一点。所有写入者都必须
 通过 GPUbk。

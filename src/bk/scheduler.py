@@ -46,7 +46,12 @@ from .timeparse import normalize_queue_start, parse_iso, to_iso, utc_now
 BOOKING_GRANULARITY_SECONDS = DEFAULT_SLOT_MINUTES * 60
 
 
-def add_booking(store: LedgerStore, config: Config, request: BookingRequest) -> BookingResult:
+def add_booking(
+    store: LedgerStore, config: Config, request: BookingRequest
+) -> BookingResult:
+    broker_add = getattr(store, "broker_add_booking", None)
+    if callable(broker_add):
+        return broker_add(request)
     if request.mode not in {MODE_SHARED, MODE_EXCLUSIVE}:
         raise BookingError(f"unsupported booking mode: {request.mode}")
     if request.count < 1:
@@ -287,6 +292,10 @@ def find_applied_create(
 
 
 def cancel_booking(store: LedgerStore, reservation_id: str, actor: Actor) -> dict:
+    broker_cancel = getattr(store, "broker_cancel_booking", None)
+    if callable(broker_cancel):
+        return broker_cancel(reservation_id, actor)
+
     def mutate(ledger: dict):
         now = utc_now()
         _expire_old_reservations(ledger, now)
@@ -313,7 +322,12 @@ def cancel_booking(store: LedgerStore, reservation_id: str, actor: Actor) -> dic
     return store.transaction(mutate)
 
 
-def edit_booking(store: LedgerStore, config: Config, request: EditRequest) -> BookingResult:
+def edit_booking(
+    store: LedgerStore, config: Config, request: EditRequest
+) -> BookingResult:
+    broker_edit = getattr(store, "broker_edit_booking", None)
+    if callable(broker_edit):
+        return broker_edit(request)
     op_id = _normalize_operation_id(request.op_id)
     operation_signature = _edit_operation_signature(request)
 

@@ -22,6 +22,7 @@ from .gpu import (
     has_stable_device_identifier,
     snapshot,
 )
+from .models import BookingError
 from .storage import FileLock
 
 
@@ -58,15 +59,18 @@ def run_deployment_probes(config: Config) -> list[dict]:
     directory = _probe_data_directory(config)
     checks = [directory]
     if directory["status"] == "pass":
-        checks.extend(
-            (
-                _probe_atomic_replace(config),
-                _probe_process_lock(config),
-                _probe_disk_space(config),
-            )
-        )
+        if config.storage_transport == "broker" and os.getuid() != config.broker_uid:
+            checks.append(_probe_broker(config))
+        else:
+            checks.extend((_probe_atomic_replace(config), _probe_process_lock(config)))
+        checks.append(_probe_disk_space(config))
     else:
-        for name in ("atomic-replace", "process-lock", "disk-space"):
+        names = (
+            ("broker-connectivity", "disk-space")
+            if config.storage_transport == "broker" and os.getuid() != config.broker_uid
+            else ("atomic-replace", "process-lock", "disk-space")
+        )
+        for name in names:
             checks.append(_result(name, "fail", "data directory is not ready"))
     checks.append(_probe_process_identity(config))
     checks.append(_probe_gpu(config))
@@ -100,12 +104,28 @@ def _probe_data_directory(config: Config) -> dict:
                 expected_gid=config.storage_gid,
                 actual_gid=metadata.st_gid,
             )
-        if not os.access(config.data_dir, os.R_OK | os.W_OK | os.X_OK):
-            return _result("data-directory", "fail", "current UID cannot read, write, and traverse")
+        required_access = os.R_OK | os.X_OK
+        if config.storage_transport != "broker" or os.getuid() == config.broker_uid:
+            required_access |= os.W_OK
+        if not os.access(config.data_dir, required_access):
+            expectation = (
+                "read and traverse"
+                if config.storage_transport == "broker"
+                and os.getuid() != config.broker_uid
+                else "read, write, and traverse"
+            )
+            return _result(
+                "data-directory", "fail", f"current UID cannot {expectation}"
+            )
         return _result(
             "data-directory",
             "pass",
-            "directory is accessible with the configured mode",
+            (
+                "service-owned directory is readable; writes use the broker"
+                if config.storage_transport == "broker"
+                and os.getuid() != config.broker_uid
+                else "directory is accessible with the configured mode"
+            ),
             path=str(config.data_dir),
             mode=f"{actual:04o}",
             owner_uid=metadata.st_uid,
@@ -113,6 +133,32 @@ def _probe_data_directory(config: Config) -> dict:
         )
     except OSError as exc:
         return _result("data-directory", "fail", str(exc), path=str(config.data_dir))
+
+
+def _probe_broker(config: Config) -> dict:
+    try:
+        from .broker import BrokerClient
+
+        response = BrokerClient(config).call("ping", {})
+        if (
+            not isinstance(response, dict)
+            or response.get("service_uid") != config.broker_uid
+        ):
+            raise OSError(
+                "broker identity response does not match trusted configuration"
+            )
+        if response.get("actor_uid") != os.getuid():
+            raise OSError("broker did not report the kernel-authenticated caller UID")
+        return _result(
+            "broker-connectivity",
+            "pass",
+            "broker accepted the kernel-authenticated local connection",
+            socket=str(config.broker_socket),
+            service_uid=config.broker_uid,
+            actor_uid=response.get("actor_uid"),
+        )
+    except (BookingError, OSError, ValueError) as exc:
+        return _result("broker-connectivity", "fail", str(exc))
 
 
 def _probe_atomic_replace(config: Config) -> dict:
@@ -237,6 +283,15 @@ def _probe_process_identity(config: Config) -> dict:
         )
     current_uid = os.getuid()
     if config.monitor_uid is not None and current_uid != config.monitor_uid:
+        if config.storage_transport == "broker":
+            return _result(
+                "process-identity",
+                "pass",
+                "cross-user process attribution is assigned to the service monitor UID",
+                applicable=False,
+                current_uid=current_uid,
+                monitor_uid=config.monitor_uid,
+            )
         return _result(
             "process-identity",
             "fail",

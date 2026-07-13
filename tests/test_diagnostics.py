@@ -5,7 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from bk.config import Config
+from bk.config import BROKER_ALL_SOCKET_MODE, BROKER_DIR_MODE, BROKER_FILE_MODE, Config
 from bk.diagnostics import _probe_process_identity, probes_ready, run_deployment_probes
 from bk.gpu import GpuSnapshot
 
@@ -72,6 +72,45 @@ class DeploymentDiagnosticsTests(unittest.TestCase):
             gpu = next(item for item in checks if item["name"] == "gpu-telemetry")
             self.assertEqual(gpu["status"], "warn")
             self.assertFalse(probes_ready(checks))
+
+    def test_normal_broker_client_probes_socket_instead_of_direct_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            data_dir.mkdir(mode=BROKER_DIR_MODE)
+            data_dir.chmod(BROKER_DIR_MODE)
+            config = Config(
+                data_dir=data_dir,
+                gpu_count=1,
+                file_mode=BROKER_FILE_MODE,
+                dir_mode=BROKER_DIR_MODE,
+                broker_socket=root / "broker.sock",
+                broker_uid=2001,
+                broker_socket_mode=BROKER_ALL_SOCKET_MODE,
+            )
+            device = GpuSnapshot(
+                0,
+                "gpu0",
+                memory_total_mb=24000,
+                source="nvml",
+                device_uuid="GPU-00000000-0000-0000-0000-000000000000",
+            )
+            with (
+                mock.patch("bk.diagnostics.os.getuid", return_value=1001),
+                mock.patch("bk.diagnostics.snapshot", return_value=[device]),
+                mock.patch(
+                    "bk.broker.BrokerClient.call",
+                    return_value={"service_uid": 2001, "actor_uid": 1001},
+                ),
+                mock.patch("bk.diagnostics._probe_atomic_replace") as atomic,
+                mock.patch("bk.diagnostics._probe_process_lock") as process_lock,
+            ):
+                checks = run_deployment_probes(config)
+
+            self.assertTrue(probes_ready(checks), checks)
+            self.assertIn("broker-connectivity", [item["name"] for item in checks])
+            atomic.assert_not_called()
+            process_lock.assert_not_called()
 
     def test_configured_gpu_count_must_match_detected_topology(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -332,6 +371,27 @@ class DeploymentDiagnosticsTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "fail")
         self.assertEqual(result["monitor_uid"], 1002)
+        scanner.assert_not_called()
+
+    def test_process_identity_probe_delegates_to_service_monitor_in_broker_mode(self):
+        config = Config(
+            data_dir=Path("/tmp/gpubk-diagnostics"),
+            monitor_uid=2001,
+            file_mode=BROKER_FILE_MODE,
+            dir_mode=BROKER_DIR_MODE,
+            broker_socket=Path("/tmp/gpubk-broker.sock"),
+            broker_uid=2001,
+            broker_socket_mode=BROKER_ALL_SOCKET_MODE,
+        )
+        with (
+            mock.patch("bk.diagnostics.sys.platform", "linux"),
+            mock.patch("bk.diagnostics.os.getuid", return_value=1001),
+            mock.patch("bk.diagnostics.os.scandir") as scanner,
+        ):
+            result = _probe_process_identity(config)
+
+        self.assertEqual(result["status"], "pass")
+        self.assertFalse(result["applicable"])
         scanner.assert_not_called()
 
     def test_process_identity_probe_fails_when_proc_metadata_is_denied(self):

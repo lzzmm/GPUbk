@@ -39,16 +39,15 @@ from .worker import JobSpecCleanupResult, cleanup_job_specs
 class BkMcpBackend:
     """MCP-safe application facade. Identity always comes from the server process."""
 
-    def __init__(self, config: Optional[Config] = None, store: Optional[LedgerStore] = None):
+    def __init__(
+        self, config: Optional[Config] = None, store: Optional[LedgerStore] = None
+    ):
         self.config = config or load_config()
-        self.store = store or LedgerStore(
-            self.config.data_dir,
-            self.config.lock_timeout_seconds,
-            self.config.backup_keep,
-            self.config.file_mode,
-            self.config.dir_mode,
-            self.config.storage_gid,
-        )
+        if store is None:
+            from .broker import ledger_store_for_config
+
+            store = ledger_store_for_config(self.config)
+        self.store = store
 
     @property
     def actor(self) -> Actor:

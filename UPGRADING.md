@@ -16,9 +16,21 @@
 Do not use `bk reset` to prepare a shared upgrade. It is disabled for shared
 directory modes; preserve and migrate the existing data instead.
 
-If an older shared deployment keeps `config.json` inside its group-writable data
-directory, move a reviewed copy to a non-writable administrator directory before
-starting 0.2.x:
+New 0.2 shared-server deployments use a local Unix-socket broker: one existing,
+non-root service account owns and writes the ledger, while ordinary users receive
+read-only file access and submit mutations through the broker. `bk admin init`
+records every path it creates so a test deployment can be reviewed and removed
+with `bk admin uninstall --dry-run` followed by an explicit uninstall.
+
+Do not point `bk admin init` at a non-empty legacy shared directory. It deliberately
+refuses to change ownership or replace policy around live data. For a legacy direct
+deployment, schedule maintenance, preserve an ownership-retaining backup, stop all
+GPUbk writers, and migrate the reviewed ledger into a separately initialized broker
+deployment before reopening bookings. Keep the original data untouched until
+`bk doctor --probe --strict` passes as both the service account and an ordinary user.
+
+If that older deployment keeps `config.json` inside its group-writable data
+directory, first move a reviewed copy to a non-writable administrator directory:
 
 ```bash
 sudo install -d -m 0755 -o root -g root /etc/gpubk
@@ -26,8 +38,9 @@ sudo install -m 0644 -o root -g root /data2/shared/bk/config.json \
   /etc/gpubk/config.json
 ```
 
-Add the canonical shared data directory and numeric UID of the one telemetry
-account to that reviewed file before starting the 0.2 monitor:
+For a legacy direct-mode transition only, add the canonical shared data directory
+and numeric UID of the one telemetry account to that reviewed file before starting
+the 0.2 monitor:
 
 ```json
 {

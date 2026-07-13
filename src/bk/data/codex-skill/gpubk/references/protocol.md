@@ -22,7 +22,7 @@ bk usage samples --since 2d --resolution 5m --json --compact
 ```
 
 Omitting `--start` uses the active configured booking interval when possible, then permits earliest-slot queueing. Providing `--start` means exact placement at the active slice boundary or a future boundary; a new write to an older historical slice is rejected. Read `policy.granularity_minutes` from context instead of assuming five minutes. Human CLI users may use `--at`; Agents should keep using explicit ISO 8601 and structured fields.
-The ledger binds its scheduling and storage policy on first write. Enabling `storage_gid` later binds it on the next write; once bound, omission or replacement is a policy mismatch. Agents must surface policy-mismatch errors instead of retrying with altered local limits. Context `policy.access_mode` is `private`, `group`, or `all`; `all` means every local account is a trusted cooperative participant. Context `policy.storage_gid` is the optional trusted numeric group binding for shared storage. A GID mismatch is an operator repair condition, not a reason to retry with a different policy.
+The ledger binds scheduling and storage policy on first write. Agents must surface policy-mismatch errors instead of retrying with altered local limits. Read `policy.storage_transport`: `broker` means shared mutations are authenticated by kernel peer UID and committed by the service account; `direct` is the private/legacy file path. `policy.access_mode` describes who may connect (`private`, `group`, or `all`), not who may write ledger files. `broker_socket` and `broker_uid` are trusted deployment facts. `storage_gid` applies only to compatible direct setgid deployments.
 
 Recommendation fields:
 

@@ -131,13 +131,14 @@ evidence of unattended command execution.
   `policy.monitoring.collector.process_identity_gap`; a fresh degraded collector is not sufficient.
 - Do not delete journal or lock files manually.
 - Never apply `bk admin init` without an explicit administrator request. Use its `--dry-run`
-  form first; `access=all` means every local account is inside the cooperative trust boundary.
+  form first. `access=all` exposes the broker socket to local accounts; it does not grant direct
+  ledger write permission.
 - Do not enable a worker, monitor, or service on a shared server without the user's or administrator's approval.
 - Do not disable `worker_live_guard` merely to make a scheduled command start sooner.
-- Before an approved service deployment, run `bk doctor --probe --json --strict` as the configured
-  monitor UID. The Linux `process-identity` check must demonstrate another UID's numeric process
-  ownership; do not treat an unproven quiet host, simulation, or single-host NFS lock check as
-  proof of the complete production boundary.
+- Before an approved service deployment, run `bk doctor --probe --json --strict` as a normal user
+  to verify broker connectivity, then as the configured monitor UID to verify writes and process
+  attribution. Do not treat a simulation or single-host NFS lock check as proof of the complete
+  production boundary.
 - After starting the monitor service, run `bk doctor --require-monitor --json --strict`; a
   preflight without a heartbeat does not prove the long-running collector is alive.
 - After starting a per-user worker service, run `bk doctor --require-worker --json --strict`;

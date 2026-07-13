@@ -17,6 +17,10 @@ from .userdirs import xdg_user_directory
 
 DEFAULT_PRIVATE_FILE_MODE = 0o600
 DEFAULT_PRIVATE_DIR_MODE = 0o700
+BROKER_FILE_MODE = 0o644
+BROKER_DIR_MODE = 0o755
+BROKER_ALL_SOCKET_MODE = 0o666
+BROKER_GROUP_SOCKET_MODE = 0o660
 MAX_CONFIG_FILE_BYTES = 1024 * 1024
 CONFIG_VERSION = 1
 SYSTEM_CONFIG_FILE = Path("/etc/gpubk/config.json")
@@ -90,6 +94,10 @@ CONFIG_FILE_KEYS = frozenset(
         "allocator_weight",
         "monitor_uid",
         "storage_gid",
+        "broker_socket",
+        "broker_uid",
+        "broker_gid",
+        "broker_socket_mode",
     }
 )
 
@@ -136,9 +144,15 @@ class Config:
     worker_max_parallel: int = DEFAULT_WORKER_MAX_PARALLEL
     worker_termination_grace_seconds: float = DEFAULT_WORKER_TERMINATION_GRACE_SECONDS
     storage_gid: Optional[int] = None
+    broker_socket: Optional[Path] = None
+    broker_uid: Optional[int] = None
+    broker_gid: Optional[int] = None
+    broker_socket_mode: int = 0o600
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "slot_minutes", validate_slot_minutes(self.slot_minutes))
+        object.__setattr__(
+            self, "slot_minutes", validate_slot_minutes(self.slot_minutes)
+        )
         interval, rollup = validate_monitor_timing(
             self.monitor_interval_seconds,
             self.monitor_rollup_seconds,
@@ -169,6 +183,44 @@ class Config:
         )
         object.__setattr__(
             self,
+            "broker_uid",
+            validate_optional_uid(self.broker_uid, "broker_uid"),
+        )
+        object.__setattr__(
+            self,
+            "broker_gid",
+            validate_optional_gid(self.broker_gid, "broker_gid"),
+        )
+        if self.broker_socket is not None:
+            socket_path = Path(self.broker_socket).expanduser()
+            if not socket_path.is_absolute():
+                raise ValueError("broker_socket must be an absolute path")
+            object.__setattr__(
+                self,
+                "broker_socket",
+                Path(os.path.abspath(os.fspath(socket_path))),
+            )
+            if self.broker_uid is None:
+                raise ValueError("broker_socket requires broker_uid")
+            if self.file_mode != BROKER_FILE_MODE or self.dir_mode != BROKER_DIR_MODE:
+                raise ValueError(
+                    "broker storage must use file_mode 0644 and dir_mode 0755"
+                )
+            expected_socket_mode = (
+                BROKER_GROUP_SOCKET_MODE
+                if self.broker_gid is not None
+                else BROKER_ALL_SOCKET_MODE
+            )
+            if self.broker_socket_mode != expected_socket_mode:
+                raise ValueError(
+                    "broker_socket_mode must be 0660 with broker_gid or 0666 without it"
+                )
+            if self.storage_gid is not None:
+                raise ValueError("broker storage must not use storage_gid")
+        elif self.broker_uid is not None or self.broker_gid is not None:
+            raise ValueError("broker_uid and broker_gid require broker_socket")
+        object.__setattr__(
+            self,
             "worker_max_parallel",
             validate_worker_max_parallel(self.worker_max_parallel),
         )
@@ -191,11 +243,17 @@ class Config:
 
     @property
     def access_mode(self) -> str:
+        if self.broker_socket is not None:
+            return "group" if self.broker_gid is not None else "all"
         if self.dir_mode & stat.S_IWOTH:
             return "all"
         if self.dir_mode & stat.S_IWGRP:
             return "group"
         return "private"
+
+    @property
+    def storage_transport(self) -> str:
+        return "broker" if self.broker_socket is not None else "direct"
 
     @property
     def config_path(self) -> Path:
@@ -549,6 +607,16 @@ def load_config() -> Config:
         job_log_dir = state_home / "bk" / "jobs"
     allocator_raw = os.environ.get("BK_ALLOCATOR_COMMAND", raw.get("allocator_command"))
     allocator_command = _command_value(allocator_raw)
+    broker_socket_raw = raw.get("broker_socket")
+    if broker_socket_raw is not None:
+        if not external_config:
+            raise ValueError(
+                f"{config_file}: broker_socket is only allowed in a trusted external "
+                "or system configuration"
+            )
+        broker_socket = _absolute_path_value(broker_socket_raw, "broker_socket")
+    else:
+        broker_socket = None
     gpu_count = (
         _int_value(raw, "gpu_count", 1, maximum=MAX_GPU_COUNT)
         if "gpu_count" in raw
@@ -685,6 +753,15 @@ def load_config() -> Config:
             "allocator_weight",
             5.0,
             maximum=MAX_ALLOCATOR_WEIGHT,
+        ),
+        broker_socket=broker_socket,
+        broker_uid=validate_optional_uid(raw.get("broker_uid"), "broker_uid"),
+        broker_gid=validate_optional_gid(raw.get("broker_gid"), "broker_gid"),
+        broker_socket_mode=_mode_value(
+            raw,
+            "broker_socket_mode",
+            0o600,
+            directory=False,
         ),
     )
 

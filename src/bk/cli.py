@@ -123,20 +123,19 @@ def main(argv: Optional[List[str]] = None) -> int:
                 from .admin import run_admin_cli
 
                 return run_admin_cli(argv[1:])
+            if head == "broker":
+                from .broker import run_broker_cli
+
+                return run_broker_cli(argv[1:])
             if head == "mcp":
                 from .mcp_server import main as mcp_main
 
                 return mcp_main(argv[1:], prog="bk mcp")
 
         config = load_config()
-        store = LedgerStore(
-            config.data_dir,
-            config.lock_timeout_seconds,
-            config.backup_keep,
-            config.file_mode,
-            config.dir_mode,
-            config.storage_gid,
-        )
+        from .broker import ledger_store_for_config
+
+        store = ledger_store_for_config(config)
         if not argv:
             return _interactive_shell(config, store)
 
@@ -1193,12 +1192,19 @@ def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         f"shared={effective['max_shared_users']} queue={effective['queue_search_hours']}h"
     )
     print(
-        f"storage: data={effective['data_dir']} access={effective['access_mode']} "
+        f"storage: data={effective['data_dir']} transport={effective['storage_transport']} "
+        f"access={effective['access_mode']} "
         f"modes={effective['file_mode']}/"
         f"{effective['dir_mode']} gid="
         f"{effective['storage_gid'] if effective['storage_gid'] is not None else 'directory'} "
         f"backups={effective['backup_keep']}"
     )
+    if effective["broker_socket"] is not None:
+        print(
+            f"broker: socket={effective['broker_socket']} uid={effective['broker_uid']} "
+            f"gid={effective['broker_gid'] if effective['broker_gid'] is not None else '-'} "
+            f"mode={effective['broker_socket_mode']}"
+        )
     print(
         f"worker: poll={effective['worker_poll_seconds']}s "
         f"parallel={effective['worker_effective_max_parallel']}/"
@@ -1235,6 +1241,13 @@ def _effective_config(config: Config) -> dict:
         "data_dir": str(config.data_dir),
         "config_file": str(config.config_path),
         "access_mode": config.access_mode,
+        "storage_transport": config.storage_transport,
+        "broker_socket": str(config.broker_socket)
+        if config.broker_socket is not None
+        else None,
+        "broker_uid": config.broker_uid,
+        "broker_gid": config.broker_gid,
+        "broker_socket_mode": f"{config.broker_socket_mode:04o}",
         "gpu_count": config.gpu_count,
         "slot_minutes": config.slot_minutes,
         "max_shared_users": config.max_shared_users,
@@ -2206,6 +2219,11 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         "ready": ready,
         "data_dir": str(config.data_dir),
         "access_mode": config.access_mode,
+        "storage_transport": config.storage_transport,
+        "broker_socket": str(config.broker_socket)
+        if config.broker_socket is not None
+        else None,
+        "broker_uid": config.broker_uid,
         "configured_gpu_count": config.gpu_count,
         "booking_slot_minutes": config.slot_minutes,
         "monitor_uid": config.monitor_uid,
@@ -2625,6 +2643,8 @@ AGENTS AND ADMIN
   bk agent recommend 2 1h       read-only legal placement
   bk mcp / bk skill install      MCP server or bundled Codex skill
   bk admin init                  initialize a shared server
+  bk admin uninstall --dry-run   preview a tracked server removal
+  bk broker                      service-account ledger writer
   bk config [--json]            inspect effective config and policy
   bk doctor --probe --strict     verify deployment prerequisites
   bk doctor --require-worker     verify this UID's scheduled-job worker

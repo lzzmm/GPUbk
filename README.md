@@ -497,43 +497,66 @@ sudo bk admin init
 ```
 
 It detects the GPU count, previews every change, and asks for confirmation. The
-default is **open cooperative access**: every local account may use GPUbk, no
-new Unix group is created, the root-owned configuration is written to
-`/etc/gpubk/config.json`, and shared data defaults to `/var/lib/gpubk`.
+default lets every local account use GPUbk through a Unix socket. Only one
+existing non-root service account can write the ledger; ordinary users never
+need `sudo` and cannot replace the files directly. No group is required.
+
+For a first reversible test, use your own account as the service account. A
+dedicated `gpubk` account is recommended for production.
 
 Useful non-interactive forms:
 
 ```bash
-bk admin init --dry-run --gpu-count 8       # no root and no writes
-sudo bk admin init --yes                    # accept detected/default values
-sudo bk admin init --data-dir /data2/shared/gpubk
-sudo bk admin init --access group --group gpuusers
+bk admin init --dry-run --gpu-count 8 --service-user "$USER"
+sudo bk admin init --yes --service-user "$USER"
+sudo bk admin init --yes --service-user gpubk --data-dir /data2/shared/gpubk
+sudo bk admin init --yes --service-user gpubk --access group --group gpuusers
 ```
 
-Group access is optional and uses an existing group; the initializer never
-creates groups or changes memberships. It also refuses to change policy for a
-non-empty data directory. Initialization makes booking ready immediately but
-does not silently enable a background monitor or systemd linger policy.
+Group access is optional and only restricts who can connect to the socket. The
+initializer never creates accounts, groups, or memberships. Ledger files use
+`0644`, directories use `0755`, and both are owned by the service account: all
+users can inspect scheduling state, but only the broker can mutate it. The
+broker authenticates each local connection from kernel peer credentials, not a
+client-supplied username or UID.
 
-Open access uses files `0666` and directories `0777`. The sticky bit cannot be
-used because writers must atomically replace the common ledger. Consequently,
-all local accounts are trusted participants and can bypass GPUbk to replace
-shared data. Choose group access when only part of the host should be trusted;
-use a broker or kernel-enforced design when mutually untrusted users are in
-scope.
-
-### Manual group setup
-
-The equivalent advanced setup begins by creating a setgid directory for an
-existing lab group:
+Start the broker in a second terminal for the first test:
 
 ```bash
-sudo install -d -m 2770 -o root -g gpuusers /data2/shared/bk
-sudo install -d -m 0755 -o root -g root /etc/gpubk
+sudo -u "$USER" bk broker                 # when --service-user "$USER" was used
+# or: sudo -u gpubk /absolute/path/to/bk broker
 ```
 
-Put the root-owned configuration at `/etc/gpubk/config.json`, outside the
-group-writable ledger directory:
+Then, as an ordinary user:
+
+```bash
+bk config                                # storage transport should be broker
+bk doctor --probe --strict               # checks socket identity and connectivity
+bk 1 30m
+bk l
+bk t
+```
+
+Stop the foreground broker with `Ctrl+C` before uninstalling. Preview first;
+non-empty data is never deleted without the explicit purge flag:
+
+```bash
+sudo bk admin uninstall --dry-run --purge-data
+sudo bk admin uninstall --purge-data --yes
+python3 -m pip uninstall gpubk
+```
+
+The uninstall manifest restores pre-existing empty-directory metadata and an
+older replaced configuration. It refuses to proceed if the broker is active,
+the managed configuration changed, or an unknown file appears in a directory
+GPUbk would remove. Accounts and groups are left untouched because GPUbk never
+creates them.
+
+### Configuration and production notes
+
+`bk admin init` writes the root-owned configuration outside the service-owned
+ledger directory. A generated configuration contains the broker identity and
+socket policy in addition to scheduling settings:
 
 ```json
 {
@@ -567,17 +590,14 @@ group-writable ledger directory:
   "worker_live_guard": true,
   "monitor_interval_seconds": 2,
   "monitor_rollup_seconds": 60,
-  "monitor_uid": 1001,
-  "storage_gid": 1002,
+  "monitor_uid": 991,
+  "broker_socket": "/run/gpubk/broker.sock",
+  "broker_uid": 991,
+  "broker_socket_mode": "0666",
   "tui_refresh_seconds": 1,
-  "file_mode": "0660",
-  "dir_mode": "2770"
+  "file_mode": "0644",
+  "dir_mode": "0755"
 }
-```
-
-```bash
-sudo chown root:root /etc/gpubk/config.json
-sudo chmod 0644 /etc/gpubk/config.json
 ```
 
 When neither `BK_DATA_DIR` nor `BK_CONFIG_FILE` is set, GPUbk automatically
@@ -599,26 +619,19 @@ or empty values fall back to `$HOME/.local/share`, `$HOME/.local/state`, and
 of their working directory. An explicit `BK_JOB_LOG_DIR` or `job_log_dir` must
 be absolute (a leading `~` is expanded).
 
-Replace `1001` with `id -u <monitor-account>` and `1002` with
-`getent group gpuusers | cut -d: -f3`. `storage_gid` is optional, but setting it
-binds the data root itself to the lab group's numeric GID; a consistently
-mis-grouped directory tree is then rejected instead of looking healthy merely
-because all children match one another. It requires a setgid `dir_mode`.
-The configuration file and every
-directory that contains it must be owned by root or the current UID and must
-not be writable by group or other users. A
-root-owned file inside `/data2/shared/bk` is still replaceable by members who
-can write that directory, regardless of the file's `0644` mode. GPUbk therefore
-opens the configured parent chain and file by descriptor and rejects that layout.
-For a single-user installation, the backward-compatible default remains
-`$BK_DATA_DIR/config.json` whenever `BK_DATA_DIR` is explicitly selected.
+Replace `991` with `id -u <service-account>`. `broker_gid` appears only in
+optional group access; it controls the socket, not ledger ownership. The
+configuration file and every directory that contains it must be root-owned and
+must not be writable by group or other users. Broker security fields are accepted
+only from this trusted external configuration. For a single-user installation,
+the backward-compatible default remains `$BK_DATA_DIR/config.json` whenever
+`BK_DATA_DIR` is explicitly selected.
 
-A monitor writing to a group- or other-writable data directory has stricter
-checks: it requires a trusted root-owned external or system configuration, a configured
-`monitor_uid`, and an exact match with the process UID. Exit status `77` means
-the process is not the configured writer. Single-user private directories do
-not require this role setting. Applied usage maintenance and migration use the
-same role; their dry-run forms stay available to ordinary users.
+The monitor runs as the configured service UID and writes usage history directly
+to the service-owned data directory. Exit status `77` means the process is not
+the configured monitor writer. Per-user workers keep private command specs and
+logs under each user's XDG state directory; only their constrained job-state
+updates pass through the broker.
 Exit status `78` from either daemon means its effective policy differs from the
 ledger. Do not retry with altered limits; inspect `bk config`, repair the trusted
 configuration, reinstall captured service settings if necessary, then restart.
@@ -642,8 +655,8 @@ bk config --json
 
 Environment variables override ordinary file values, and a command flag
 overrides the corresponding default for that invocation. Security role
-`monitor_uid` and `storage_gid` are file-only and cannot be replaced by
-environment variables.
+`monitor_uid`, `broker_socket`, `broker_uid`, and `broker_gid` are file-only and
+cannot be replaced by environment variables.
 New files should declare
 `"config_version": 1`; unversioned files remain readable for compatibility.
 Unknown keys, wrong types, non-finite numbers, unsafe paths, and excessive
@@ -661,12 +674,11 @@ preserved for forward compatibility, while an unknown value in a current
 semantic field fails closed. A semantically damaged primary ledger can fall
 back only to a backup that passes the same complete validation.
 
-All users and user services must resolve the same data and configuration paths.
-The standard `/etc/gpubk/config.json` layout provides that automatically. The
-first write binds scheduling and storage policy into the ledger. Enabling
-`storage_gid` also binds that GID on the next write; once bound, every client
-must use the same trusted value. Clients with conflicting settings fail closed.
-Run the deployment preflight from a clean login environment before enabling services:
+All users and user services must resolve the same root-owned configuration. The
+standard `/etc/gpubk/config.json` layout provides that automatically. The first
+write binds scheduling and storage policy into the ledger; clients with
+conflicting settings fail closed. Start the broker, then run the deployment
+preflight from a normal login:
 
 ```bash
 bk config
@@ -674,12 +686,10 @@ bk doctor --probe --strict
 bk doctor --probe --json --strict
 ```
 
-Run these commands as the account selected by `monitor_uid`. On Linux, preflight
-checks that this account can read numeric ownership for a process belonging to
-another UID. A restrictive `hidepid` or container procfs policy fails the probe;
-if no other UID currently has a visible process, the result is `warn` because
-cross-user attribution has not yet been demonstrated. Rerun the probe while an
-ordinary process from another lab user exists; no GPU workload is required.
+For an ordinary user, preflight verifies read-only ledger access and a
+kernel-authenticated broker connection. Run it once more as the service account
+to exercise atomic replacement, locking, GPU telemetry, and cross-user process
+identity. A restrictive `hidepid` policy can prevent process attribution.
 
 After enabling the monitor, verify the long-running writer separately:
 
@@ -700,15 +710,15 @@ Both flags can be combined when checking a complete current-user deployment.
 Ordinary `doctor` reports the privacy-safe worker state without requiring the
 optional service or creating its private directory.
 
-`bk reset` is intentionally disabled for a shared data-directory mode. To retire
-or rebuild a shared ledger, stop all GPUbk writers, back it up, and use an
-administrator-controlled filesystem procedure. The command remains available
-for private and disposable simulation directories.
+`bk reset` is disabled for broker-backed storage. Use the manifest-checked
+`bk admin uninstall` path to retire a test deployment. `bk reset` remains
+available for private and disposable simulation directories.
 
-The probe creates randomly named temporary files, verifies same-directory atomic
-replace and directory fsync, checks same-host cross-process `flock`, confirms
-configured modes, setgid GID inheritance, and free space, probes the real GPU
-telemetry source, and then removes its files. GPU indices must exactly match
+As the service account, the probe creates randomly named temporary files,
+verifies same-directory atomic replace and directory fsync, checks same-host
+cross-process `flock`, confirms modes and free space, probes the real GPU
+telemetry source, and then removes its files. As an ordinary user it performs
+read-only checks and broker authentication instead. GPU indices must exactly match
 `0..gpu_count-1`; every NVML
 device must report usable memory, a process list, a stable CUDA-compatible GPU
 identifier, and per-process utilization.
@@ -718,11 +728,10 @@ In JSON, `healthy` covers read-only ledger checks; `ready` remains `null` until
 `--probe` supplies deployment evidence.
 Plain `doctor` never initializes storage, acquires a lock, recovers a pending
 transaction, or follows a symbolic link or hard-linked alias at a managed path.
-It also reports permission and GID drift across the ledger, backups, and telemetry
-tree. Configured mode or setgid-group drift makes write commands fail closed before
-mutating data instead of silently running `chmod` or `chgrp`; only explicit
-`--probe` writes temporary files. In setgid mode, the numeric GID of the data
-directory is the inheritance anchor for every managed directory and file.
+It also reports permission drift across the ledger, backups, and telemetry tree.
+Configured mode or owner drift makes writes fail closed instead of silently
+repairing a non-empty directory; only a service-account `--probe` writes temporary
+files.
 For NFS/FUSE used by multiple hosts, additionally verify locking from a second
 host because one machine cannot prove cross-host lock propagation. Every writer
 must use GPUbk.

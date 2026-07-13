@@ -60,7 +60,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("## 安装", chinese)
         self.assertNotIn("The detailed guide below is currently in Chinese.", english)
 
-    def test_shared_server_setup_defaults_to_explicit_group_free_initialization(self):
+    def test_shared_server_setup_uses_service_owned_broker_storage(self):
         english = (ROOT / "README.md").read_text(encoding="utf-8")
         chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
         security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
@@ -68,9 +68,14 @@ class ReleaseConfigurationTests(unittest.TestCase):
         for text in (english, chinese):
             self.assertIn("sudo bk admin init", text)
             self.assertIn("--access group --group gpuusers", text)
-            self.assertIn("0777", text)
-        self.assertIn("defaults to open cooperative access", security)
-        self.assertIn("sticky bit", security)
+            self.assertIn("--service-user", text)
+            self.assertIn("bk admin uninstall --dry-run --purge-data", text)
+            self.assertIn("0644", text)
+            self.assertIn("0755", text)
+            self.assertNotIn("0777", text)
+        self.assertIn("account owns the ledger", security)
+        self.assertIn("SO_PEERCRED", security)
+        self.assertNotIn("defaults to open cooperative access", security)
 
     def test_telemetry_contract_is_packaged_and_linked(self):
         telemetry = (ROOT / "TELEMETRY.md").read_text(encoding="utf-8")

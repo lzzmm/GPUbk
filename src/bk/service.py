@@ -504,6 +504,11 @@ def build_agent_context(
             "queue_search_hours": config.queue_search_hours,
             "ledger_retention_days": config.ledger_retention_days,
             "access_mode": config.access_mode,
+            "storage_transport": config.storage_transport,
+            "broker_socket": (
+                str(config.broker_socket) if config.broker_socket is not None else None
+            ),
+            "broker_uid": config.broker_uid,
             "storage_gid": config.storage_gid,
             "worker_live_guard": config.worker_live_guard,
             "worker_max_parallel": config.worker_max_parallel,
@@ -548,6 +553,9 @@ def build_agent_context(
             "configurable_booking_granularity": True,
             "idempotent_edit_history_limit": MAX_EDIT_OPERATIONS_PER_RESERVATION,
             "structured_cancel": True,
+            "service_broker": config.storage_transport == "broker",
+            "kernel_peer_credentials": config.storage_transport == "broker",
+            "service_owned_ledger": config.storage_transport == "broker",
             "scheduled_jobs": True,
             "scheduled_job_path_snapshot": True,
             "scheduled_job_live_guard": config.worker_live_guard,

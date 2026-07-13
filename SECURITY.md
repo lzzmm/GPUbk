@@ -2,12 +2,21 @@
 
 ## Scope
 
-GPUbk is a cooperative POSIX scheduler. It protects ledger integrity and enforces application-level UID ownership when every writer uses `bk`. It is not a kernel GPU access-control system and cannot prevent a user with direct device permission from launching CUDA outside GPUbk.
+GPUbk is a local POSIX scheduler. In a shared installation, one non-root service
+account owns the ledger and ordinary clients submit closed operations over a Unix
+socket. It is not a kernel GPU access-control system and cannot prevent a user
+with direct device permission from launching CUDA outside GPUbk.
 
 Supported security boundaries:
 
-- MCP, CLI, TUI, and worker identity comes from the local process UID.
-- Shared-ledger writes use an advisory lock, WAL journal, atomic replacement, and idempotent audit events.
+- The broker takes client identity from Linux `SO_PEERCRED`; client-supplied UID and username
+  fields are not authoritative. Private/direct mode uses the local process UID.
+- Shared-ledger files are writable only by the configured service account. Broker writes use an
+  advisory lock, WAL journal, atomic replacement, and idempotent audit events.
+- Broker operations use a bounded length-prefixed JSON protocol, strict field allowlists, bounded
+  clients, and timeouts. Booking, edit, and cancellation are revalidated server-side. Per-user
+  workers may update only their own job state; scheduling fields, job binding, top-level policy,
+  and every other UID's records remain immutable.
 - Ledger and WAL reads validate reservation identity, devices, mode, status, and time ordering
   before scheduling. Unknown extension fields are preserved, but unknown current semantics fail
   closed; backup fallback accepts only a document that passes the same validation.
@@ -15,12 +24,12 @@ Supported security boundaries:
   unsafe leaf files before reading or writing.
 - Write paths require the configured file and directory modes exactly. Permission drift fails
   closed without silently running `chmod`; `bk doctor` reports the path for administrator repair.
-- For setgid shared storage, read-only health checks report managed ledger, backup, and telemetry
+- Legacy direct setgid storage remains supported for compatible private deployments. Its read-only health checks report managed ledger, backup, and telemetry
   paths whose numeric GID differs from the data directory; the deployment probe also verifies that
   a newly atomically replaced file inherits that GID. Ledger transactions, audit appends, telemetry
   writes, compaction, migration, and retention cleanup enforce the same GID before mutating data
   and never repair it implicitly.
-- Administrators may bind the data root to a numeric group with file-only `storage_gid`. This
+- Legacy direct deployments may bind the data root to a numeric group with file-only `storage_gid`. This
   closes the case where the complete tree is internally consistent but belongs to the wrong Unix
   group. Ordinary environment variables cannot replace the trusted value; once enabled, the
   ledger policy also rejects clients which omit or change it.
@@ -95,37 +104,32 @@ Supported security boundaries:
   discovered `/etc/gpubk/config.json` or an explicit `BK_CONFIG_FILE`. GPUbk canonicalizes
   its parent, pins every directory component and the leaf by file descriptor, rejects
   replaceable non-sticky directories, and never follows a leaf symlink.
-- A monitor targeting a group- or other-writable data directory requires a trusted root-owned
-  system or external configuration and matching numeric `monitor_uid`. This prevents accidental
-  or misconfigured telemetry writers that still use GPUbk; it does not stop a trusted participant
-  from bypassing GPUbk and modifying shared-writable files directly.
+- A shared monitor requires the trusted root-owned broker configuration and matching numeric
+  `monitor_uid`. It runs as the service account and is the only usage-history writer.
 - `usage/collector.json` is an atomic, versioned liveness hint. Its PID, hostname, and
   freshness are operator diagnostics, not proof of identity, authorization, or lock ownership;
   its capability gaps include stable device identifiers, process telemetry, and numeric process
-  identity attribution. A local account that can modify the data directory can also replace this
-  advisory file.
+  identity attribution. Only the service account can replace it in broker mode.
 - Fatal collector exits never overwrite the last heartbeat with a graceful `stopped` state.
   Partial rollups are flushed best-effort, the original error remains the service exit cause,
   and the kernel-backed single-writer lease is released in all cases.
 - Applied telemetry maintenance and migration commands use the same writer role; dry-run
   inspection and public usage queries remain available to ordinary users.
-- `bk reset` is disabled whenever the configured data-directory mode is writable by group
-  or other users. Shared data removal requires an administrator-controlled offline procedure
-  after stopping writers and taking a backup.
+- `bk reset` is disabled for broker-backed storage. `bk admin uninstall` requires a root-owned
+  install manifest, a stopped broker, unchanged managed configuration, known managed paths, and
+  explicit `--purge-data` before deleting non-empty state.
 
 Administrator responsibilities:
 
-- Choose the local trust domain explicitly. `bk admin init` defaults to open cooperative access
-  (`0666` files and `0777` directories) so every local account can participate without a new
-  Unix group. In that mode every local account can also bypass GPUbk and replace shared data;
-  use `--access group --group NAME` when only a subset of accounts should be trusted.
-- Do not add the sticky bit to the direct-file open mode. Cross-UID transactions must atomically
-  replace the common ledger, which a sticky directory would deny after another UID created it.
-  Mutually untrusted local accounts require a credential-checking broker or kernel enforcement,
-  not broader direct-file permissions.
-- For group access, configure the existing Unix group and correct setgid directory permissions.
+- Choose the local socket access policy explicitly. `bk admin init` defaults to `0666` on the
+  broker socket so every local account can use GPUbk; ledger files remain service-owned `0644`
+  inside service-owned `0755` directories. Use `--access group --group NAME` to restrict socket
+  connections to an existing group.
+- Use a dedicated non-login service account in production. GPUbk does not create or delete
+  accounts, groups, or memberships. Using the administrator's own account is suitable only for a
+  reversible first test.
 - On a shared deployment, keep the system or external configuration in a root-owned
-  directory such as `/etc/gpubk`, outside the shared-writable ledger directory. Put one
+  directory such as `/etc/gpubk`, outside the service-owned ledger directory. Put one
   absolute `data_dir` in that file so every invocation resolves the same ledger. File mode
   alone cannot prevent rename or deletion by a user who can write its parent directory.
 - Verify `flock` and atomic rename behavior on the actual NFS/FUSE mount.
@@ -156,10 +160,10 @@ Administrator responsibilities:
 - Treat daemon exit `78` as configuration drift. Compare the trusted file and `bk config` output
   with the ledger policy; never work around it by weakening capacity, storage, memory, or
   granularity settings in a user environment.
-- Run `bk doctor --probe --strict` as the configured `monitor_uid` on the target host before
-  enabling services. Its procfs check requires visible numeric ownership for at least one process
-  from another UID; a quiet host reports this capability as unproven rather than ready. Its lock
-  check is cross-process on one host; shared NFS/FUSE deployments still require a second-host test.
+- Run `bk doctor --probe --strict` as a normal user after starting the broker to verify the socket
+  and kernel-authenticated identity path. Run it again as `monitor_uid` to verify atomic writes,
+  locks, GPU telemetry, and cross-user process attribution. A quiet host may leave the latter
+  capability unproven. NFS/FUSE deployments still require a second-host lock test.
 - After enabling the monitor, run `bk doctor --require-monitor --strict`. Preflight intentionally
   permits a missing heartbeat because the service may not have started yet; post-start verification
   must not.

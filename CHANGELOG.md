@@ -4,6 +4,16 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Put shared-server mutations behind a local Unix-socket broker owned by one existing service
+  account. Linux kernel peer credentials bind each request to the connecting UID, while normal
+  users retain read-only access to the ledger and cannot submit a forged identity.
+- Restrict broker-backed scheduled-command updates to the caller's own immutable reservation and
+  an explicit job-state allowlist, with compare-and-swap retries for concurrent workers.
+- Track administrator initialization in a root-only install manifest and add a dry-runnable
+  `bk admin uninstall` that restores replaced configuration and pre-existing empty-directory
+  metadata, refuses drift or active services, and purges only validated GPUbk data on request.
+- Teach `bk doctor --probe` to verify broker connectivity for ordinary users and retain direct
+  durability probes for the service account that owns shared state.
 - Add `bk admin init`, a guided, dry-runnable, idempotent shared-server initializer with atomic
   root configuration writes. It defaults to group-free access for all local users, keeps an
   existing Unix group as an optional trust boundary, and refuses silent group creation, user
