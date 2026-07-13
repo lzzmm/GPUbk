@@ -3709,7 +3709,7 @@ def _build_plan(
         if args.require_shared_memory is not None
         else _ask_bool(
             "Require expected VRAM for shared bookings",
-            True,
+            False,
             enabled=interactive,
         )
     )

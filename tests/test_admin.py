@@ -271,6 +271,7 @@ class AdminInitTests(unittest.TestCase):
             self.assertEqual(payload["access"]["mode"], "all")
             self.assertEqual(payload["disabled_gpus"], [7])
             self.assertEqual(payload["gpu_priority"], {"6": 10, "7": 20})
+            self.assertFalse(payload["require_shared_memory"])
             self.assertEqual(payload["access"]["file_mode"], "0644")
             self.assertEqual(payload["access"]["dir_mode"], "0755")
             self.assertEqual(payload["access"]["socket_mode"], "0666")

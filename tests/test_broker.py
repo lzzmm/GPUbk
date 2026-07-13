@@ -10,11 +10,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from bk.broker import (
+    BROKER_JOB_PATCH_OPERATION,
+    BROKER_MAX_FRAME_BYTES,
     BrokerClient,
     BrokerLedgerStore,
     BrokerServer,
     _booking_request_payload,
     _edit_request_payload,
+    _ledger_digest,
 )
 from bk.config import (
     BROKER_ALL_SOCKET_MODE,
@@ -26,7 +29,7 @@ from bk.granularity import floor_to_slot
 from bk.models import Actor, BookingError, BookingRequest, EditRequest
 from bk.scheduler import add_booking, cancel_booking, edit_booking
 from bk.storage import LedgerStore
-from bk.timeparse import utc_now
+from bk.timeparse import to_iso, utc_now
 
 
 class RunningBroker:
@@ -267,6 +270,122 @@ class BrokerTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(BookingError, "another UID"):
                     store.transaction(rewrite_other_job)
+
+    def test_worker_patch_handles_a_ledger_larger_than_the_frame_limit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = {"uid": 1001}
+            config, server = self.setup_broker(Path(tmp), peer)
+            start = floor_to_slot(utc_now(), config.slot_minutes) + timedelta(
+                minutes=config.slot_minutes
+            )
+            end = start + timedelta(minutes=config.slot_minutes)
+            records = []
+            for index in range(3500):
+                record = {
+                    "id": str(uuid.uuid4()),
+                    "uid": 1001,
+                    "username": "large-ledger-user-" + "x" * 180,
+                    "gpus": [index % config.gpu_count],
+                    "mode": "shared",
+                    "start_at": to_iso(start),
+                    "end_at": to_iso(end),
+                    "status": "cancelled",
+                    "created_at": to_iso(start),
+                    "updated_at": to_iso(start),
+                }
+                records.append(record)
+            target = records[0]
+            target["status"] = "active"
+            target["job"] = {
+                "spec_id": str(uuid.uuid4()),
+                "digest": "a" * 64,
+                "summary": "python train.py",
+                "submitted_at": to_iso(start),
+                "status": "pending",
+            }
+            server.store.transaction(
+                lambda ledger: (
+                    {"version": 1, "reservations": records},
+                    None,
+                    [],
+                    True,
+                )
+            )
+            self.assertGreater(
+                (config.data_dir / "ledger.json").stat().st_size,
+                BROKER_MAX_FRAME_BYTES,
+            )
+
+            store = BrokerLedgerStore(config)
+
+            def mark_running(ledger):
+                ledger["reservations"][0]["job"]["status"] = "running"
+                return ledger, "updated", [], True
+
+            with RunningBroker(server, config.broker_socket):
+                self.assertEqual(store.transaction(mark_running), "updated")
+
+            persisted = server.store.load()
+            self.assertEqual(
+                persisted["reservations"][0]["job"]["status"],
+                "running",
+            )
+
+    def test_new_client_falls_back_to_the_legacy_job_transaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = {"uid": 1001}
+            config, server = self.setup_broker(Path(tmp), peer)
+            start = floor_to_slot(utc_now(), config.slot_minutes)
+            reservation = {
+                "id": str(uuid.uuid4()),
+                "uid": 1001,
+                "username": "alice",
+                "gpus": [0],
+                "mode": "shared",
+                "start_at": to_iso(start),
+                "end_at": to_iso(start + timedelta(minutes=5)),
+                "status": "active",
+                "job": {"status": "pending"},
+            }
+            server.store.transaction(
+                lambda ledger: (
+                    {"version": 1, "reservations": [reservation]},
+                    None,
+                    [],
+                    True,
+                )
+            )
+            store = BrokerLedgerStore(config)
+            calls = []
+
+            def call(operation, payload):
+                calls.append(operation)
+                if operation == BROKER_JOB_PATCH_OPERATION:
+                    raise BookingError(
+                        f"unsupported broker operation: {BROKER_JOB_PATCH_OPERATION}"
+                    )
+                if operation == "ledger.snapshot":
+                    ledger = server.store.load()
+                    return {"ledger": ledger, "digest": _ledger_digest(ledger)}
+                if operation == "ledger.commit-own-job":
+                    return {"committed": True}
+                raise AssertionError(operation)
+
+            store._broker.call = call
+
+            def mark_running(ledger):
+                ledger["reservations"][0]["job"]["status"] = "running"
+                return ledger, "updated", [], True
+
+            self.assertEqual(store.transaction(mark_running), "updated")
+            self.assertEqual(
+                calls,
+                [
+                    BROKER_JOB_PATCH_OPERATION,
+                    "ledger.snapshot",
+                    "ledger.commit-own-job",
+                ],
+            )
 
     def test_client_rejects_non_socket_broker_path(self):
         with tempfile.TemporaryDirectory() as tmp:

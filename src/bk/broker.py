@@ -29,6 +29,8 @@ BROKER_MAX_FRAME_BYTES = 1024 * 1024
 BROKER_MAX_CLIENTS = 32
 BROKER_IO_TIMEOUT_SECONDS = 5.0
 BROKER_TRANSACTION_RETRIES = 8
+BROKER_MAX_JOB_CHANGES = 256
+BROKER_JOB_PATCH_OPERATION = "ledger.commit-own-job-patch"
 JOB_BINDING_FIELDS = frozenset({"spec_id", "digest", "summary", "submitted_at"})
 JOB_MUTABLE_FIELDS = frozenset(
     {
@@ -97,6 +99,44 @@ class BrokerLedgerStore(LedgerStore):
         return result
 
     def transaction(self, mutator):
+        try:
+            return self._patch_transaction(mutator)
+        except BookingError as exc:
+            if str(exc) != f"unsupported broker operation: {BROKER_JOB_PATCH_OPERATION}":
+                raise
+        return self._legacy_transaction(mutator)
+
+    def _patch_transaction(self, mutator):
+        for _attempt in range(BROKER_TRANSACTION_RETRIES):
+            current = super().load_read_only()
+            base_digest = _ledger_digest(current)
+            ledger = copy.deepcopy(current)
+            mutation = mutator(ledger)
+            if not isinstance(mutation, tuple) or len(mutation) != 4:
+                raise BookingError("ledger mutator returned an invalid transaction")
+            new_ledger, result, logs, changed = mutation
+            log_items = list(logs)
+            if not changed and not log_items:
+                return result
+            changes = _job_transaction_changes(current, new_ledger)
+            response = self._broker.call(
+                BROKER_JOB_PATCH_OPERATION,
+                {
+                    "base_digest": base_digest,
+                    "changes": changes,
+                    "logs": log_items,
+                    "changed": bool(changed),
+                },
+            )
+            if not isinstance(response, dict) or not isinstance(
+                response.get("committed"), bool
+            ):
+                raise BookingError("broker returned an invalid transaction result")
+            if response["committed"]:
+                return result
+        raise BookingError("ledger changed repeatedly; retry the operation")
+
+    def _legacy_transaction(self, mutator):
         for _attempt in range(BROKER_TRANSACTION_RETRIES):
             snapshot = self._broker.call("ledger.snapshot", {})
             if not isinstance(snapshot, dict) or not isinstance(
@@ -377,6 +417,8 @@ class BrokerServer:
             return {"ledger": ledger, "digest": _ledger_digest(ledger)}
         if operation == "ledger.commit-own-job":
             return self._commit_own_job_transaction(payload, actor)
+        if operation == BROKER_JOB_PATCH_OPERATION:
+            return self._commit_own_job_patch(payload, actor)
         if operation == "booking.add":
             request_item = _decode_booking_request(payload, actor)
             advice = self._advice_provider(self.config)
@@ -444,6 +486,67 @@ class BrokerServer:
             if changed != actual_changed:
                 raise BookingError(
                     "job transaction changed flag does not match its ledger"
+                )
+            return proposed, {"committed": True}, sanitized_logs, actual_changed
+
+        return self.store.transaction(mutate)
+
+    def _commit_own_job_patch(self, payload: dict, actor: Actor) -> dict:
+        _require_keys(
+            payload,
+            {"base_digest", "changes", "logs", "changed"},
+            required={"base_digest", "changes", "logs", "changed"},
+            label="job patch payload",
+        )
+        base_digest = _string(payload.get("base_digest"), "base_digest")
+        changes = payload.get("changes")
+        logs = payload.get("logs")
+        changed = _boolean(payload.get("changed"), "changed")
+        if not isinstance(changes, list) or not isinstance(logs, list):
+            raise BookingError("job patch changes and logs must be arrays")
+        if len(changes) > BROKER_MAX_JOB_CHANGES:
+            raise BookingError("job patch contains too many reservation changes")
+        if len(logs) > BROKER_MAX_JOB_CHANGES:
+            raise BookingError("job patch contains too many audit events")
+
+        def mutate(current: dict):
+            if _ledger_digest(current) != base_digest:
+                return current, {"committed": False}, [], False
+            current_reservations = current.get("reservations")
+            if not isinstance(current_reservations, list):
+                raise BookingError("job patch ledger reservations must be a list")
+            proposed = {**current, "reservations": list(current_reservations)}
+            seen_indexes = set()
+            for raw_change in changes:
+                if not isinstance(raw_change, dict):
+                    raise BookingError("job patch change must be an object")
+                _require_keys(
+                    raw_change,
+                    {"index", "reservation"},
+                    required={"index", "reservation"},
+                    label="job patch change",
+                )
+                index = _integer(raw_change.get("index"), "job patch index")
+                replacement = raw_change.get("reservation")
+                if index < 0 or index >= len(current_reservations):
+                    raise BookingError("job patch index is out of range")
+                if index in seen_indexes:
+                    raise BookingError("job patch contains a duplicate index")
+                if not isinstance(replacement, dict):
+                    raise BookingError("job patch reservation must be an object")
+                seen_indexes.add(index)
+                proposed["reservations"][index] = copy.deepcopy(replacement)
+
+            sanitized_logs = _validate_own_job_mutation(
+                current,
+                proposed,
+                logs,
+                actor,
+            )
+            actual_changed = proposed != current
+            if changed != actual_changed:
+                raise BookingError(
+                    "job patch changed flag does not match its reservation changes"
                 )
             return proposed, {"committed": True}, sanitized_logs, actual_changed
 
@@ -728,6 +831,43 @@ def _validate_owned_reservation_job_change(before: dict, after: dict) -> None:
         if key not in JOB_MUTABLE_FIELDS and before_job.get(key) != after_job.get(key):
             label = "binding" if key in JOB_BINDING_FIELDS else "unknown"
             raise BookingError(f"job transaction cannot modify {label} job field {key}")
+
+
+def _job_transaction_changes(current: dict, proposed: object) -> list[dict]:
+    if not isinstance(proposed, dict):
+        raise BookingError("ledger mutator returned an invalid ledger")
+    if set(current) != set(proposed):
+        raise BookingError("job transaction cannot add or remove ledger fields")
+    for key in current:
+        if key != "reservations" and proposed.get(key) != current.get(key):
+            raise BookingError(f"job transaction cannot modify ledger field {key}")
+    current_reservations = current.get("reservations")
+    proposed_reservations = proposed.get("reservations")
+    if not isinstance(current_reservations, list) or not isinstance(
+        proposed_reservations, list
+    ):
+        raise BookingError("job transaction reservations must be lists")
+    if len(current_reservations) != len(proposed_reservations):
+        raise BookingError("job transaction cannot add or remove reservations")
+
+    changes = []
+    for index, (before, after) in enumerate(
+        zip(current_reservations, proposed_reservations)
+    ):
+        if not isinstance(before, dict) or not isinstance(after, dict):
+            raise BookingError("job transaction contains an invalid reservation")
+        if before.get("id") != after.get("id"):
+            raise BookingError("job transaction cannot reorder reservations")
+        if before != after:
+            changes.append(
+                {
+                    "index": index,
+                    "reservation": copy.deepcopy(after),
+                }
+            )
+    if len(changes) > BROKER_MAX_JOB_CHANGES:
+        raise BookingError("job transaction contains too many reservation changes")
+    return changes
 
 
 def _send_frame(connection: socket.socket, document: dict) -> None:

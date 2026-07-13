@@ -7,6 +7,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Add administrator-controlled disabled GPU and preference-tier scheduling, per-request GPU
   exclusion, and a stopped-service `bk admin gpu-policy` transaction with atomic rollback and
   explicit crash recovery for the trusted configuration and install manifest.
+- Keep broker worker updates bounded on large ledgers by sending only changed reservations under
+  digest compare-and-swap, while preserving the old full-ledger operation for rolling upgrades.
+- Default new shared-server deployments to automatic share-weighted VRAM estimates; administrators
+  can still opt into mandatory `--mem` declarations with `--require-shared-memory`.
 - Standardize the public brand as GPUBK and add `bk info`, TUI `i`, JSON, and Agent context
   access to the responsible Linux administrator account and its sanitized GECOS contact fields.
 - Render systemd path directives without surrounding quotes so system services load correctly on

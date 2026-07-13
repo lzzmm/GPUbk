@@ -93,6 +93,7 @@ Shared mode is the default:
 ```bash
 bk 1 30m                         # one GPU for 30 minutes
 bk book 1 30m                    # equivalent explicit command form
+bk 2 15m 5g                     # shorthand: 5 GiB expected VRAM per GPU
 bk 2 1h30m --mem 12g            # 12 GiB expected VRAM per GPU
 bk 1 1h --share 2               # request two integer shared slots per GPU
 bk s 1 2h --gpu 3               # explicit shared mode on GPU 3
@@ -136,8 +137,9 @@ Scheduling rules are intentionally small:
 - Shared slots control admission and inferred VRAM, not hardware-enforced SM
   bandwidth. Use MIG/MPS or device controls when physical partitioning is required.
 - Exclusive reservations cannot overlap anything.
-- `--mem` is expected VRAM **per GPU**. Administrators can require it for all
-  shared reservations.
+- Positional `5g` and `--mem 5g` both mean expected VRAM **per GPU**. When it is
+  omitted, GPUBK uses a share-weighted estimate; administrators can require an
+  explicit value for all shared reservations.
 - Times shown to users are local. The ledger stores UTC.
 
 Automatic placement considers reservations, physical free VRAM, current GPU
@@ -714,7 +716,7 @@ socket policy in addition to scheduling settings:
   "usage_hourly_retention_days": 1500,
   "usage_daily_retention_days": 0,
   "usage_event_retention_days": 365,
-  "require_shared_memory": true,
+  "require_shared_memory": false,
   "shared_memory_reserve_mb": 512,
   "job_log_retention_days": 30,
   "job_log_max_mb": 64,
