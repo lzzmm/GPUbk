@@ -5,6 +5,11 @@ on:
     tags:
       - "v[0-9]*.[0-9]*.[0-9]*"
   workflow_dispatch:
+    inputs:
+      promote_run_id:
+        description: "Successful TestPyPI Release run ID to promote to PyPI; leave empty to build"
+        required: false
+        type: string
 
 concurrency:
   group: release-${{ github.ref }}
@@ -15,6 +20,7 @@ permissions:
 
 jobs:
   build:
+    if: github.event_name != 'workflow_dispatch' || inputs.promote_run_id == ''
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.package.outputs.version }}
@@ -299,3 +305,98 @@ jobs:
           done
           test "$installed" = true
           test "$(/tmp/gpubk-index-smoke/bin/bk --version)" = "bk ${{ needs.build.outputs.version }}"
+
+  promote-pypi:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.promote_run_id != '' &&
+      vars.PYPI_RELEASE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/gpubk
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.12"
+      - name: Require promotion from main
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF" != "refs/heads/main" ]]; then
+            echo "artifact promotion must be dispatched from main" >&2
+            exit 1
+          fi
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: python-package-distributions
+          path: promoted-artifact
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          run-id: ${{ inputs.promote_run_id }}
+      - name: Validate promotion source and artifact
+        id: artifact
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >-
+          python tools/validate_release_promotion.py
+          --repository '${{ github.repository }}'
+          --run-id '${{ inputs.promote_run_id }}'
+          --artifact-dir promoted-artifact
+          --github-output "$GITHUB_OUTPUT"
+      - name: Verify promoted artifact on TestPyPI
+        run: >-
+          python promoted-artifact/tools/verify_index_artifacts.py
+          --index testpypi
+          --project gpubk
+          --version '${{ steps.artifact.outputs.version }}'
+          --checksums promoted-artifact/SHA256SUMS
+          --attempts 1
+      - name: Require an unused PyPI version
+        env:
+          VERSION: ${{ steps.artifact.outputs.version }}
+        shell: bash
+        run: |
+          status=$(curl --retry 3 --retry-all-errors --silent --show-error \
+            --output /dev/null --write-out '%{http_code}' \
+            "https://pypi.org/pypi/gpubk/$VERSION/json")
+          case "$status" in
+            404) ;;
+            200)
+              echo "gpubk $VERSION already exists on PyPI" >&2
+              exit 1
+              ;;
+            *)
+              echo "PyPI version check returned HTTP $status" >&2
+              exit 1
+              ;;
+          esac
+      - uses: pypa/gh-action-pypi-publish@cef221092ed1bacb1cc03d23a2d87d1d172e277b # release/v1
+        with:
+          packages-dir: promoted-artifact/dist/
+      - name: Verify promoted artifact on PyPI
+        run: >-
+          python promoted-artifact/tools/verify_index_artifacts.py
+          --index pypi
+          --project gpubk
+          --version '${{ steps.artifact.outputs.version }}'
+          --checksums promoted-artifact/SHA256SUMS
+      - name: Install the promoted package
+        shell: bash
+        run: |
+          python -m venv /tmp/gpubk-promotion-smoke
+          installed=false
+          for attempt in {1..12}; do
+            if /tmp/gpubk-promotion-smoke/bin/python -m pip install --no-cache-dir --no-deps \
+              "gpubk==${{ steps.artifact.outputs.version }}"; then
+              installed=true
+              break
+            fi
+            sleep 10
+          done
+          test "$installed" = true
+          test "$(/tmp/gpubk-promotion-smoke/bin/bk --version)" = \
+            "bk ${{ steps.artifact.outputs.version }}"
