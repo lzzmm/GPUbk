@@ -298,6 +298,14 @@ class UsageStoreTests(unittest.TestCase):
         self.assertNotIn("private", text)
         self.assertNotIn("secret", text)
 
+    def test_workload_registry_initialization_failure_is_explicit_and_does_not_write(self):
+        with mock.patch.object(self.store, "_load_workload_registry", return_value=None):
+            with self.assertRaisesRegex(UsageFormatError, "registry initialization failed"):
+                self.store.register_workload(1001, describe_workload("python train.py"))
+
+        self.assertFalse(self.store.key_path.exists())
+        self.assertFalse(self.store.workloads_path.exists())
+
     def test_short_workload_key_write_is_rejected_and_cleaned_up(self):
         self.store.ensure()
 

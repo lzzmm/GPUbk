@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Replace production runtime assertions with explicit fail-closed handling so optimized Python
+  preserves workload-dictionary and private-job cleanup safety; exercise the full suite under
+  `python -O` in CI.
 - Resolve data, private job, and user-unit defaults through one XDG-compliant absolute-directory
   policy. Empty or relative XDG values now fall back to HOME instead of drifting with the current
   working directory, and an explicit private `job_log_dir` must be absolute at config-load time.

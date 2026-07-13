@@ -348,7 +348,10 @@ def cleanup_job_specs(
                 failed += 1
                 warnings.append(f"{name}: {issue}")
                 continue
-            assert metadata is not None
+            if metadata is None:
+                failed += 1
+                warnings.append(f"{name}: private job spec metadata is unavailable")
+                continue
             age_seconds = current.timestamp() - metadata.st_mtime
             if age_seconds < orphan_grace_seconds:
                 deferred_orphans += 1

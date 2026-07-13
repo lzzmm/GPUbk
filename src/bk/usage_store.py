@@ -370,27 +370,24 @@ class UsageAuditStore:
 
     def register_workload(self, uid: Optional[int], descriptor: WorkloadDescriptor) -> int:
         self.ensure()
-        self._load_workload_registry()
+        by_fingerprint, by_id = self._workload_registry()
         key = self._load_or_create_workload_key()
         material = f"{uid if uid is not None else -1}\x00{descriptor.signature}".encode("utf-8", errors="replace")
         fingerprint = hmac.new(key, material, hashlib.sha256).hexdigest()
-        assert self._workloads_by_fingerprint is not None
-        assert self._workloads_by_id is not None
-        existing = self._workloads_by_fingerprint.get(fingerprint)
+        existing = by_fingerprint.get(fingerprint)
         if existing is not None:
             return existing
-        workload_id = max(self._workloads_by_id, default=0) + 1
+        workload_id = max(by_id, default=0) + 1
         record = encode_workload(workload_id, fingerprint, descriptor, utc_now())
         self._append_jsonl(self.workloads_path, [record])
-        self._workloads_by_fingerprint[fingerprint] = workload_id
-        self._workloads_by_id[workload_id] = record
+        by_fingerprint[fingerprint] = workload_id
+        by_id[workload_id] = record
         return workload_id
 
     def workloads(self) -> Dict[int, dict]:
         self._check_readable()
-        self._load_workload_registry()
-        assert self._workloads_by_id is not None
-        return {workload_id: decode_workload(record) for workload_id, record in self._workloads_by_id.items()}
+        _by_fingerprint, by_id = self._workload_registry()
+        return {workload_id: decode_workload(record) for workload_id, record in by_id.items()}
 
     def recent_events(self, limit: int = 20) -> List[dict]:
         if limit < 1:
@@ -1422,7 +1419,7 @@ class UsageAuditStore:
             )
 
     def _load_workload_registry(self) -> None:
-        if self._workloads_by_id is not None:
+        if self._workloads_by_id is not None and self._workloads_by_fingerprint is not None:
             return
         by_id: Dict[int, dict] = {}
         by_fingerprint: Dict[str, int] = {}
@@ -1445,6 +1442,14 @@ class UsageAuditStore:
                 by_fingerprint[fingerprint] = workload_id
         self._workloads_by_id = by_id
         self._workloads_by_fingerprint = by_fingerprint
+
+    def _workload_registry(self) -> Tuple[Dict[str, int], Dict[int, dict]]:
+        self._load_workload_registry()
+        by_fingerprint = self._workloads_by_fingerprint
+        by_id = self._workloads_by_id
+        if by_fingerprint is None or by_id is None:
+            raise UsageFormatError("workload registry initialization failed")
+        return by_fingerprint, by_id
 
     def _load_or_create_workload_key(self) -> bytes:
         if self._workload_key is not None:

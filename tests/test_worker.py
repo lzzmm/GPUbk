@@ -1200,6 +1200,27 @@ class ScheduledJobTests(unittest.TestCase):
         self.assertEqual(removed.removed, 1)
         self.assertFalse(path.exists())
 
+    def test_cleanup_retains_orphan_when_metadata_contract_is_incomplete(self):
+        spec = prepare_job_spec(
+            self.config,
+            self.actor,
+            [sys.executable, "-c", "print('orphan')"],
+            str(self.work_dir),
+        )
+        path = job_spec_path(self.config, spec.spec_id)
+
+        with mock.patch("bk.worker._job_spec_metadata_at", return_value=(None, None)):
+            result = cleanup_job_specs(
+                self.config,
+                self.store,
+                self.actor,
+                orphan_grace_seconds=0,
+            )
+
+        self.assertEqual(result.failed, 1)
+        self.assertIn("metadata is unavailable", result.warnings[0])
+        self.assertTrue(path.exists())
+
     def test_cleanup_reports_missing_active_spec_without_touching_the_ledger(self):
         reservation = self.booking()
         path = job_spec_path(self.config, reservation["job"]["spec_id"])
