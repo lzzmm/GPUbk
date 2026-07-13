@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 import sys
 import tempfile
 from importlib import resources
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Mapping, Optional
 
 from .config import CONFIG_ENV_MAP, Config
-from .fileio import ensure_directory, fsync_directory
+from .fileio import ensure_directory, fsync_directory, open_existing_regular
 from .models import BookingError
 from .userdirs import xdg_user_directory
 
@@ -18,6 +19,7 @@ UNITS = {
     "monitor": "bk-monitor.service",
     "worker": "bk-worker.service",
 }
+MANAGED_UNIT_MARKER = "# Managed by GPUbk; remove with `bk service uninstall`.\n"
 
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 
@@ -42,10 +44,10 @@ def unit_text(
         _systemd_environment_line(name, value)
         for name, value in sorted((environment or {}).items())
     )
-    return template.replace("@PYTHON_EXECUTABLE@", _quote_systemd_argument(str(executable))).replace(
-        "@SERVICE_ENVIRONMENT@",
-        environment_text,
-    )
+    rendered = template.replace(
+        "@PYTHON_EXECUTABLE@", _quote_systemd_argument(str(executable))
+    ).replace("@SERVICE_ENVIRONMENT@", environment_text)
+    return MANAGED_UNIT_MARKER + rendered
 
 
 def install_user_unit(
@@ -77,6 +79,40 @@ def install_user_unit(
         if fd >= 0:
             os.close(fd)
         temporary.unlink(missing_ok=True)
+    return destination
+
+
+def uninstall_user_unit(kind: str, target_dir: Optional[Path] = None) -> Path:
+    filename = _unit_filename(kind)
+    directory = (target_dir or default_user_unit_dir()).expanduser()
+    destination = directory / filename
+    fd = open_existing_regular(destination, expected_mode=0o644)
+    try:
+        metadata = os.fstat(fd)
+        if metadata.st_uid != os.geteuid():
+            raise BookingError(
+                f"systemd unit must be owned by the current UID: {destination}"
+            )
+        with os.fdopen(fd, "r", encoding="utf-8") as handle:
+            fd = -1
+            text = handle.read(1024 * 1024 + 1)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if len(text) > 1024 * 1024 or not text.startswith(MANAGED_UNIT_MARKER):
+        raise BookingError(
+            f"refusing to remove an unrecognized systemd unit: {destination}"
+        )
+    current = destination.lstat()
+    if (
+        not stat.S_ISREG(current.st_mode)
+        or (current.st_dev, current.st_ino) != (metadata.st_dev, metadata.st_ino)
+        or current.st_uid != metadata.st_uid
+        or stat.S_IMODE(current.st_mode) != 0o644
+    ):
+        raise BookingError(f"systemd unit changed while being removed: {destination}")
+    destination.unlink()
+    fsync_directory(directory)
     return destination
 
 

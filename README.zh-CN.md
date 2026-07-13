@@ -414,24 +414,31 @@ allocator 进程组再继续抛出中断。完整格式见
 
 ## 多人服务器配置
 
-确保所有用户都能运行 `bk` 后，管理员执行引导式初始化：
+多人服务器建议把 GPUbk 放进独立的系统虚拟环境。这样不改系统 Python，升级时也始终使用
+同一个路径：
 
 ```bash
-sudo bk admin init
+sudo python3 -m venv /opt/gpubk
+sudo /opt/gpubk/bin/python -m pip install --upgrade pip
+sudo /opt/gpubk/bin/python -m pip install 'gpubk[gpu]'
+sudo ln -s /opt/gpubk/bin/bk /usr/local/bin/bk
+sudo bk admin init --yes
 ```
 
-命令会自动探测 GPU 数量、先展示全部变更并要求确认。默认允许所有本机账号通过 Unix
-socket 使用 GPUbk；只有一个已有的非 root 服务账号能写台账。普通用户无需 `sudo`，
-也不能绕过 `bk` 直接替换台账文件。默认不需要新建用户组。
+Debian/Ubuntu 若没有 `venv`，先安装 `python3-venv`。初始化会探测真实 GPU，并默认把
+发起 `sudo` 的管理员账号作为 broker 和 monitor 的运行账号。它创建的就是正式部署路径：
+`/etc/gpubk`、`/var/lib/gpubk` 和 `/run/gpubk`，不会新建账号或用户组。
 
-第一次可回滚试用可以直接把自己的账号作为服务账号；正式部署建议使用专用 `gpubk`
-账号。
+默认所有本机账号都可通过 Unix socket 使用 `bk`，但只有选定的运行账号能写台账文件。
+普通用户不能修改其他 UID 的预约或系统策略，也不需要 `sudo`。直接使用管理员自己的账号
+是完整支持的方案；专用账号只是可选的运维选择，并非安全边界的必要条件。
 
 常用的非交互形式：
 
 ```bash
-bk admin init --dry-run --gpu-count 8 --service-user "$USER"
-sudo bk admin init --yes --service-user "$USER"
+sudo bk admin init --dry-run
+sudo bk admin init --yes                         # 默认使用发起 sudo 的用户
+sudo bk admin init --yes --service-user "$USER" # 显式指定同一个用户
 sudo bk admin init --yes --service-user gpubk --data-dir /data2/shared/gpubk
 sudo bk admin init --yes --service-user gpubk --access group --group gpuusers
 ```
@@ -440,12 +447,16 @@ sudo bk admin init --yes --service-user gpubk --access group --group gpuusers
 台账文件固定为 `0644`、目录为 `0755`，均归服务账号所有：所有用户可以查看排期，但只有
 broker 能修改。broker 从内核提供的对端凭据识别 UID，不信任客户端传来的用户名或 UID。
 
-第一次试用时，在第二个终端前台启动 broker：
+第一次试用时，用选定的运行账号在第二个终端启动 broker，不要加 `sudo`：
 
 ```bash
-sudo -u "$USER" bk broker                 # 初始化时使用了 --service-user "$USER"
-# 或：sudo -u gpubk /opt/gpubk/bin/bk broker
+bk broker --check
+bk broker
 ```
+
+这不是模拟模式：它使用真实的 root 配置、服务账号台账、Unix socket、文件锁、GPU 探测和
+用户 UID，与正式部署完全相同；区别只有进程暂时由前台终端看管。在 GPU 服务器上不要传
+`--gpu-count`，除非确实要模拟 GPU 拓扑。
 
 然后用普通用户体验：
 
@@ -457,17 +468,51 @@ bk l
 bk t
 ```
 
+需要把运行职责交给另一个已有本机账号时，先停止 broker 和 monitor，再预览并执行：
+
+```bash
+sudo bk admin transfer NEWUSER --dry-run
+sudo bk admin transfer NEWUSER --yes
+```
+
+该命令会占住 broker socket、monitor 锁和 ledger 锁，在原目录内变更所有权，并且只更新
+`broker_uid` 与 `monitor_uid`。预约 UID、预约记录、审计日志、使用率历史和调度策略都不
+重写。root-only 恢复日志会保护整个过程；若交接中途断电，运行
+`sudo bk admin transfer --recover --yes` 回到原账号。
+
+升级软件包不会改写配置或数据。停止 broker 和 monitor，升级同一个独立环境，重新启动
+原进程并检查：
+
+```bash
+sudo /opt/gpubk/bin/python -m pip install --upgrade 'gpubk[gpu]'
+bk --version
+bk broker --check
+# 用服务器的进程管理器重新启动 broker 与 monitor。
+bk doctor --probe --strict
+```
+
+服务重启、版本回滚和跨版本注意事项见 [UPGRADING.md](UPGRADING.md)。
+
 卸载前先在 broker 终端按 `Ctrl+C`。非空数据必须显式给出 `--purge-data`：
 
 ```bash
+# 如果当前账号安装过可选 monitor unit：
+systemctl --user disable --now bk-monitor.service
+bk service uninstall monitor
+systemctl --user daemon-reload
+
 sudo bk admin uninstall --dry-run --purge-data
 sudo bk admin uninstall --purge-data --yes
-python3 -m pip uninstall gpubk
+sudo unlink /usr/local/bin/bk
+sudo rm -rf /opt/gpubk
 ```
 
 卸载清单会恢复安装前已有空目录的权限和被替换的旧配置。如果 broker 仍在运行、配置被
 外部修改，或待删除目录中出现未知文件，卸载会拒绝继续。GPUbk 从不创建账号和用户组，
-所以卸载也不会删除它们。
+所以卸载也不会删除它们。以上命令会删除受跟踪的服务器状态、全局命令链接和独立 Python
+环境；安装清单中记录的原有文件与目录会恢复到安装前状态。安装过 worker unit 的每位
+用户可同样执行 `systemctl --user disable --now bk-worker.service` 和
+`bk service uninstall worker`。
 
 ### 配置与生产说明
 

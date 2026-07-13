@@ -1,5 +1,54 @@
 # Upgrading GPUbk
 
+## Routine upgrade for `/opt/gpubk`
+
+The recommended shared-server layout keeps code in `/opt/gpubk`, trusted
+configuration in `/etc/gpubk`, and mutable state in `/var/lib/gpubk`. A package
+upgrade touches only `/opt/gpubk`.
+
+1. Record the current version and keep its wheel or exact PyPI version.
+2. Stop the broker and the one monitor. Stop each scheduled-job worker before
+   replacing code; running GPU workloads are unrelated and must not be stopped.
+3. Upgrade the existing isolated environment.
+4. Run the broker preflight as the configured owner, restart the same services,
+   and verify them from an ordinary account.
+
+```bash
+/opt/gpubk/bin/bk --version
+sudo /opt/gpubk/bin/python -m pip install --upgrade 'gpubk[gpu]'
+/opt/gpubk/bin/bk --version
+/opt/gpubk/bin/bk broker --check
+# Restart the broker and monitor with the server's process manager here.
+/opt/gpubk/bin/bk doctor --probe --strict
+```
+
+Keep the same extras used during installation (`gpu`, `mcp`, or `all`). Do not
+rerun `bk admin init` for a code-only upgrade. If verification fails, stop the
+new processes and reinstall the recorded version, for example:
+
+```bash
+sudo /opt/gpubk/bin/python -m pip install 'gpubk[gpu]==PREVIOUS_VERSION'
+```
+
+Then restart and verify again. The root-owned install manifest, configuration,
+reservations, audit log, and usage history remain in place throughout. Reinstall
+bundled monitor and worker user units with `bk service install KIND --force`
+when release notes say their templates changed.
+
+To change the account that runs the broker and monitor, do not copy the ledger or
+edit numeric UIDs by hand. Stop both processes and use the recoverable ownership
+transaction:
+
+```bash
+sudo bk admin transfer NEWUSER --dry-run
+sudo bk admin transfer NEWUSER --yes
+```
+
+If it was interrupted, leave `transfer.json` in place and run
+`sudo bk admin transfer --recover --yes`. The transfer preserves reservation
+owners and history; only the trusted service identity and managed filesystem
+ownership change.
+
 ## Before upgrading a shared server
 
 1. Read the target release notes and run `bk doctor --json` with the installed

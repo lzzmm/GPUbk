@@ -1017,7 +1017,12 @@ def _skill_command(argv: List[str]) -> int:
 
 
 def _service_command(argv: List[str], config: Config) -> int:
-    from .systemd import install_user_unit, service_environment, unit_text
+    from .systemd import (
+        install_user_unit,
+        service_environment,
+        uninstall_user_unit,
+        unit_text,
+    )
 
     parser = argparse.ArgumentParser(prog="bk service")
     subparsers = parser.add_subparsers(dest="action", required=True)
@@ -1027,7 +1032,18 @@ def _service_command(argv: List[str], config: Config) -> int:
     install_parser.add_argument("--force", action="store_true")
     show_parser = subparsers.add_parser("show")
     show_parser.add_argument("kind", choices=["monitor", "worker"])
+    uninstall_parser = subparsers.add_parser(
+        "uninstall",
+        help="remove a GPUbk-managed user unit without calling systemctl",
+    )
+    uninstall_parser.add_argument("kind", choices=["monitor", "worker"])
+    uninstall_parser.add_argument("--target-dir", type=Path)
     args = parser.parse_args(argv)
+    if args.action == "uninstall":
+        path = uninstall_user_unit(args.kind, args.target_dir)
+        print(f"removed unit: {path}")
+        print("not stopped or disabled; run systemctl --user daemon-reload")
+        return 0
     environment = service_environment(config, args.kind)
     if args.action == "show":
         print(unit_text(args.kind, environment=environment), end="")
@@ -2643,7 +2659,9 @@ AGENTS AND ADMIN
   bk agent recommend 2 1h       read-only legal placement
   bk mcp / bk skill install      MCP server or bundled Codex skill
   bk admin init                  initialize a shared server
+  bk admin transfer USER         hand operation to another local account
   bk admin uninstall --dry-run   preview a tracked server removal
+  bk service uninstall KIND      remove a managed user unit
   bk broker                      service-account ledger writer
   bk config [--json]            inspect effective config and policy
   bk doctor --probe --strict     verify deployment prerequisites

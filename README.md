@@ -490,25 +490,35 @@ terminates the allocator process group before propagating. See the
 
 ## Shared Server Setup
 
-After making the `bk` command available to users, run the guided initializer:
+For a shared server, keep GPUbk in an isolated system virtual environment. This
+avoids modifying the operating system's Python and gives upgrades one stable path:
 
 ```bash
-sudo bk admin init
+sudo python3 -m venv /opt/gpubk
+sudo /opt/gpubk/bin/python -m pip install --upgrade pip
+sudo /opt/gpubk/bin/python -m pip install 'gpubk[gpu]'
+sudo ln -s /opt/gpubk/bin/bk /usr/local/bin/bk
+sudo bk admin init --yes
 ```
 
-It detects the GPU count, previews every change, and asks for confirmation. The
-default lets every local account use GPUbk through a Unix socket. Only one
-existing non-root service account can write the ledger; ordinary users never
-need `sudo` and cannot replace the files directly. No group is required.
+On Debian or Ubuntu, install `python3-venv` first if `venv` is unavailable. The
+initializer detects the GPUs and uses the account that invoked `sudo` as the
+broker and monitor owner. It creates the same production paths used by a normal
+deployment: `/etc/gpubk`, `/var/lib/gpubk`, and `/run/gpubk`. It does not create
+an account or a group.
 
-For a first reversible test, use your own account as the service account. A
-dedicated `gpubk` account is recommended for production.
+By default every local account can connect to the Unix socket and use `bk`, but
+only the selected owner can write the ledger files. Ordinary users cannot edit
+another UID's reservations or system policy and never need `sudo`. Using the
+administrator's own account is fully supported. A dedicated account remains an
+optional operational choice, not a security requirement.
 
 Useful non-interactive forms:
 
 ```bash
-bk admin init --dry-run --gpu-count 8 --service-user "$USER"
-sudo bk admin init --yes --service-user "$USER"
+sudo bk admin init --dry-run
+sudo bk admin init --yes                         # owner: the user who invoked sudo
+sudo bk admin init --yes --service-user "$USER" # same choice, made explicitly
 sudo bk admin init --yes --service-user gpubk --data-dir /data2/shared/gpubk
 sudo bk admin init --yes --service-user gpubk --access group --group gpuusers
 ```
@@ -520,12 +530,17 @@ users can inspect scheduling state, but only the broker can mutate it. The
 broker authenticates each local connection from kernel peer credentials, not a
 client-supplied username or UID.
 
-Start the broker in a second terminal for the first test:
+Start the broker in a second terminal as the selected owner, without `sudo`:
 
 ```bash
-sudo -u "$USER" bk broker                 # when --service-user "$USER" was used
-# or: sudo -u gpubk /absolute/path/to/bk broker
+bk broker --check
+bk broker
 ```
+
+This foreground trial is not a simulation. It uses the real root-owned config,
+service-owned ledger, Unix socket, locking, GPU probes, and user identities.
+Only process supervision differs from a later background deployment. Do not pass
+`--gpu-count` on a GPU server unless you deliberately want simulated topology.
 
 Then, as an ordinary user:
 
@@ -537,20 +552,58 @@ bk l
 bk t
 ```
 
+To hand operation to another existing local account, stop the broker and monitor,
+preview the transaction, then apply it:
+
+```bash
+sudo bk admin transfer NEWUSER --dry-run
+sudo bk admin transfer NEWUSER --yes
+```
+
+The command takes broker, monitor, and ledger maintenance guards, changes managed
+ownership in place, and updates only `broker_uid` and `monitor_uid`. Reservation
+UIDs, bookings, audit events, usage history, and scheduling policy are not
+rewritten. A root-only recovery journal protects the operation; after an
+interrupted handoff run `sudo bk admin transfer --recover --yes`.
+
+Package upgrades do not rewrite configuration or data. Stop the broker and monitor,
+upgrade the isolated environment, restart the same processes, and verify:
+
+```bash
+sudo /opt/gpubk/bin/python -m pip install --upgrade 'gpubk[gpu]'
+bk --version
+bk broker --check
+# Restart the broker and monitor with your process manager.
+bk doctor --probe --strict
+```
+
+See [UPGRADING.md](UPGRADING.md) for service restart, rollback, and release-specific
+checks.
+
 Stop the foreground broker with `Ctrl+C` before uninstalling. Preview first;
 non-empty data is never deleted without the explicit purge flag:
 
 ```bash
+# If this account installed the optional monitor unit:
+systemctl --user disable --now bk-monitor.service
+bk service uninstall monitor
+systemctl --user daemon-reload
+
 sudo bk admin uninstall --dry-run --purge-data
 sudo bk admin uninstall --purge-data --yes
-python3 -m pip uninstall gpubk
+sudo unlink /usr/local/bin/bk
+sudo rm -rf /opt/gpubk
 ```
 
 The uninstall manifest restores pre-existing empty-directory metadata and an
 older replaced configuration. It refuses to proceed if the broker is active,
 the managed configuration changed, or an unknown file appears in a directory
 GPUbk would remove. Accounts and groups are left untouched because GPUbk never
-creates them.
+creates them. These commands remove the tracked server state, command link, and
+isolated Python environment; pre-existing files and directories recorded by the
+install manifest are restored. Each user who installed a worker unit can remove
+it in the same way with `systemctl --user disable --now bk-worker.service` and
+`bk service uninstall worker`.
 
 ### Configuration and production notes
 

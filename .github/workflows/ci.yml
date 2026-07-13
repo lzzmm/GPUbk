@@ -21,6 +21,8 @@ jobs:
       - run: python -m compileall -q src tests benchmarks
       - run: ruff check src tests benchmarks
       - run: bandit -q -r src/bk --severity-level medium
+      - name: Verify real root-owned admin lifecycle
+        run: sudo env PYTHONPATH="$PWD/src" "$(command -v python)" -m unittest tests.test_admin.AdminRootLifecycleTests
       - run: PYTHONPATH=src python benchmarks/scheduler_queue.py --days 1
       - run: PYTHONPATH=src python benchmarks/usage_store.py --days 1
       - run: coverage run -m unittest discover -s tests -p 'test_*.py'
@@ -106,6 +108,10 @@ jobs:
           BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk agent context --compact > /tmp/bk-context.json
           /tmp/bk-wheel-smoke/bin/bk skill install --target /tmp/bk-wheel-skill
           /tmp/bk-wheel-smoke/bin/bk service show worker | grep -- "-m bk worker"
+          mkdir /tmp/bk-wheel-units
+          BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk service install worker --target-dir /tmp/bk-wheel-units
+          BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk service uninstall worker --target-dir /tmp/bk-wheel-units
+          test ! -e /tmp/bk-wheel-units/bk-worker.service
       - name: Verify scheduled-command wheel flow
         run: |
           python - <<'PY'

@@ -64,7 +64,9 @@ class JobRecoveryTests(unittest.TestCase):
 
         def mutate(ledger):
             item = next(value for value in ledger["reservations"] if value["id"] == reservation["id"])
-            effective_end = end_at or (self.now + timedelta(minutes=30))
+            effective_end = (end_at or (self.now + timedelta(minutes=30))).replace(
+                microsecond=0
+            )
             if effective_end <= floor_5m(self.now):
                 item["start_at"] = to_iso(effective_end - timedelta(minutes=30))
             item["end_at"] = to_iso(effective_end)
@@ -233,6 +235,7 @@ class JobRecoveryTests(unittest.TestCase):
         self.assertEqual(active_legacy_job_count(self.store.load(), self.actor, self.now), 1)
 
     def test_expired_legacy_job_no_longer_stays_running_forever(self):
+        self.now = floor_5m(self.now) + timedelta(minutes=1, microseconds=500_000)
         reservation = self.abandoned_job(
             lease_id=None,
             end_at=self.now - timedelta(minutes=1),

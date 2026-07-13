@@ -116,8 +116,12 @@ Supported security boundaries:
 - Applied telemetry maintenance and migration commands use the same writer role; dry-run
   inspection and public usage queries remain available to ordinary users.
 - `bk reset` is disabled for broker-backed storage. `bk admin uninstall` requires a root-owned
-  install manifest, a stopped broker, unchanged managed configuration, known managed paths, and
-  explicit `--purge-data` before deleting non-empty state.
+  install manifest, a stopped broker and monitor, idle writer locks, unchanged managed
+  configuration, known managed paths, and explicit `--purge-data` before deleting non-empty state.
+- `bk admin transfer` requires root and a stopped broker and monitor. It holds a maintenance
+  socket plus both writer locks, rejects links, hard links, special files, unknown top-level paths,
+  owner or mode drift, and records root-only checksummed snapshots before changing ownership. A
+  failed operation rolls back; an interrupted operation blocks uninstall until explicit recovery.
 
 Administrator responsibilities:
 
@@ -125,9 +129,10 @@ Administrator responsibilities:
   broker socket so every local account can use GPUbk; ledger files remain service-owned `0644`
   inside service-owned `0755` directories. Use `--access group --group NAME` to restrict socket
   connections to an existing group.
-- Use a dedicated non-login service account in production. GPUbk does not create or delete
-  accounts, groups, or memberships. Using the administrator's own account is suitable only for a
-  reversible first test.
+- Run the broker and monitor under one selected non-root account. The account that invoked `sudo`
+  is the default and is fully supported; a dedicated non-login account is optional operational
+  isolation. GPUbk never creates, deletes, or changes accounts, groups, or memberships. Use
+  `bk admin transfer` instead of copying state or editing identity fields during a handoff.
 - On a shared deployment, keep the system or external configuration in a root-owned
   directory such as `/etc/gpubk`, outside the service-owned ledger directory. Put one
   absolute `data_dir` in that file so every invocation resolves the same ledger. File mode

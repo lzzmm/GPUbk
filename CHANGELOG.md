@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Default shared-server initialization to the non-root account that invoked `sudo`, and add a
+  dry-runnable, recoverable `bk admin transfer` transaction for handing broker and monitor
+  ownership to another existing account without rewriting reservations, user UIDs, audit events,
+  usage history, or scheduling policy.
 - Put shared-server mutations behind a local Unix-socket broker owned by one existing service
   account. Linux kernel peer credentials bind each request to the connecting UID, while normal
   users retain read-only access to the ledger and cannot submit a forged identity.

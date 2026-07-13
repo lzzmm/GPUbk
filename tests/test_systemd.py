@@ -6,9 +6,11 @@ from unittest import mock
 from bk.config import Config
 from bk.models import BookingError
 from bk.systemd import (
+    MANAGED_UNIT_MARKER,
     default_user_unit_dir,
     install_user_unit,
     service_environment,
+    uninstall_user_unit,
     unit_text,
 )
 
@@ -20,6 +22,7 @@ class BundledSystemdTests(unittest.TestCase):
         worker = unit_text("worker", python, environment=environment)
         monitor = unit_text("monitor", python, environment=environment)
 
+        self.assertTrue(worker.startswith(MANAGED_UNIT_MARKER))
         self.assertIn('ExecStart="/opt/bk venv/bin/python" -m bk worker', worker)
         self.assertIn('ExecStart="/opt/bk venv/bin/python" -m bk monitor', monitor)
         self.assertNotIn("--interval", monitor)
@@ -66,6 +69,42 @@ class BundledSystemdTests(unittest.TestCase):
             with self.assertRaisesRegex(BookingError, "already exists"):
                 install_user_unit("worker", target, environment=environment)
             install_user_unit("worker", target, environment=environment, force=True)
+
+    def test_uninstall_removes_only_a_managed_regular_unit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            installed = install_user_unit(
+                "monitor",
+                target,
+                environment={"BK_DATA_DIR": "/data2/shared/bk"},
+            )
+
+            removed = uninstall_user_unit("monitor", target)
+
+            self.assertEqual(removed, installed)
+            self.assertFalse(installed.exists())
+
+            unrecognized = target / "bk-monitor.service"
+            unrecognized.write_text("[Unit]\nDescription=other\n", encoding="utf-8")
+            unrecognized.chmod(0o644)
+            with self.assertRaisesRegex(BookingError, "unrecognized"):
+                uninstall_user_unit("monitor", target)
+            self.assertTrue(unrecognized.exists())
+
+    def test_uninstall_refuses_a_unit_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp)
+            real = target / "real.service"
+            real.write_text(MANAGED_UNIT_MARKER, encoding="utf-8")
+            real.chmod(0o644)
+            destination = target / "bk-monitor.service"
+            destination.symlink_to(real)
+
+            with self.assertRaises(OSError):
+                uninstall_user_unit("monitor", target)
+
+            self.assertTrue(destination.is_symlink())
+            self.assertTrue(real.exists())
 
     def test_default_install_ignores_relative_xdg_config_home(self):
         with tempfile.TemporaryDirectory() as tmp:

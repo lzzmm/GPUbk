@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
+import fcntl
 import grp
 import hashlib
 import json
@@ -12,10 +14,11 @@ import socket
 import stat
 import sys
 import tempfile
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Iterator, Optional, Sequence
 
 from .config import (
     BROKER_ALL_SOCKET_MODE,
@@ -36,11 +39,13 @@ from .models import BookingError
 
 ADMIN_SCHEMA_VERSION = "gpubk.admin.v1"
 INSTALL_SCHEMA_VERSION = "gpubk.install.v1"
+TRANSFER_SCHEMA_VERSION = "gpubk.transfer.v1"
 DEFAULT_SYSTEM_DATA_DIR = Path("/var/lib/gpubk")
 DEFAULT_BROKER_SOCKET = Path("/run/gpubk/broker.sock")
 CONFIG_DIRECTORY_MODE = 0o755
 CONFIG_FILE_MODE = 0o644
 INSTALL_MANIFEST_NAME = "install.json"
+TRANSFER_JOURNAL_NAME = "transfer.json"
 INSTALL_MANIFEST_MODE = 0o600
 BROKER_SOCKET_DIRECTORY_MODE = 0o755
 MANAGED_DATA_NAMES = frozenset(
@@ -156,10 +161,51 @@ class AdminInspection:
         }
 
 
+@dataclass(frozen=True)
+class AdminTransferPlan:
+    config_file: Path
+    data_dir: Path
+    broker_socket: Path
+    current_service: AdminIdentity
+    target_service: AdminIdentity
+    broker_gid: Optional[int]
+    broker_socket_mode: int
+    config_document: dict
+    manifest: dict
+
+    def public_document(self, *, status: str, blockers: Sequence[str]) -> dict:
+        return {
+            "schema_version": ADMIN_SCHEMA_VERSION,
+            "kind": "admin-transfer",
+            "status": status,
+            "config_file": str(self.config_file),
+            "data_dir": str(self.data_dir),
+            "broker_socket": str(self.broker_socket),
+            "from": {
+                "uid": self.current_service.uid,
+                "gid": self.current_service.primary_gid,
+                "username": self.current_service.username,
+            },
+            "to": {
+                "uid": self.target_service.uid,
+                "gid": self.target_service.primary_gid,
+                "username": self.target_service.username,
+            },
+            "preserves": [
+                "reservations",
+                "reservation_uids",
+                "audit_history",
+                "usage_history",
+                "scheduling_policy",
+            ],
+            "blockers": list(blockers),
+        }
+
+
 def run_admin_cli(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="bk admin",
-        description="Initialize or safely remove a shared GPUbk server.",
+        description="Initialize, transfer, or safely remove a shared GPUbk server.",
     )
     commands = parser.add_subparsers(dest="action", required=True)
     init_parser = commands.add_parser(
@@ -174,7 +220,10 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     )
     init_parser.add_argument(
         "--service-user",
-        help="existing non-root account that exclusively writes GPUbk state",
+        help=(
+            "existing non-root account that exclusively writes GPUbk state "
+            "(default: the account that invoked sudo)"
+        ),
     )
     init_parser.add_argument(
         "--broker-socket", type=Path, default=DEFAULT_BROKER_SOCKET
@@ -202,6 +251,30 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         help="replace a different config only while the selected data directory is empty",
     )
     init_parser.add_argument("--json", action="store_true")
+    transfer_parser = commands.add_parser(
+        "transfer",
+        help="transfer broker and monitor ownership to another local account",
+    )
+    transfer_parser.add_argument(
+        "service_user",
+        nargs="?",
+        help="existing non-root account that will own GPUbk state",
+    )
+    transfer_parser.add_argument(
+        "--config-file", type=Path, default=SYSTEM_CONFIG_FILE
+    )
+    transfer_parser.add_argument(
+        "--recover",
+        action="store_true",
+        help="roll back an interrupted service-account transfer",
+    )
+    transfer_parser.add_argument(
+        "--yes", action="store_true", help="apply without confirmation"
+    )
+    transfer_parser.add_argument(
+        "--dry-run", action="store_true", help="show the plan only"
+    )
+    transfer_parser.add_argument("--json", action="store_true")
     uninstall_parser = commands.add_parser(
         "uninstall",
         help="safely remove administrator-managed server state",
@@ -225,6 +298,8 @@ def run_admin_cli(argv: Sequence[str]) -> int:
 
     if args.action == "uninstall":
         return _run_admin_uninstall(args)
+    if args.action == "transfer":
+        return _run_admin_transfer(args)
 
     interactive = sys.stdin.isatty() and not args.yes and not args.json
     detected_gpu_count = _detected_gpu_count(args.gpu_count)
@@ -328,6 +403,112 @@ def _run_admin_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_admin_transfer(args: argparse.Namespace) -> int:
+    config_file = _absolute_path(args.config_file)
+    if args.recover:
+        if args.service_user is not None:
+            raise BookingError("a recovery does not accept a target service account")
+        inspection = inspect_admin_transfer_recovery(config_file)
+        if not args.json:
+            _print_transfer_inspection(inspection)
+        if args.dry_run:
+            if args.json:
+                print(json.dumps(inspection, ensure_ascii=False, sort_keys=True))
+            return 0
+        if args.json and not args.yes:
+            print(json.dumps(inspection, ensure_ascii=False, sort_keys=True))
+        if not _confirm_admin_action(
+            args,
+            "Recover the interrupted service-account transfer? [y/N]: ",
+            "pass --yes to recover the interrupted transfer",
+        ):
+            return 1
+        result = recover_admin_transfer(config_file)
+    else:
+        if args.service_user is None:
+            raise BookingError(
+                "target service account is required; use: bk admin transfer USER"
+            )
+        target = _resolve_identity(args.service_user)
+        _, inspection = inspect_admin_transfer(config_file, target)
+        if not args.json:
+            _print_transfer_inspection(inspection)
+        if args.dry_run or inspection["status"] == "unchanged":
+            if args.json:
+                print(json.dumps(inspection, ensure_ascii=False, sort_keys=True))
+            return 0
+        if inspection["blockers"]:
+            raise BookingError("; ".join(inspection["blockers"]))
+        if args.json and not args.yes:
+            print(json.dumps(inspection, ensure_ascii=False, sort_keys=True))
+        if not _confirm_admin_action(
+            args,
+            f"Transfer GPUbk to {target.username} ({target.uid})? [y/N]: ",
+            "pass --yes to apply this service-account transfer",
+        ):
+            return 1
+        result = apply_admin_transfer(config_file, target)
+
+    if args.json:
+        print(
+            json.dumps(
+                {"status": result["status"], "inspection": inspection, "result": result},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+    else:
+        if args.recover:
+            print("recovered: GPUbk ownership and configuration returned to the prior account")
+        else:
+            print(
+                f"transferred: GPUbk broker and monitor ownership now belongs to "
+                f"{result['service_username']} (UID {result['service_uid']})"
+            )
+            print("preserved: reservations, user UIDs, audit logs, and usage history")
+            print(
+                f"next: start 'bk broker' as {result['service_username']}, then run "
+                "'bk doctor --probe --strict'"
+            )
+    return 0
+
+
+def _confirm_admin_action(
+    args: argparse.Namespace,
+    prompt: str,
+    noninteractive_message: str,
+) -> bool:
+    if args.yes:
+        return True
+    if args.json or not sys.stdin.isatty():
+        print(f"bk: {noninteractive_message}", file=sys.stderr)
+        return False
+    answer = input(prompt).strip().lower()
+    if answer in {"y", "yes"}:
+        return True
+    print("No changes made.")
+    return False
+
+
+def _print_transfer_inspection(inspection: dict) -> None:
+    print("GPUbk service-account transfer")
+    print(
+        f"  from:       {inspection['from']['username']} "
+        f"({inspection['from']['uid']}:{inspection['from']['gid']})"
+    )
+    print(
+        f"  to:         {inspection['to']['username']} "
+        f"({inspection['to']['uid']}:{inspection['to']['gid']})"
+    )
+    print(f"  data:       {inspection['data_dir']}")
+    print(f"  config:     {inspection['config_file']}")
+    print(f"  status:     {inspection['status']}")
+    for action in inspection["actions"]:
+        print(f"  action:     {action}")
+    for blocker in inspection["blockers"]:
+        print(f"  blocked:    {blocker}")
+
+
 def inspect_admin_uninstall(
     config_file: Path,
     *,
@@ -335,6 +516,13 @@ def inspect_admin_uninstall(
     expected_owner: int = 0,
 ) -> dict:
     config_file = _absolute_path(config_file)
+    journal_path = _transfer_journal_path(config_file)
+    if os.path.lexists(journal_path):
+        raise BookingError(
+            "an interrupted service-account transfer must be recovered before "
+            "uninstalling; run: "
+            f"sudo bk admin transfer --recover --config-file {config_file}"
+        )
     manifest_path = _manifest_path(config_file)
     if not os.path.lexists(manifest_path):
         raise BookingError(
@@ -366,6 +554,8 @@ def inspect_admin_uninstall(
     service_uid = _manifest_nonnegative_int(manifest, "service_uid")
     service_gid = _manifest_nonnegative_int(manifest, "service_gid")
     data_nonempty = False
+    usage_lock = "absent"
+    ledger_lock = "absent"
     if os.path.lexists(data_dir):
         metadata = data_dir.lstat()
         if not stat.S_ISDIR(metadata.st_mode):
@@ -379,6 +569,15 @@ def inspect_admin_uninstall(
                 f"managed data directory ownership or mode drifted: {data_dir}"
             )
         data_nonempty = _directory_nonempty(data_dir)
+        allowed_owner_pairs = {(service_uid, service_gid)}
+        usage_lock = _probe_admin_lock(
+            data_dir / "usage.lock",
+            allowed_owner_pairs,
+        )
+        ledger_lock = _probe_admin_lock(
+            data_dir / "ledger.lock",
+            allowed_owner_pairs,
+        )
         if purge_data:
             _validate_managed_data_tree(data_dir)
 
@@ -410,6 +609,10 @@ def inspect_admin_uninstall(
     blockers = []
     if socket_state == "active":
         blockers.append("broker is running; stop it before uninstalling")
+    if usage_lock == "active":
+        blockers.append("monitor is running; stop it before uninstalling")
+    if ledger_lock == "active":
+        blockers.append("a ledger transaction is active; retry after it finishes")
     if data_nonempty and not purge_data:
         blockers.append("data exists; pass --purge-data to remove it")
     actions = []
@@ -447,6 +650,8 @@ def inspect_admin_uninstall(
         "purge_data": purge_data,
         "data_nonempty": data_nonempty,
         "socket_state": socket_state,
+        "usage_lock": usage_lock,
+        "ledger_lock": ledger_lock,
         "actions": actions,
         "blockers": blockers,
     }
@@ -535,6 +740,1020 @@ def apply_admin_uninstall(
         "manifest_removed": True,
         "accounts_changed": False,
     }
+
+
+def inspect_admin_transfer_recovery(
+    config_file: Path,
+    *,
+    expected_owner: int = 0,
+) -> dict:
+    config_file = _absolute_path(config_file)
+    journal = _read_transfer_journal(
+        _transfer_journal_path(config_file),
+        expected_owner=expected_owner,
+    )
+    plan = _transfer_plan_from_journal(journal)
+    allowed_pairs = {
+        (plan.current_service.uid, plan.current_service.primary_gid),
+        (plan.target_service.uid, plan.target_service.primary_gid),
+    }
+    _validate_transfer_tree(plan.data_dir, allowed_pairs)
+    _validate_transfer_directory(
+        plan.broker_socket.parent,
+        allowed_pairs,
+        BROKER_SOCKET_DIRECTORY_MODE,
+        "broker socket",
+    )
+    blockers = []
+    socket_state = _transfer_socket_state(
+        plan.broker_socket,
+        {0, plan.current_service.uid, plan.target_service.uid},
+    )
+    if socket_state == "active":
+        blockers.append("broker is running; stop it before recovering the transfer")
+    usage_lock = _probe_admin_lock(plan.data_dir / "usage.lock", allowed_pairs)
+    if usage_lock == "active":
+        blockers.append("monitor is running; stop it before recovering the transfer")
+    ledger_lock = _probe_admin_lock(plan.data_dir / "ledger.lock", allowed_pairs)
+    if ledger_lock == "active":
+        blockers.append("a ledger transaction is active; retry after it finishes")
+    status = "blocked" if blockers else "ready"
+    inspection = plan.public_document(status=status, blockers=blockers)
+    inspection.update(
+        {
+            "kind": "admin-transfer-recovery",
+            "socket_state": socket_state,
+            "usage_lock": usage_lock,
+            "ledger_lock": ledger_lock,
+            "actions": [
+                "restore the prior trusted configuration and install manifest",
+                "return managed data ownership to the prior service account",
+                "remove the completed recovery journal",
+            ],
+        }
+    )
+    return inspection
+
+
+def recover_admin_transfer(
+    config_file: Path,
+    *,
+    require_root: bool = True,
+) -> dict:
+    if require_root and os.geteuid() != 0:
+        raise BookingError(
+            "transfer recovery must run as root; use sudo bk admin transfer --recover"
+        )
+    expected_owner = 0 if require_root else os.geteuid()
+    inspection = inspect_admin_transfer_recovery(
+        config_file,
+        expected_owner=expected_owner,
+    )
+    if inspection["blockers"]:
+        raise BookingError("; ".join(inspection["blockers"]))
+    config_file = _absolute_path(config_file)
+    journal_path = _transfer_journal_path(config_file)
+    journal = _read_transfer_journal(journal_path, expected_owner=expected_owner)
+    plan = _transfer_plan_from_journal(journal)
+    old_pair = (plan.current_service.uid, plan.current_service.primary_gid)
+    new_pair = (plan.target_service.uid, plan.target_service.primary_gid)
+    with _admin_transfer_guard(
+        plan,
+        allowed_owner_pairs={old_pair, new_pair},
+        lock_owner=old_pair,
+        socket_owner_uids={0, old_pair[0], new_pair[0]},
+    ):
+        errors = _rollback_admin_transfer(
+            plan,
+            journal=journal,
+            allowed_owner_pairs={old_pair, new_pair},
+        )
+        if errors:
+            raise BookingError(
+                "service-account transfer recovery is incomplete: "
+                + "; ".join(errors)
+            )
+    journal_path.unlink()
+    fsync_directory(journal_path.parent)
+    return {
+        "schema_version": ADMIN_SCHEMA_VERSION,
+        "kind": "admin-transfer-recovery",
+        "status": "recovered",
+        "service_uid": old_pair[0],
+        "service_gid": old_pair[1],
+        "service_username": plan.current_service.username,
+        "accounts_changed": False,
+    }
+
+
+def _load_admin_transfer_plan(
+    config_file: Path,
+    target: AdminIdentity,
+    *,
+    expected_owner: int,
+) -> AdminTransferPlan:
+    manifest_path = _manifest_path(config_file)
+    manifest = _read_manifest(manifest_path, expected_owner=expected_owner)
+    if manifest.get("admin_uid") != expected_owner:
+        raise BookingError("install manifest administrator UID does not match")
+    if manifest.get("config_file") != str(config_file):
+        raise BookingError("install manifest belongs to another configuration")
+    config_payload = _read_owned_regular_payload(
+        config_file,
+        expected_owner,
+        CONFIG_FILE_MODE,
+    )
+    if _sha256(config_payload) != manifest.get("config_sha256"):
+        raise BookingError(
+            "trusted configuration does not match the install manifest; "
+            "finish or roll back the prior administrator operation first"
+        )
+    try:
+        document = json.loads(config_payload)
+    except json.JSONDecodeError as exc:
+        raise BookingError(f"trusted configuration is invalid JSON: {config_file}") from exc
+    if not isinstance(document, dict):
+        raise BookingError("trusted configuration must contain a JSON object")
+
+    data_dir = _manifest_absolute_path(manifest, "data_dir")
+    broker_socket = _manifest_absolute_path(manifest, "broker_socket")
+    if _absolute_path(Path(str(document.get("data_dir", "")))) != data_dir:
+        raise BookingError("trusted configuration data_dir does not match the manifest")
+    if _absolute_path(Path(str(document.get("broker_socket", "")))) != broker_socket:
+        raise BookingError(
+            "trusted configuration broker_socket does not match the manifest"
+        )
+    service_uid = _manifest_nonnegative_int(manifest, "service_uid")
+    service_gid = _manifest_nonnegative_int(manifest, "service_gid")
+    if document.get("broker_uid") != service_uid:
+        raise BookingError("trusted broker_uid does not match the install manifest")
+    if document.get("monitor_uid") != service_uid:
+        raise BookingError("trusted monitor_uid does not match the install manifest")
+    try:
+        current_record = pwd.getpwuid(service_uid)
+        current_username = str(current_record.pw_name)
+    except KeyError:
+        current_username = str(service_uid)
+    current = AdminIdentity(service_uid, current_username, service_gid)
+
+    broker_gid = document.get("broker_gid")
+    if broker_gid is not None and (
+        isinstance(broker_gid, bool) or not isinstance(broker_gid, int) or broker_gid < 0
+    ):
+        raise BookingError("trusted broker_gid is invalid")
+    socket_mode = _administrator_mode(
+        document.get("broker_socket_mode"),
+        "broker_socket_mode",
+    )
+    expected_socket_mode = (
+        BROKER_GROUP_SOCKET_MODE if broker_gid is not None else BROKER_ALL_SOCKET_MODE
+    )
+    if socket_mode != expected_socket_mode:
+        raise BookingError("trusted broker socket policy is inconsistent")
+    if broker_gid is not None:
+        memberships = set(os.getgrouplist(target.username, target.primary_gid))
+        if broker_gid not in memberships:
+            raise BookingError(
+                f"target account {target.username} is not in broker group GID "
+                f"{broker_gid}; add it before transferring"
+            )
+    return AdminTransferPlan(
+        config_file=config_file,
+        data_dir=data_dir,
+        broker_socket=broker_socket,
+        current_service=current,
+        target_service=target,
+        broker_gid=broker_gid,
+        broker_socket_mode=socket_mode,
+        config_document=document,
+        manifest=manifest,
+    )
+
+
+def _administrator_mode(value: object, label: str) -> int:
+    if isinstance(value, str):
+        try:
+            parsed = int(value, 8)
+        except ValueError as exc:
+            raise BookingError(f"trusted {label} is invalid") from exc
+    elif isinstance(value, int) and not isinstance(value, bool):
+        parsed = value
+    else:
+        raise BookingError(f"trusted {label} is invalid")
+    if parsed < 0 or parsed > 0o7777:
+        raise BookingError(f"trusted {label} is invalid")
+    return parsed
+
+
+def _build_transfer_journal(
+    plan: AdminTransferPlan,
+    *,
+    config_payload: bytes,
+    manifest_payload: bytes,
+    expected_owner: int,
+) -> dict:
+    return {
+        "schema_version": TRANSFER_SCHEMA_VERSION,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "config_file": str(plan.config_file),
+        "data_dir": str(plan.data_dir),
+        "broker_socket": str(plan.broker_socket),
+        "from_uid": plan.current_service.uid,
+        "from_gid": plan.current_service.primary_gid,
+        "from_username": plan.current_service.username,
+        "to_uid": plan.target_service.uid,
+        "to_gid": plan.target_service.primary_gid,
+        "to_username": plan.target_service.username,
+        "broker_gid": plan.broker_gid,
+        "broker_socket_mode": plan.broker_socket_mode,
+        "config_before": _transfer_file_snapshot(
+            plan.config_file,
+            config_payload,
+            expected_owner=expected_owner,
+            expected_mode=CONFIG_FILE_MODE,
+        ),
+        "manifest_before": _transfer_file_snapshot(
+            _manifest_path(plan.config_file),
+            manifest_payload,
+            expected_owner=expected_owner,
+            expected_mode=INSTALL_MANIFEST_MODE,
+        ),
+    }
+
+
+def _transfer_plan_from_journal(journal: dict) -> AdminTransferPlan:
+    if not isinstance(journal, dict) or journal.get("schema_version") != TRANSFER_SCHEMA_VERSION:
+        raise BookingError("unsupported or invalid service-account transfer journal")
+    config_file = _absolute_path(Path(_journal_string(journal, "config_file")))
+    data_dir = _absolute_path(Path(_journal_string(journal, "data_dir")))
+    broker_socket = _absolute_path(Path(_journal_string(journal, "broker_socket")))
+    from_uid = _journal_nonnegative_int(journal, "from_uid", allow_root=False)
+    from_gid = _journal_nonnegative_int(journal, "from_gid")
+    to_uid = _journal_nonnegative_int(journal, "to_uid", allow_root=False)
+    to_gid = _journal_nonnegative_int(journal, "to_gid")
+    from_username = _journal_string(journal, "from_username")
+    to_username = _journal_string(journal, "to_username")
+    broker_gid = journal.get("broker_gid")
+    if broker_gid is not None:
+        broker_gid = _journal_nonnegative_int(journal, "broker_gid")
+    broker_socket_mode = _administrator_mode(
+        journal.get("broker_socket_mode"),
+        "transfer journal broker_socket_mode",
+    )
+    expected_socket_mode = (
+        BROKER_GROUP_SOCKET_MODE if broker_gid is not None else BROKER_ALL_SOCKET_MODE
+    )
+    if broker_socket_mode != expected_socket_mode:
+        raise BookingError("transfer journal broker socket policy is inconsistent")
+
+    config_snapshot = _validated_transfer_snapshot(journal.get("config_before"))
+    manifest_snapshot = _validated_transfer_snapshot(journal.get("manifest_before"))
+    try:
+        config_payload = base64.b64decode(
+            config_snapshot["content_b64"], validate=True
+        )
+        manifest_payload = base64.b64decode(
+            manifest_snapshot["content_b64"], validate=True
+        )
+        config_document = json.loads(config_payload)
+        manifest = json.loads(manifest_payload)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise BookingError("transfer journal contains invalid prior JSON") from exc
+    if not isinstance(config_document, dict) or not isinstance(manifest, dict):
+        raise BookingError("transfer journal prior files must contain JSON objects")
+    if manifest.get("schema_version") != INSTALL_SCHEMA_VERSION:
+        raise BookingError("transfer journal contains an invalid install manifest")
+    admin_uid = _manifest_nonnegative_int(manifest, "admin_uid")
+    if config_snapshot["uid"] != admin_uid or manifest_snapshot["uid"] != admin_uid:
+        raise BookingError("transfer journal prior file ownership is inconsistent")
+    if config_snapshot["mode"] != CONFIG_FILE_MODE:
+        raise BookingError("transfer journal prior configuration mode is invalid")
+    if manifest_snapshot["mode"] != INSTALL_MANIFEST_MODE:
+        raise BookingError("transfer journal prior manifest mode is invalid")
+    if manifest.get("config_file") != str(config_file):
+        raise BookingError("transfer journal configuration path is inconsistent")
+    if _manifest_absolute_path(manifest, "data_dir") != data_dir:
+        raise BookingError("transfer journal data path is inconsistent")
+    if _manifest_absolute_path(manifest, "broker_socket") != broker_socket:
+        raise BookingError("transfer journal broker socket path is inconsistent")
+    if _manifest_nonnegative_int(manifest, "service_uid") != from_uid:
+        raise BookingError("transfer journal prior service UID is inconsistent")
+    if _manifest_nonnegative_int(manifest, "service_gid") != from_gid:
+        raise BookingError("transfer journal prior service GID is inconsistent")
+    if manifest.get("config_sha256") != _sha256(config_payload):
+        raise BookingError("transfer journal prior configuration checksum is inconsistent")
+    if config_document.get("broker_uid") != from_uid:
+        raise BookingError("transfer journal prior broker UID is inconsistent")
+    if config_document.get("monitor_uid") != from_uid:
+        raise BookingError("transfer journal prior monitor UID is inconsistent")
+    if config_document.get("data_dir") != str(data_dir):
+        raise BookingError("transfer journal prior data path is inconsistent")
+    if config_document.get("broker_socket") != str(broker_socket):
+        raise BookingError("transfer journal prior broker socket path is inconsistent")
+    if config_document.get("broker_gid") != broker_gid:
+        raise BookingError("transfer journal prior broker group is inconsistent")
+    if (
+        _administrator_mode(
+            config_document.get("broker_socket_mode"),
+            "transfer journal prior broker_socket_mode",
+        )
+        != broker_socket_mode
+    ):
+        raise BookingError("transfer journal prior broker socket mode is inconsistent")
+    return AdminTransferPlan(
+        config_file=config_file,
+        data_dir=data_dir,
+        broker_socket=broker_socket,
+        current_service=AdminIdentity(
+            from_uid,
+            from_username,
+            from_gid,
+        ),
+        target_service=AdminIdentity(
+            to_uid,
+            to_username,
+            to_gid,
+        ),
+        broker_gid=broker_gid,
+        broker_socket_mode=broker_socket_mode,
+        config_document=config_document,
+        manifest=manifest,
+    )
+
+
+def inspect_admin_transfer(
+    config_file: Path,
+    target: AdminIdentity,
+    *,
+    expected_owner: int = 0,
+) -> tuple[AdminTransferPlan, dict]:
+    config_file = _absolute_path(config_file)
+    journal_path = _transfer_journal_path(config_file)
+    if os.path.lexists(journal_path):
+        raise BookingError(
+            "an interrupted service-account transfer requires recovery; run: "
+            f"sudo bk admin transfer --recover --config-file {config_file}"
+        )
+    plan = _load_admin_transfer_plan(
+        config_file,
+        target,
+        expected_owner=expected_owner,
+    )
+    current_pair = {
+        (plan.current_service.uid, plan.current_service.primary_gid)
+    }
+    _validate_transfer_tree(plan.data_dir, current_pair)
+    _validate_transfer_directory(
+        plan.broker_socket.parent,
+        current_pair,
+        BROKER_SOCKET_DIRECTORY_MODE,
+        "broker socket",
+    )
+
+    blockers = []
+    socket_state = _transfer_socket_state(
+        plan.broker_socket,
+        {plan.current_service.uid},
+    )
+    if socket_state == "active":
+        blockers.append("broker is running; stop it before transferring ownership")
+    usage_lock = _probe_admin_lock(
+        plan.data_dir / "usage.lock",
+        current_pair,
+    )
+    if usage_lock == "active":
+        blockers.append("monitor is running; stop it before transferring ownership")
+    ledger_lock = _probe_admin_lock(
+        plan.data_dir / "ledger.lock",
+        current_pair,
+    )
+    if ledger_lock == "active":
+        blockers.append("a ledger transaction is active; retry after it finishes")
+
+    unchanged = (
+        plan.current_service.uid == plan.target_service.uid
+        and plan.current_service.primary_gid == plan.target_service.primary_gid
+    )
+    status = "unchanged" if unchanged else "blocked" if blockers else "ready"
+    inspection = plan.public_document(status=status, blockers=blockers)
+    inspection.update(
+        {
+            "socket_state": socket_state,
+            "usage_lock": usage_lock,
+            "ledger_lock": ledger_lock,
+            "actions": []
+            if unchanged
+            else [
+                "hold broker, monitor, and ledger maintenance guards",
+                f"transfer managed data ownership to "
+                f"{plan.target_service.uid}:{plan.target_service.primary_gid}",
+                "update trusted broker_uid and monitor_uid",
+                "update the root-only install manifest",
+            ],
+        }
+    )
+    return plan, inspection
+
+
+def apply_admin_transfer(
+    config_file: Path,
+    target: AdminIdentity,
+    *,
+    require_root: bool = True,
+) -> dict:
+    if require_root and os.geteuid() != 0:
+        raise BookingError(
+            "service-account transfer must run as root; use sudo bk admin transfer"
+        )
+    expected_owner = 0 if require_root else os.geteuid()
+    plan, inspection = inspect_admin_transfer(
+        config_file,
+        target,
+        expected_owner=expected_owner,
+    )
+    if inspection["status"] == "unchanged":
+        return {
+            "status": "unchanged",
+            "service_uid": target.uid,
+            "service_gid": target.primary_gid,
+            "service_username": target.username,
+        }
+    if inspection["blockers"]:
+        raise BookingError("; ".join(inspection["blockers"]))
+
+    old_pair = (plan.current_service.uid, plan.current_service.primary_gid)
+    new_pair = (plan.target_service.uid, plan.target_service.primary_gid)
+    config_payload = _read_owned_regular_payload(
+        plan.config_file,
+        expected_owner,
+        CONFIG_FILE_MODE,
+    )
+    manifest_path = _manifest_path(plan.config_file)
+    manifest_payload = _read_owned_regular_payload(
+        manifest_path,
+        expected_owner,
+        INSTALL_MANIFEST_MODE,
+    )
+    new_config = dict(plan.config_document)
+    new_config["broker_uid"] = target.uid
+    new_config["monitor_uid"] = target.uid
+    new_config_payload = _config_payload(new_config)
+    history = plan.manifest.get("service_transfers", [])
+    if not isinstance(history, list):
+        raise BookingError("install manifest service transfer history is invalid")
+    transfer_event = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "from_uid": old_pair[0],
+        "from_gid": old_pair[1],
+        "to_uid": new_pair[0],
+        "to_gid": new_pair[1],
+    }
+    new_manifest = {
+        **plan.manifest,
+        "service_uid": new_pair[0],
+        "service_gid": new_pair[1],
+        "config_sha256": _sha256(new_config_payload),
+        "previous_config_sha256": None,
+        "service_transfers": [*history[-31:], transfer_event],
+    }
+    journal_path = _transfer_journal_path(plan.config_file)
+    journal = _build_transfer_journal(
+        plan,
+        config_payload=config_payload,
+        manifest_payload=manifest_payload,
+        expected_owner=expected_owner,
+    )
+
+    rollback_completed = False
+    try:
+        with _admin_transfer_guard(
+            plan,
+            allowed_owner_pairs={old_pair},
+            lock_owner=old_pair,
+            socket_owner_uids={old_pair[0]},
+        ):
+            _write_transfer_journal(journal_path, journal, replace=False)
+            try:
+                _retarget_managed_tree(
+                    plan.data_dir,
+                    allowed_owner_pairs={old_pair},
+                    target_owner=new_pair,
+                )
+                _retarget_transfer_path(
+                    plan.broker_socket.parent,
+                    allowed_owner_pairs={old_pair},
+                    target_owner=new_pair,
+                    expected_mode=BROKER_SOCKET_DIRECTORY_MODE,
+                    require_directory=True,
+                )
+                _write_new_file(
+                    plan.config_file,
+                    new_config_payload,
+                    CONFIG_FILE_MODE,
+                    replace=True,
+                )
+                _write_manifest(manifest_path, new_manifest, replace=True)
+            except BaseException as exc:
+                rollback_errors = _rollback_admin_transfer(
+                    plan,
+                    journal=journal,
+                    allowed_owner_pairs={old_pair, new_pair},
+                )
+                if rollback_errors:
+                    raise BookingError(
+                        "service-account transfer failed and automatic rollback was "
+                        f"incomplete ({'; '.join(rollback_errors)}); "
+                        "run transfer --recover"
+                    ) from exc
+                rollback_completed = True
+                raise
+    except BaseException:
+        if rollback_completed:
+            journal_path.unlink(missing_ok=True)
+            fsync_directory(journal_path.parent)
+        raise
+    else:
+        journal_path.unlink()
+        fsync_directory(journal_path.parent)
+
+    return {
+        "schema_version": ADMIN_SCHEMA_VERSION,
+        "kind": "admin-transfer",
+        "status": "transferred",
+        "service_uid": target.uid,
+        "service_gid": target.primary_gid,
+        "service_username": target.username,
+        "config_file": str(plan.config_file),
+        "data_dir": str(plan.data_dir),
+        "reservations_rewritten": False,
+        "accounts_changed": False,
+    }
+
+
+def _transfer_journal_path(config_file: Path) -> Path:
+    return config_file.parent / TRANSFER_JOURNAL_NAME
+
+
+def _journal_string(document: dict, key: str) -> str:
+    value = document.get(key)
+    if not isinstance(value, str) or not value or "\x00" in value:
+        raise BookingError(f"transfer journal field {key} must be a non-empty string")
+    return value
+
+
+def _journal_nonnegative_int(
+    document: dict,
+    key: str,
+    *,
+    allow_root: bool = True,
+) -> int:
+    value = document.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise BookingError(
+            f"transfer journal field {key} must be a non-negative integer"
+        )
+    if not allow_root and value == 0:
+        raise BookingError(f"transfer journal field {key} must be non-root")
+    return value
+
+
+def _read_owned_regular_payload(path: Path, expected_owner: int, mode: int) -> bytes:
+    fd = open_existing_regular(path, expected_mode=mode)
+    try:
+        metadata = os.fstat(fd)
+        if metadata.st_uid != expected_owner:
+            raise BookingError(f"managed file must be owned by UID {expected_owner}: {path}")
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            return handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _transfer_file_snapshot(
+    path: Path,
+    payload: bytes,
+    *,
+    expected_owner: int,
+    expected_mode: int,
+) -> dict:
+    fd = open_existing_regular(path, expected_mode=expected_mode)
+    try:
+        metadata = os.fstat(fd)
+        if metadata.st_uid != expected_owner:
+            raise BookingError(f"managed file owner drifted while preparing transfer: {path}")
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            observed = handle.read()
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if observed != payload:
+        raise BookingError(f"managed file changed while preparing transfer: {path}")
+    return {
+        "uid": metadata.st_uid,
+        "gid": metadata.st_gid,
+        "mode": stat.S_IMODE(metadata.st_mode),
+        "sha256": _sha256(payload),
+        "content_b64": base64.b64encode(payload).decode("ascii"),
+    }
+
+
+def _validated_transfer_snapshot(value: object) -> dict:
+    if not isinstance(value, dict):
+        raise BookingError("transfer journal contains an invalid file snapshot")
+    for key in ("uid", "gid", "mode"):
+        item = value.get(key)
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            raise BookingError(f"transfer journal snapshot field {key} is invalid")
+    if value["mode"] > 0o7777:
+        raise BookingError("transfer journal snapshot mode is invalid")
+    encoded = value.get("content_b64")
+    try:
+        payload = base64.b64decode(encoded, validate=True)
+    except (TypeError, ValueError) as exc:
+        raise BookingError("transfer journal snapshot content is not valid base64") from exc
+    digest = value.get("sha256")
+    if not isinstance(digest, str) or _sha256(payload) != digest:
+        raise BookingError("transfer journal snapshot checksum does not match")
+    return value
+
+
+def _write_transfer_journal(path: Path, journal: dict, *, replace: bool) -> None:
+    payload = (
+        json.dumps(journal, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    ).encode()
+    _write_new_file(path, payload, INSTALL_MANIFEST_MODE, replace=replace)
+
+
+def _read_transfer_journal(path: Path, *, expected_owner: int) -> dict:
+    payload = _read_owned_regular_payload(
+        path,
+        expected_owner,
+        INSTALL_MANIFEST_MODE,
+    )
+    if len(payload) > 4 * 1024 * 1024:
+        raise BookingError("service-account transfer journal is unexpectedly large")
+    try:
+        document = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise BookingError(f"service-account transfer journal is invalid JSON: {path}") from exc
+    if not isinstance(document, dict) or document.get("schema_version") != TRANSFER_SCHEMA_VERSION:
+        raise BookingError(f"unsupported or invalid service-account transfer journal: {path}")
+    _transfer_plan_from_journal(document)
+    return document
+
+
+def _validate_transfer_directory(
+    path: Path,
+    allowed_owner_pairs: set[tuple[int, int]],
+    expected_mode: int,
+    label: str,
+) -> os.stat_result:
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError as exc:
+        raise BookingError(f"managed {label} directory is missing: {path}") from exc
+    if not stat.S_ISDIR(metadata.st_mode):
+        raise BookingError(f"managed {label} path is not a real directory: {path}")
+    if (metadata.st_uid, metadata.st_gid) not in allowed_owner_pairs:
+        raise BookingError(f"managed {label} directory ownership drifted: {path}")
+    if stat.S_IMODE(metadata.st_mode) != expected_mode:
+        raise BookingError(
+            f"managed {label} directory mode must be {expected_mode:04o}: {path}"
+        )
+    return metadata
+
+
+def _validate_transfer_tree(
+    data_dir: Path,
+    allowed_owner_pairs: set[tuple[int, int]],
+) -> tuple[tuple[Path, bool, int], ...]:
+    root_metadata = _validate_transfer_directory(
+        data_dir,
+        allowed_owner_pairs,
+        BROKER_DIR_MODE,
+        "data",
+    )
+    unknown = sorted(
+        item.name for item in data_dir.iterdir() if item.name not in MANAGED_DATA_NAMES
+    )
+    if unknown:
+        raise BookingError(
+            "refusing service-account transfer with unknown managed-data entries: "
+            + ", ".join(unknown)
+        )
+
+    entries: list[tuple[Path, bool, int]] = [
+        (data_dir, True, stat.S_IMODE(root_metadata.st_mode))
+    ]
+    for root, directories, files in os.walk(data_dir, topdown=True, followlinks=False):
+        for name in [*directories, *files]:
+            path = Path(root) / name
+            metadata = path.lstat()
+            owner = (metadata.st_uid, metadata.st_gid)
+            if owner not in allowed_owner_pairs:
+                raise BookingError(f"managed data ownership drifted: {path}")
+            mode = stat.S_IMODE(metadata.st_mode)
+            if stat.S_ISDIR(metadata.st_mode):
+                if mode != BROKER_DIR_MODE:
+                    raise BookingError(
+                        f"managed data directory mode must be {BROKER_DIR_MODE:04o}: {path}"
+                    )
+                entries.append((path, True, mode))
+            elif stat.S_ISREG(metadata.st_mode):
+                if metadata.st_nlink != 1:
+                    raise BookingError(f"refusing hard-linked managed data file: {path}")
+                if mode not in {BROKER_FILE_MODE, INSTALL_MANIFEST_MODE}:
+                    raise BookingError(
+                        f"managed data file mode must be 0644 or 0600: {path}"
+                    )
+                entries.append((path, False, mode))
+            else:
+                raise BookingError(f"refusing special or symbolic file in managed data: {path}")
+    return tuple(
+        sorted(entries, key=lambda item: len(item[0].relative_to(data_dir).parts), reverse=True)
+    )
+
+
+def _transfer_socket_state(path: Path, allowed_owner_uids: set[int]) -> str:
+    if not os.path.lexists(path):
+        return "absent"
+    metadata = path.lstat()
+    if not stat.S_ISSOCK(metadata.st_mode) or metadata.st_uid not in allowed_owner_uids:
+        raise BookingError(f"refusing unsafe broker path during transfer: {path}")
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(0.2)
+    try:
+        probe.connect(str(path))
+    except (ConnectionRefusedError, FileNotFoundError):
+        return "stale"
+    except OSError as exc:
+        raise BookingError(f"cannot verify broker socket state: {exc}") from exc
+    else:
+        return "active"
+    finally:
+        probe.close()
+
+
+def _probe_admin_lock(
+    path: Path,
+    allowed_owner_pairs: set[tuple[int, int]],
+) -> str:
+    if not os.path.lexists(path):
+        return "absent"
+    fd = open_existing_regular(path, os.O_RDWR, expected_mode=BROKER_FILE_MODE)
+    try:
+        metadata = os.fstat(fd)
+        if (metadata.st_uid, metadata.st_gid) not in allowed_owner_pairs:
+            raise BookingError(f"managed lock ownership drifted: {path}")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                return "active"
+            raise
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return "idle"
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _admin_file_lock(
+    path: Path,
+    *,
+    allowed_owner_pairs: set[tuple[int, int]],
+    lock_owner: tuple[int, int],
+    label: str,
+) -> Iterator[None]:
+    flags = os.O_RDWR
+    for name in ("O_CLOEXEC", "O_NOFOLLOW", "O_NONBLOCK"):
+        flags |= getattr(os, name, 0)
+    created = False
+    try:
+        fd = os.open(str(path), flags | os.O_CREAT | os.O_EXCL, BROKER_FILE_MODE)
+        created = True
+    except FileExistsError:
+        fd = open_existing_regular(path, os.O_RDWR, expected_mode=BROKER_FILE_MODE)
+    try:
+        if created:
+            os.fchown(fd, lock_owner[0], lock_owner[1])
+            os.fchmod(fd, BROKER_FILE_MODE)
+            os.fsync(fd)
+            fsync_directory(path.parent)
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise BookingError(f"refusing unsafe {label} lock: {path}")
+        if stat.S_IMODE(metadata.st_mode) != BROKER_FILE_MODE:
+            raise BookingError(f"managed {label} lock mode drifted: {path}")
+        if (metadata.st_uid, metadata.st_gid) not in allowed_owner_pairs:
+            raise BookingError(f"managed {label} lock ownership drifted: {path}")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                raise BookingError(
+                    f"{label} became active; stop the related process and retry"
+                ) from exc
+            raise
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _admin_transfer_guard(
+    plan: AdminTransferPlan,
+    *,
+    allowed_owner_pairs: set[tuple[int, int]],
+    lock_owner: tuple[int, int],
+    socket_owner_uids: set[int],
+) -> Iterator[None]:
+    _validate_transfer_directory(
+        plan.broker_socket.parent,
+        allowed_owner_pairs,
+        BROKER_SOCKET_DIRECTORY_MODE,
+        "broker socket",
+    )
+    socket_state = _transfer_socket_state(plan.broker_socket, socket_owner_uids)
+    if socket_state == "active":
+        raise BookingError("broker became active; stop it and retry the transfer")
+    if socket_state == "stale":
+        plan.broker_socket.unlink()
+        fsync_directory(plan.broker_socket.parent)
+
+    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    guard_identity: Optional[tuple[int, int]] = None
+    try:
+        try:
+            listener.bind(str(plan.broker_socket))
+            listener.listen(1)
+        except OSError as exc:
+            raise BookingError(
+                "could not establish the broker maintenance guard; stop the broker and retry"
+            ) from exc
+        metadata = plan.broker_socket.lstat()
+        if not stat.S_ISSOCK(metadata.st_mode):
+            raise BookingError("broker maintenance guard is not a Unix socket")
+        guard_identity = (metadata.st_dev, metadata.st_ino)
+        with ExitStack() as stack:
+            stack.enter_context(
+                _admin_file_lock(
+                    plan.data_dir / "usage.lock",
+                    allowed_owner_pairs=allowed_owner_pairs,
+                    lock_owner=lock_owner,
+                    label="monitor",
+                )
+            )
+            stack.enter_context(
+                _admin_file_lock(
+                    plan.data_dir / "ledger.lock",
+                    allowed_owner_pairs=allowed_owner_pairs,
+                    lock_owner=lock_owner,
+                    label="ledger",
+                )
+            )
+            yield
+    finally:
+        listener.close()
+        if guard_identity is not None:
+            try:
+                metadata = plan.broker_socket.lstat()
+            except FileNotFoundError as exc:
+                raise BookingError("broker maintenance guard disappeared during transfer") from exc
+            if (
+                not stat.S_ISSOCK(metadata.st_mode)
+                or (metadata.st_dev, metadata.st_ino) != guard_identity
+            ):
+                raise BookingError("broker maintenance guard was replaced during transfer")
+            plan.broker_socket.unlink()
+            fsync_directory(plan.broker_socket.parent)
+
+
+def _retarget_transfer_path(
+    path: Path,
+    *,
+    allowed_owner_pairs: set[tuple[int, int]],
+    target_owner: tuple[int, int],
+    expected_mode: int,
+    require_directory: bool,
+) -> None:
+    if not hasattr(os, "O_NOFOLLOW") and path.is_symlink():
+        raise BookingError(f"refusing symbolic link during service-account transfer: {path}")
+    flags = os.O_RDONLY
+    for name in ("O_CLOEXEC", "O_NOFOLLOW"):
+        flags |= getattr(os, name, 0)
+    if require_directory:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(str(path), flags)
+    try:
+        metadata = os.fstat(fd)
+        if require_directory:
+            valid_type = stat.S_ISDIR(metadata.st_mode)
+        else:
+            valid_type = stat.S_ISREG(metadata.st_mode) and metadata.st_nlink == 1
+        if not valid_type:
+            raise BookingError(f"managed path type changed during transfer: {path}")
+        if stat.S_IMODE(metadata.st_mode) != expected_mode:
+            raise BookingError(f"managed path mode changed during transfer: {path}")
+        if (metadata.st_uid, metadata.st_gid) not in allowed_owner_pairs:
+            raise BookingError(f"managed path owner changed during transfer: {path}")
+        if (metadata.st_uid, metadata.st_gid) != target_owner:
+            os.fchown(fd, target_owner[0], target_owner[1])
+            os.fchmod(fd, expected_mode)
+            os.fsync(fd)
+        updated = os.fstat(fd)
+        if (updated.st_uid, updated.st_gid) != target_owner:
+            raise BookingError(f"failed to transfer managed path ownership: {path}")
+        if stat.S_IMODE(updated.st_mode) != expected_mode:
+            raise BookingError(f"failed to preserve managed path mode: {path}")
+    finally:
+        os.close(fd)
+    fsync_directory(path.parent)
+
+
+def _retarget_managed_tree(
+    data_dir: Path,
+    *,
+    allowed_owner_pairs: set[tuple[int, int]],
+    target_owner: tuple[int, int],
+) -> None:
+    entries = _validate_transfer_tree(data_dir, allowed_owner_pairs)
+    for path, is_directory, mode in entries:
+        _retarget_transfer_path(
+            path,
+            allowed_owner_pairs=allowed_owner_pairs,
+            target_owner=target_owner,
+            expected_mode=mode,
+            require_directory=is_directory,
+        )
+    _validate_transfer_tree(data_dir, {target_owner})
+
+
+def _restore_transfer_snapshot(path: Path, snapshot: object) -> None:
+    validated = _validated_transfer_snapshot(snapshot)
+    payload = base64.b64decode(validated["content_b64"], validate=True)
+    _write_new_file(path, payload, validated["mode"], replace=True)
+    fd = open_existing_regular(path, expected_mode=validated["mode"])
+    try:
+        os.fchown(fd, validated["uid"], validated["gid"])
+        os.fchmod(fd, validated["mode"])
+        os.fsync(fd)
+        metadata = os.fstat(fd)
+        if (metadata.st_uid, metadata.st_gid) != (
+            validated["uid"],
+            validated["gid"],
+        ):
+            raise BookingError(f"failed to restore managed file ownership: {path}")
+    finally:
+        os.close(fd)
+    fsync_directory(path.parent)
+
+
+def _rollback_admin_transfer(
+    plan: AdminTransferPlan,
+    *,
+    journal: dict,
+    allowed_owner_pairs: set[tuple[int, int]],
+) -> list[str]:
+    old_owner = (plan.current_service.uid, plan.current_service.primary_gid)
+    errors = []
+    try:
+        _retarget_managed_tree(
+            plan.data_dir,
+            allowed_owner_pairs=allowed_owner_pairs,
+            target_owner=old_owner,
+        )
+    except BaseException as exc:
+        errors.append(f"data ownership: {exc}")
+    try:
+        _retarget_transfer_path(
+            plan.broker_socket.parent,
+            allowed_owner_pairs=allowed_owner_pairs,
+            target_owner=old_owner,
+            expected_mode=BROKER_SOCKET_DIRECTORY_MODE,
+            require_directory=True,
+        )
+    except BaseException as exc:
+        errors.append(f"socket ownership: {exc}")
+    try:
+        _restore_transfer_snapshot(plan.config_file, journal.get("config_before"))
+    except BaseException as exc:
+        errors.append(f"configuration: {exc}")
+    try:
+        _restore_transfer_snapshot(
+            _manifest_path(plan.config_file),
+            journal.get("manifest_before"),
+        )
+    except BaseException as exc:
+        errors.append(f"install manifest: {exc}")
+    return errors
 
 
 def apply_admin_init(
@@ -1029,6 +2248,11 @@ def inspect_admin_init(
     expected_owner: int = 0,
 ) -> AdminInspection:
     _validate_plan(plan)
+    if os.path.lexists(_transfer_journal_path(plan.config_file)):
+        raise BookingError(
+            "reserved transfer journal already exists beside the configuration; "
+            "review or recover it before initialization"
+        )
     _validate_config_destination(plan.config_file, expected_owner=expected_owner)
     existing_config = _read_existing_config(
         plan.config_file,
@@ -1254,6 +2478,10 @@ def _build_plan(
 
 
 def _validate_plan(plan: AdminInitPlan) -> None:
+    if plan.config_file.name in {INSTALL_MANIFEST_NAME, TRANSFER_JOURNAL_NAME}:
+        raise BookingError(
+            "trusted configuration filename conflicts with administrator metadata"
+        )
     if plan.config_file == plan.data_dir or plan.config_file.is_relative_to(
         plan.data_dir
     ):
@@ -1347,6 +2575,20 @@ def _detected_gpu_count(explicit: Optional[int]) -> int:
 def _default_service_identity(explicit: Optional[str]) -> Optional[AdminIdentity]:
     if explicit:
         return _resolve_identity(explicit)
+
+    sudo_uid = os.environ.get("SUDO_UID")
+    sudo_user = os.environ.get("SUDO_USER")
+    if sudo_uid is not None or sudo_user is not None:
+        if not sudo_uid or not sudo_uid.isdecimal() or not sudo_user:
+            raise BookingError("SUDO_UID and SUDO_USER do not identify a valid account")
+        by_uid = _resolve_identity(sudo_uid)
+        by_name = _resolve_identity(sudo_user)
+        if by_uid.uid != by_name.uid:
+            raise BookingError("SUDO_UID and SUDO_USER identify different accounts")
+        return by_uid
+
+    if os.getuid() != 0:
+        return _resolve_identity(str(os.getuid()))
     try:
         return _resolve_identity("gpubk")
     except BookingError:

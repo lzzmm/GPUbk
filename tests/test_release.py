@@ -69,12 +69,16 @@ class ReleaseConfigurationTests(unittest.TestCase):
             self.assertIn("sudo bk admin init", text)
             self.assertIn("--access group --group gpuusers", text)
             self.assertIn("--service-user", text)
+            self.assertIn("/opt/gpubk", text)
+            self.assertIn("bk admin transfer NEWUSER --dry-run", text)
+            self.assertIn("bk admin transfer --recover --yes", text)
             self.assertIn("bk admin uninstall --dry-run --purge-data", text)
             self.assertIn("0644", text)
             self.assertIn("0755", text)
             self.assertNotIn("0777", text)
         self.assertIn("account owns the ledger", security)
         self.assertIn("SO_PEERCRED", security)
+        self.assertIn("bk admin transfer", security)
         self.assertNotIn("defaults to open cooperative access", security)
 
     def test_telemetry_contract_is_packaged_and_linked(self):
@@ -116,6 +120,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("0.1.x to 0.2.x", guide)
         self.assertIn("weighted `--share` capacity", guide)
         self.assertIn("monitor_uid", guide)
+        self.assertIn("pip install --upgrade 'gpubk[gpu]'", guide)
+        self.assertIn("bk admin transfer NEWUSER --dry-run", guide)
         self.assertIn("Do not run a 0.1 worker", guide)
 
     def test_bundled_monitor_unit_defers_timing_to_trusted_config(self):
@@ -181,12 +187,14 @@ class ReleaseConfigurationTests(unittest.TestCase):
         workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
         self.assertIn("bandit -q -r src/bk --severity-level medium", workflow)
+        self.assertIn("AdminRootLifecycleTests", workflow)
         self.assertIn("validate-pyproject pyproject.toml", workflow)
         self.assertIn("check-wheel-contents dist/*.whl", workflow)
         self.assertIn("gpu-extra:", workflow)
         self.assertIn("python -m pip install '.[gpu]'", workflow)
         self.assertIn("nvmlDeviceGetProcessUtilization", workflow)
         self.assertIn("Verify scheduled-command wheel flow", workflow)
+        self.assertIn("service uninstall worker --target-dir", workflow)
         self.assertIn('"BK_WORKER_LIVE_GUARD": "0"', workflow)
         self.assertIn('stored["job"]["status"] != "succeeded"', workflow)
 
