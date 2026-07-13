@@ -471,7 +471,8 @@ class AgentServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(recommendation["request"]["share_units_per_gpu"], 3)
-        self.assertEqual(recommendation["request"]["share_fraction_per_gpu"], "3/4")
+        self.assertEqual(recommendation["request"]["share_capacity_units_per_gpu"], 4)
+        self.assertNotIn("share_fraction_per_gpu", recommendation["request"])
         self.assertEqual(submission.result.reservation["share_units"], 3)
 
     def test_non_job_submission_does_not_probe_a_private_worker(self):
@@ -1119,7 +1120,8 @@ class AgentServiceTests(unittest.TestCase):
 
         reservation = context["reservations"][0]
         self.assertEqual(reservation["share_units_per_gpu"], 2)
-        self.assertEqual(reservation["share_fraction_per_gpu"], "2/2")
+        self.assertEqual(reservation["share_capacity_units_per_gpu"], 2)
+        self.assertNotIn("share_fraction_per_gpu", reservation)
 
     def test_exact_conflict_returns_nearest_without_writing(self):
         add_booking(

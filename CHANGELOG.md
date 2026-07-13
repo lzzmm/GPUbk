@@ -4,6 +4,11 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Add a replayable, read-only CLI tutorial, a first-launch TUI tour, and private
+  per-user onboarding markers that never touch shared reservation data.
+- Add resumable, root-tracked systemd units for boot-persistent broker and monitor operation.
+  Units run under the selected non-root administrator UID, use service hardening, refresh safely
+  during upgrades, follow recoverable administrator transfers, and restore prior files on removal.
 - Default shared-server initialization to the non-root account that invoked `sudo`, and add a
   dry-runnable, recoverable `bk admin transfer` transaction for handing broker and monitor
   ownership to another existing account without rewriting reservations, user UIDs, audit events,
@@ -159,8 +164,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Release file-lock descriptors immediately when lock metadata persistence fails, avoiding transient false deadlocks during storage errors.
 - Add `bk doctor --probe --json --strict` for cleanup-safe atomic-replace, fsync, process-lock, permission, disk-space, and real GPU telemetry deployment checks.
 - Recheck process authorization and physical VRAM immediately before scheduled commands launch; unsafe jobs remain pending with a stable reason instead of colliding with live work.
-- Add backward-compatible weighted shared capacity with `--share`/`--share-with`, share-weighted VRAM inference, Agent/MCP fields, proportional TUI subcells, and atomic concurrency tests.
-- Use adaptive six-character reservation prefixes in the TUI, preserve booking links in narrow process tables, and distinguish per-booking Share from current GPU capacity use.
+- Add integer weighted shared slots with `--share SLOTS`, slot-weighted VRAM inference,
+  integer Agent/MCP fields, proportional TUI subcells, and atomic concurrency tests.
+- Use adaptive six-character reservation prefixes in the TUI, preserve booking links in narrow process tables, and distinguish per-booking slots from current GPU capacity use.
 - Show total occupied capacity in CLI timeline slices, mark current exclusive use in the aligned TUI GPU metrics, and keep the `NOW` label from leaving partial minute ticks on narrow terminals.
 - Fail closed without crashing Agent context when a legacy reservation contains malformed shared-capacity metadata.
 - Keep plain `bk doctor` strictly read-only: do not recover pending transactions or follow unsafe managed paths, and report malformed records and backup fallback as structured issues.

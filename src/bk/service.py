@@ -31,7 +31,7 @@ from .scheduler import (
     reservation_pressure_scores,
     shared_memory_headroom_for_reservation,
 )
-from .sharing import normalize_share_units, reservation_share_units, share_text
+from .sharing import normalize_share_units, reservation_share_units
 from .storage import AUDIT_SCHEMA_VERSION, LedgerStore
 from .timeparse import normalize_queue_start, parse_iso, to_iso, utc_now
 from .usage_store import UsageAuditStore
@@ -682,10 +682,8 @@ def recommend_booking(
             "share_units_per_gpu": effective_share_units
             if mode == MODE_SHARED
             else None,
-            "share_fraction_per_gpu": (
-                share_text(effective_share_units, config.max_shared_users)
-                if mode == MODE_SHARED
-                else None
+            "share_capacity_units_per_gpu": (
+                config.max_shared_users if mode == MODE_SHARED else None
             ),
             "allow_queue": allow_queue,
         },
@@ -986,11 +984,6 @@ def _public_reservation(
         "share_capacity_units_per_gpu": (
             share_capacity_units if reservation.get("mode") == MODE_SHARED else None
         ),
-        "share_fraction_per_gpu": (
-            share_text(share_units, share_capacity_units)
-            if share_units is not None and share_capacity_units is not None
-            else None
-        ),
         "job": (
             {
                 "status": job.get("status"),
@@ -1035,7 +1028,7 @@ def _validate_recommendation_request(
         raise BookingError("shared reservations must declare expected memory")
     if mode == MODE_EXCLUSIVE:
         if share_units is not None:
-            raise BookingError("share units apply only to shared reservations")
+            raise BookingError("shared slots apply only to shared reservations")
         normalized_share_units = config.max_shared_users
     else:
         try:

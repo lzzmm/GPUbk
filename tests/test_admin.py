@@ -19,8 +19,11 @@ from bk.admin import (
     _detected_gpu_count,
     _validate_plan,
     apply_admin_init,
+    apply_admin_system_services_install,
+    apply_admin_system_services_uninstall,
     apply_admin_uninstall,
     inspect_admin_init,
+    inspect_admin_system_services,
     inspect_admin_uninstall,
     run_admin_cli,
 )
@@ -344,6 +347,105 @@ class AdminInitTests(unittest.TestCase):
             self.assertEqual(payload["status"], "initialized")
             self.assertEqual(payload["result"], result)
 
+    def test_system_services_json_apply_emits_one_final_document(self):
+        inspection = {
+            "operation": "install",
+            "status": "ready",
+            "blockers": [],
+            "units": {
+                "gpubk-broker.service": "original",
+                "gpubk-monitor.service": "original",
+            },
+        }
+        result = {
+            "status": "installed",
+            "units": ["gpubk-broker.service", "gpubk-monitor.service"],
+        }
+        output = StringIO()
+        with (
+            mock.patch(
+                "bk.admin.inspect_admin_system_services",
+                return_value=(mock.sentinel.service_plan, inspection),
+            ),
+            mock.patch(
+                "bk.admin.apply_admin_system_services_install",
+                return_value=result,
+            ) as apply_services,
+            redirect_stdout(output),
+        ):
+            status = run_admin_cli(
+                [
+                    "services",
+                    "install",
+                    "--config-file",
+                    "/etc/gpubk/config.json",
+                    "--yes",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["status"], "installed")
+        self.assertEqual(payload["inspection"], inspection)
+        self.assertEqual(payload["result"], result)
+        apply_services.assert_called_once_with(
+            Path("/etc/gpubk/config.json"),
+            service_plan=mock.sentinel.service_plan,
+        )
+
+    def test_system_services_noninteractive_apply_requires_yes(self):
+        inspection = {
+            "operation": "uninstall",
+            "status": "ready",
+            "blockers": [],
+            "units": {},
+        }
+        output = StringIO()
+        errors = StringIO()
+        with (
+            mock.patch(
+                "bk.admin.inspect_admin_system_services",
+                return_value=(mock.sentinel.service_plan, inspection),
+            ),
+            mock.patch(
+                "bk.admin.apply_admin_system_services_uninstall"
+            ) as apply_services,
+            mock.patch("sys.stdin", StringIO()),
+            redirect_stdout(output),
+            redirect_stderr(errors),
+        ):
+            status = run_admin_cli(
+                ["services", "uninstall", "--config-file", "/etc/gpubk/config.json", "--json"]
+            )
+
+        self.assertEqual(status, 1)
+        self.assertEqual(json.loads(output.getvalue()), inspection)
+        self.assertIn("pass --yes", errors.getvalue())
+        apply_services.assert_not_called()
+
+    def test_system_services_status_returns_nonzero_for_drift(self):
+        inspection = {
+            "operation": "status",
+            "status": "blocked",
+            "blockers": ["managed systemd unit drifted"],
+            "units": {"gpubk-broker.service": "drifted"},
+        }
+        output = StringIO()
+        with (
+            mock.patch(
+                "bk.admin.inspect_admin_system_services",
+                return_value=(None, inspection),
+            ),
+            redirect_stdout(output),
+        ):
+            status = run_admin_cli(
+                ["services", "status", "--config-file", "/etc/gpubk/config.json", "--json"]
+            )
+
+        self.assertEqual(status, 1)
+        self.assertEqual(json.loads(output.getvalue()), inspection)
+
     def test_noninteractive_apply_requires_yes_and_emits_a_plan(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -420,7 +522,7 @@ class AdminInitTests(unittest.TestCase):
             self.assertIn("Please enter a whole number", text)
             self.assertIn("Invalid slice", text)
             self.assertIn("Please answer y or n", text)
-            self.assertIn("sharing:    4", text)
+            self.assertIn("sharing:    max 4 slots per GPU", text)
             self.assertFalse((root / "shared").exists())
 
     def test_gpu_detection_requires_real_telemetry_unless_count_is_explicit(self):
@@ -773,6 +875,111 @@ class AdminInitTests(unittest.TestCase):
                 with self.assertRaisesRegex(BookingError, "must run as root"):
                     apply_admin_uninstall(plan.config_file, purge_data=True)
 
+    def test_tracked_system_services_complete_install_and_uninstall_lifecycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.prepare_parents(root)
+            plan = self.plan(root)
+            apply_admin_init(plan, require_root=False)
+            unit_directory = root / "systemd"
+            unit_directory.mkdir(mode=0o755)
+
+            service_plan, inspection = inspect_admin_system_services(
+                plan.config_file,
+                operation="install",
+                unit_directory=unit_directory,
+                python_executable=Path(os.sys.executable),
+                expected_owner=os.geteuid(),
+            )
+            self.assertEqual(inspection["status"], "ready")
+            result = apply_admin_system_services_install(
+                plan.config_file,
+                service_plan=service_plan,
+                require_root=False,
+            )
+
+            self.assertEqual(result["status"], "installed")
+            manifest_path = plan.config_file.parent / "install.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["system_services"]["phase"], "installed")
+            status_plan, status = inspect_admin_system_services(
+                plan.config_file,
+                operation="status",
+                expected_owner=os.geteuid(),
+            )
+            self.assertIsNone(status_plan)
+            self.assertEqual(status["status"], "installed")
+            self.assertEqual(set(status["units"].values()), {"managed"})
+
+            uninstall_preview = inspect_admin_uninstall(
+                plan.config_file,
+                purge_data=True,
+                expected_owner=os.geteuid(),
+            )
+            self.assertTrue(uninstall_preview["system_services_present"])
+            self.assertTrue(
+                any("system services" in item for item in uninstall_preview["blockers"])
+            )
+
+            removal_plan, removal = inspect_admin_system_services(
+                plan.config_file,
+                operation="uninstall",
+                expected_owner=os.geteuid(),
+            )
+            self.assertEqual(removal["status"], "ready")
+            removed = apply_admin_system_services_uninstall(
+                plan.config_file,
+                service_plan=removal_plan,
+                require_root=False,
+            )
+            self.assertEqual(removed["status"], "uninstalled")
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertNotIn("system_services", manifest)
+            for name in ("gpubk-broker.service", "gpubk-monitor.service"):
+                self.assertFalse((unit_directory / name).exists())
+
+            uninstall_preview = inspect_admin_uninstall(
+                plan.config_file,
+                purge_data=True,
+                expected_owner=os.geteuid(),
+            )
+            self.assertFalse(uninstall_preview["system_services_present"])
+            self.assertEqual(uninstall_preview["status"], "ready")
+
+    def test_system_service_uninstall_requires_disable_first(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.prepare_parents(root)
+            plan = self.plan(root)
+            apply_admin_init(plan, require_root=False)
+            unit_directory = root / "systemd"
+            unit_directory.mkdir(mode=0o755)
+            service_plan, _ = inspect_admin_system_services(
+                plan.config_file,
+                operation="install",
+                unit_directory=unit_directory,
+                expected_owner=os.geteuid(),
+            )
+            apply_admin_system_services_install(
+                plan.config_file,
+                service_plan=service_plan,
+                require_root=False,
+            )
+            wants = unit_directory / "multi-user.target.wants"
+            wants.mkdir()
+            (wants / "gpubk-broker.service").symlink_to(
+                unit_directory / "gpubk-broker.service"
+            )
+
+            _, inspection = inspect_admin_system_services(
+                plan.config_file,
+                operation="uninstall",
+                expected_owner=os.geteuid(),
+            )
+
+            self.assertEqual(inspection["status"], "blocked")
+            self.assertTrue(any("disable --now" in item for item in inspection["blockers"]))
+
 
 class AdminTransferTests(unittest.TestCase):
     def prepare(self, root: Path) -> AdminInitPlan:
@@ -968,6 +1175,66 @@ class AdminTransferTests(unittest.TestCase):
             self.assertEqual(manifest["service_gid"], target.primary_gid)
             self.assertEqual(len(manifest["service_transfers"]), 1)
             self.assertFalse((plan.config_file.parent / "transfer.json").exists())
+
+    def test_transfer_updates_tracked_system_units_and_failure_rolls_them_back(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            plan = self.prepare(root)
+            target = self.target(plan)
+            unit_directory = root / "systemd"
+            unit_directory.mkdir(mode=0o755)
+            service_plan, _ = inspect_admin_system_services(
+                plan.config_file,
+                operation="install",
+                unit_directory=unit_directory,
+                expected_owner=os.geteuid(),
+            )
+            apply_admin_system_services_install(
+                plan.config_file,
+                service_plan=service_plan,
+                require_root=False,
+            )
+            broker_unit = unit_directory / "gpubk-broker.service"
+            original_unit = broker_unit.read_bytes()
+
+            with (
+                mock.patch("bk.admin._retarget_managed_tree"),
+                mock.patch("bk.admin._retarget_transfer_path"),
+                mock.patch(
+                    "bk.admin._write_manifest",
+                    side_effect=OSError("injected manifest failure"),
+                ),
+            ):
+                with self.assertRaisesRegex(OSError, "injected manifest failure"):
+                    admin_module.apply_admin_transfer(
+                        plan.config_file,
+                        target,
+                        require_root=False,
+                    )
+
+            self.assertEqual(broker_unit.read_bytes(), original_unit)
+            self.assertFalse((plan.config_file.parent / "transfer.json").exists())
+
+            with (
+                mock.patch("bk.admin._retarget_managed_tree"),
+                mock.patch("bk.admin._retarget_transfer_path"),
+            ):
+                result = admin_module.apply_admin_transfer(
+                    plan.config_file,
+                    target,
+                    require_root=False,
+                )
+
+            self.assertTrue(result["system_services_updated"])
+            rendered = broker_unit.read_text(encoding="utf-8")
+            self.assertIn(f"User={target.uid}", rendered)
+            self.assertIn(f"Group={target.primary_gid}", rendered)
+            manifest = json.loads(
+                (plan.config_file.parent / "install.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                manifest["system_services"]["service_uid"], target.uid
+            )
 
     def test_failed_transfer_rolls_back_config_manifest_and_journal(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1179,6 +1446,19 @@ class AdminRootLifecycleTests(unittest.TestCase):
             ledger.write_bytes(ledger_payload)
             ledger.chmod(BROKER_FILE_MODE)
             os.chown(ledger, service.uid, service.primary_gid)
+            unit_directory = root / "systemd"
+            unit_directory.mkdir(mode=0o755)
+            service_plan, inspection = inspect_admin_system_services(
+                plan.config_file,
+                operation="install",
+                unit_directory=unit_directory,
+                python_executable=Path(os.sys.executable),
+            )
+            self.assertEqual(inspection["status"], "ready")
+            apply_admin_system_services_install(
+                plan.config_file,
+                service_plan=service_plan,
+            )
 
             result = admin_module.apply_admin_transfer(plan.config_file, target)
 
@@ -1196,6 +1476,21 @@ class AdminRootLifecycleTests(unittest.TestCase):
             self.assertEqual(config["broker_uid"], target.uid)
             self.assertEqual(config["monitor_uid"], target.uid)
             self.assertFalse((plan.config_file.parent / "transfer.json").exists())
+            broker_unit = (unit_directory / "gpubk-broker.service").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(f"User={target.uid}", broker_unit)
+            self.assertIn(f"Group={target.primary_gid}", broker_unit)
+
+            removal_plan, inspection = inspect_admin_system_services(
+                plan.config_file,
+                operation="uninstall",
+            )
+            self.assertEqual(inspection["status"], "ready")
+            apply_admin_system_services_uninstall(
+                plan.config_file,
+                service_plan=removal_plan,
+            )
 
             uninstall = apply_admin_uninstall(
                 plan.config_file,

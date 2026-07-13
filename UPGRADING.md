@@ -15,11 +15,14 @@ upgrade touches only `/opt/gpubk`.
 
 ```bash
 /opt/gpubk/bin/bk --version
+sudo systemctl stop gpubk-broker.service gpubk-monitor.service
 sudo /opt/gpubk/bin/python -m pip install --upgrade 'gpubk[gpu]'
+sudo /opt/gpubk/bin/bk admin services install --yes
+sudo systemctl daemon-reload
+sudo systemctl start gpubk-broker.service gpubk-monitor.service
 /opt/gpubk/bin/bk --version
 /opt/gpubk/bin/bk broker --check
-# Restart the broker and monitor with the server's process manager here.
-/opt/gpubk/bin/bk doctor --probe --strict
+/opt/gpubk/bin/bk doctor --probe --require-monitor --strict
 ```
 
 Keep the same extras used during installation (`gpu`, `mcp`, or `all`). Do not
@@ -31,23 +34,29 @@ sudo /opt/gpubk/bin/python -m pip install 'gpubk[gpu]==PREVIOUS_VERSION'
 ```
 
 Then restart and verify again. The root-owned install manifest, configuration,
-reservations, audit log, and usage history remain in place throughout. Reinstall
-bundled monitor and worker user units with `bk service install KIND --force`
-when release notes say their templates changed.
+reservations, audit log, and usage history remain in place throughout. Running
+`bk admin services install --yes` after the package update refreshes tracked
+system units only when their current checksums still match the manifest. Per-user
+worker units remain separate and can be refreshed with
+`bk service install worker --force` when release notes require it.
 
 To change the account that runs the broker and monitor, do not copy the ledger or
 edit numeric UIDs by hand. Stop both processes and use the recoverable ownership
 transaction:
 
 ```bash
+sudo systemctl stop gpubk-broker.service gpubk-monitor.service
 sudo bk admin transfer NEWUSER --dry-run
 sudo bk admin transfer NEWUSER --yes
+sudo systemctl daemon-reload
+sudo systemctl start gpubk-broker.service gpubk-monitor.service
 ```
 
 If it was interrupted, leave `transfer.json` in place and run
 `sudo bk admin transfer --recover --yes`. The transfer preserves reservation
 owners and history; only the trusted service identity and managed filesystem
-ownership change.
+ownership change. If system units are tracked, their numeric `User=` and `Group=`
+values change in the same recoverable transaction.
 
 ## Before upgrading a shared server
 

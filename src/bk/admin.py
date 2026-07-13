@@ -20,6 +20,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional, Sequence
 
+from .admin_services import (
+    PHASE_INSTALLED,
+    SystemServicesPlan,
+    apply_installed_system_services,
+    apply_system_services_install,
+    apply_system_services_uninstall,
+    enabled_unit_links,
+    inspect_system_service_files,
+    plan_system_services_install,
+    plan_system_services_uninstall,
+    retarget_system_services_document,
+    validate_system_services_document,
+)
 from .config import (
     BROKER_ALL_SOCKET_MODE,
     BROKER_DIR_MODE,
@@ -35,6 +48,7 @@ from .fileio import fsync_directory, open_existing_regular
 from .gpu import detect_gpu_count, snapshot
 from .granularity import DEFAULT_SLOT_MINUTES, validate_slot_minutes
 from .models import BookingError
+from .systemd import DEFAULT_SYSTEM_UNIT_DIR, system_unit_names
 
 
 ADMIN_SCHEMA_VERSION = "gpubk.admin.v1"
@@ -205,7 +219,9 @@ class AdminTransferPlan:
 def run_admin_cli(argv: Sequence[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="bk admin",
-        description="Initialize, transfer, or safely remove a shared GPUbk server.",
+        description=(
+            "Initialize, supervise, transfer, or safely remove a shared GPUbk server."
+        ),
     )
     commands = parser.add_subparsers(dest="action", required=True)
     init_parser = commands.add_parser(
@@ -294,8 +310,54 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         "--dry-run", action="store_true", help="show the plan only"
     )
     uninstall_parser.add_argument("--json", action="store_true")
+    services_parser = commands.add_parser(
+        "services",
+        help="install, inspect, or remove tracked system-level services",
+    )
+    service_commands = services_parser.add_subparsers(
+        dest="service_action", required=True
+    )
+    services_install = service_commands.add_parser(
+        "install",
+        help="install boot-persistent broker and monitor units",
+    )
+    services_install.add_argument(
+        "--config-file", type=Path, default=SYSTEM_CONFIG_FILE
+    )
+    services_install.add_argument(
+        "--python-executable",
+        type=Path,
+        help="absolute interpreter path (default: current interpreter, then tracked path)",
+    )
+    services_install.add_argument(
+        "--force",
+        action="store_true",
+        help="replace reviewed pre-existing unit files and restore them on uninstall",
+    )
+    services_install.add_argument("--yes", action="store_true")
+    services_install.add_argument("--dry-run", action="store_true")
+    services_install.add_argument("--json", action="store_true")
+    services_status = service_commands.add_parser(
+        "status", help="inspect tracked system-level service files"
+    )
+    services_status.add_argument(
+        "--config-file", type=Path, default=SYSTEM_CONFIG_FILE
+    )
+    services_status.add_argument("--json", action="store_true")
+    services_uninstall = service_commands.add_parser(
+        "uninstall",
+        help="restore or remove tracked system-level service files",
+    )
+    services_uninstall.add_argument(
+        "--config-file", type=Path, default=SYSTEM_CONFIG_FILE
+    )
+    services_uninstall.add_argument("--yes", action="store_true")
+    services_uninstall.add_argument("--dry-run", action="store_true")
+    services_uninstall.add_argument("--json", action="store_true")
     args = parser.parse_args(list(argv))
 
+    if args.action == "services":
+        return _run_admin_services(args)
     if args.action == "uninstall":
         return _run_admin_uninstall(args)
     if args.action == "transfer":
@@ -357,10 +419,378 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         print(f"initialized data:   {plan.data_dir}")
         print("ready: local users with the bk command can make reservations")
         print(
-            f"next: start 'bk broker' as {plan.service.username}, then run "
-            "'bk doctor --probe --strict' as a normal user"
+            "next: install boot services with "
+            "'sudo bk admin services install --yes', or test in the foreground with "
+            f"'bk broker' as {plan.service.username}"
         )
     return 0
+
+
+def _run_admin_services(args: argparse.Namespace) -> int:
+    config_file = _absolute_path(args.config_file)
+    operation = args.service_action
+    if operation == "status":
+        _, inspection = inspect_admin_system_services(
+            config_file,
+            operation="status",
+            expected_owner=0,
+        )
+        _print_admin_services_inspection(inspection, json_output=args.json)
+        return 0 if not inspection["blockers"] else 1
+
+    service_plan, inspection = inspect_admin_system_services(
+        config_file,
+        operation=operation,
+        python_executable=getattr(args, "python_executable", None),
+        force=bool(getattr(args, "force", False)),
+        expected_owner=0,
+    )
+    if not args.json:
+        _print_admin_services_inspection(inspection, json_output=False)
+    if args.dry_run:
+        if args.json:
+            print(json.dumps(inspection, ensure_ascii=False, sort_keys=True))
+        return 0 if not inspection["blockers"] else 1
+    if inspection["blockers"]:
+        raise BookingError("; ".join(inspection["blockers"]))
+    if args.json and not args.yes:
+        print(json.dumps(inspection, ensure_ascii=False, sort_keys=True))
+    prompt = (
+        "Install tracked GPUbk system services? [y/N]: "
+        if operation == "install"
+        else "Restore or remove tracked GPUbk system services? [y/N]: "
+    )
+    message = f"pass --yes to apply this system service {operation} plan"
+    if not _confirm_admin_action(args, prompt, message):
+        return 1
+    if operation == "install":
+        result = apply_admin_system_services_install(
+            config_file,
+            service_plan=service_plan,
+        )
+    else:
+        result = apply_admin_system_services_uninstall(
+            config_file,
+            service_plan=service_plan,
+        )
+    if args.json:
+        print(
+            json.dumps(
+                {"status": result["status"], "inspection": inspection, "result": result},
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+    elif operation == "install":
+        print("installed: gpubk-broker.service and gpubk-monitor.service")
+        print("next: sudo systemctl daemon-reload")
+        print(
+            "next: sudo systemctl enable --now "
+            "gpubk-broker.service gpubk-monitor.service"
+        )
+        print("verify: bk doctor --probe --require-monitor --strict")
+    else:
+        print("removed: tracked GPUbk system service files")
+        print("next: sudo systemctl daemon-reload")
+    return 0
+
+
+def inspect_admin_system_services(
+    config_file: Path,
+    *,
+    operation: str,
+    python_executable: Optional[Path] = None,
+    unit_directory: Path = DEFAULT_SYSTEM_UNIT_DIR,
+    force: bool = False,
+    expected_owner: int = 0,
+) -> tuple[Optional[SystemServicesPlan], dict]:
+    if operation not in {"install", "status", "uninstall"}:
+        raise BookingError(f"unknown system service operation: {operation}")
+    config_file = _absolute_path(config_file)
+    manifest, document = _load_admin_services_manifest(
+        config_file,
+        expected_owner=expected_owner,
+    )
+    data_dir = _manifest_absolute_path(manifest, "data_dir")
+    broker_socket = _manifest_absolute_path(manifest, "broker_socket")
+    service_uid = _manifest_nonnegative_int(manifest, "service_uid")
+    service_gid = _manifest_nonnegative_int(manifest, "service_gid")
+    existing = manifest.get("system_services")
+
+    if operation == "status":
+        if existing is None:
+            return None, {
+                "schema_version": ADMIN_SCHEMA_VERSION,
+                "kind": "admin-system-services",
+                "operation": "status",
+                "status": "not-installed",
+                "config_file": str(config_file),
+                "units": {},
+                "enabled_links": [],
+                "blockers": [],
+            }
+        services = _validated_manifest_system_services(
+            manifest,
+            document,
+            expected_owner=expected_owner,
+            require_installed=False,
+        )
+        statuses, blockers = inspect_system_service_files(services)
+        links = enabled_unit_links(services)
+        return None, {
+            "schema_version": ADMIN_SCHEMA_VERSION,
+            "kind": "admin-system-services",
+            "operation": "status",
+            "status": "blocked" if blockers else services["phase"],
+            "config_file": str(config_file),
+            "unit_directory": services["unit_directory"],
+            "python_executable": services["python_executable"],
+            "service_uid": services["service_uid"],
+            "service_gid": services["service_gid"],
+            "units": statuses,
+            "enabled_links": [str(path) for path in links],
+            "blockers": blockers,
+        }
+
+    if operation == "install":
+        service_plan = plan_system_services_install(
+            existing=existing,
+            config_file=config_file,
+            data_dir=data_dir,
+            socket_directory=broker_socket.parent,
+            service_uid=service_uid,
+            service_gid=service_gid,
+            unit_directory=unit_directory,
+            python_executable=python_executable,
+            expected_owner=expected_owner,
+            force=force,
+        )
+    else:
+        if existing is None:
+            raise BookingError("tracked system services are not installed")
+        _validated_manifest_system_services(
+            manifest,
+            document,
+            expected_owner=expected_owner,
+            require_installed=False,
+        )
+        service_plan = plan_system_services_uninstall(existing)
+
+    inspection = service_plan.public_document()
+    blockers = list(inspection["blockers"])
+    socket_state = _broker_socket_state(broker_socket, service_uid=service_uid)
+    allowed_owner_pairs = {(service_uid, service_gid)}
+    usage_lock = _probe_admin_lock(data_dir / "usage.lock", allowed_owner_pairs)
+    ledger_lock = _probe_admin_lock(data_dir / "ledger.lock", allowed_owner_pairs)
+    if socket_state == "active":
+        blockers.append("broker is running; stop it before changing system services")
+    if usage_lock == "active":
+        blockers.append("monitor is running; stop it before changing system services")
+    if operation == "uninstall" and ledger_lock == "active":
+        blockers.append("a ledger transaction is active; retry after it finishes")
+    links = enabled_unit_links(service_plan.document)
+    if operation == "uninstall" and links:
+        blockers.append(
+            "system services are still enabled; run: sudo systemctl disable --now "
+            + " ".join(system_unit_names())
+        )
+    inspection.update(
+        {
+            "config_file": str(config_file),
+            "socket_state": socket_state,
+            "usage_lock": usage_lock,
+            "ledger_lock": ledger_lock,
+            "enabled_links": [str(path) for path in links],
+            "blockers": blockers,
+            "status": "blocked" if blockers else "ready",
+        }
+    )
+    return service_plan, inspection
+
+
+def apply_admin_system_services_install(
+    config_file: Path,
+    *,
+    service_plan: Optional[SystemServicesPlan] = None,
+    python_executable: Optional[Path] = None,
+    unit_directory: Path = DEFAULT_SYSTEM_UNIT_DIR,
+    force: bool = False,
+    require_root: bool = True,
+) -> dict:
+    if require_root and os.geteuid() != 0:
+        raise BookingError(
+            "system service installation must run as root; use sudo bk admin services install"
+        )
+    expected_owner = 0 if require_root else os.geteuid()
+    config_file = _absolute_path(config_file)
+    if service_plan is None:
+        service_plan, inspection = inspect_admin_system_services(
+            config_file,
+            operation="install",
+            python_executable=python_executable,
+            unit_directory=unit_directory,
+            force=force,
+            expected_owner=expected_owner,
+        )
+        if inspection["blockers"]:
+            raise BookingError("; ".join(inspection["blockers"]))
+    if service_plan is None:
+        raise BookingError("system service installation plan is missing")
+    manifest_path = _manifest_path(config_file)
+    manifest = _read_manifest(manifest_path, expected_owner=expected_owner)
+    pending_manifest = {**manifest, "system_services": service_plan.document}
+    _write_manifest(manifest_path, pending_manifest, replace=True)
+    finalized = apply_system_services_install(
+        service_plan.document,
+        expected_owner=expected_owner,
+    )
+    _write_manifest(
+        manifest_path,
+        {**pending_manifest, "system_services": finalized},
+        replace=True,
+    )
+    return {
+        "status": "installed",
+        "unit_directory": finalized["unit_directory"],
+        "units": list(system_unit_names()),
+        "service_uid": finalized["service_uid"],
+        "service_gid": finalized["service_gid"],
+        "enabled": False,
+    }
+
+
+def apply_admin_system_services_uninstall(
+    config_file: Path,
+    *,
+    service_plan: Optional[SystemServicesPlan] = None,
+    require_root: bool = True,
+) -> dict:
+    if require_root and os.geteuid() != 0:
+        raise BookingError(
+            "system service removal must run as root; use sudo bk admin services uninstall"
+        )
+    expected_owner = 0 if require_root else os.geteuid()
+    config_file = _absolute_path(config_file)
+    if service_plan is None:
+        service_plan, inspection = inspect_admin_system_services(
+            config_file,
+            operation="uninstall",
+            expected_owner=expected_owner,
+        )
+        if inspection["blockers"]:
+            raise BookingError("; ".join(inspection["blockers"]))
+    if service_plan is None:
+        raise BookingError("system service removal plan is missing")
+    manifest_path = _manifest_path(config_file)
+    manifest = _read_manifest(manifest_path, expected_owner=expected_owner)
+    pending_manifest = {**manifest, "system_services": service_plan.document}
+    _write_manifest(manifest_path, pending_manifest, replace=True)
+    apply_system_services_uninstall(
+        service_plan.document,
+        expected_owner=expected_owner,
+    )
+    final_manifest = dict(pending_manifest)
+    final_manifest.pop("system_services", None)
+    _write_manifest(manifest_path, final_manifest, replace=True)
+    return {
+        "status": "uninstalled",
+        "unit_directory": service_plan.document["unit_directory"],
+        "units": list(system_unit_names()),
+        "restored_preexisting_units": any(
+            service_plan.document["files"][name]["before"]["exists"]
+            for name in system_unit_names()
+        ),
+    }
+
+
+def _load_admin_services_manifest(
+    config_file: Path,
+    *,
+    expected_owner: int,
+) -> tuple[dict, dict]:
+    if os.path.lexists(_transfer_journal_path(config_file)):
+        raise BookingError(
+            "an interrupted service-account transfer requires recovery before changing services"
+        )
+    manifest = _read_manifest(
+        _manifest_path(config_file),
+        expected_owner=expected_owner,
+    )
+    if manifest.get("admin_uid") != expected_owner:
+        raise BookingError("install manifest administrator UID does not match")
+    if manifest.get("config_file") != str(config_file):
+        raise BookingError("install manifest belongs to another configuration")
+    payload = _read_owned_regular_payload(
+        config_file,
+        expected_owner,
+        CONFIG_FILE_MODE,
+    )
+    if _sha256(payload) != manifest.get("config_sha256"):
+        raise BookingError("trusted configuration does not match the install manifest")
+    try:
+        document = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise BookingError(f"trusted configuration is invalid JSON: {config_file}") from exc
+    if not isinstance(document, dict):
+        raise BookingError("trusted configuration must contain a JSON object")
+    data_dir = _manifest_absolute_path(manifest, "data_dir")
+    broker_socket = _manifest_absolute_path(manifest, "broker_socket")
+    service_uid = _manifest_nonnegative_int(manifest, "service_uid")
+    if document.get("data_dir") != str(data_dir):
+        raise BookingError("trusted configuration data_dir does not match the manifest")
+    if document.get("broker_socket") != str(broker_socket):
+        raise BookingError("trusted broker socket does not match the manifest")
+    if document.get("broker_uid") != service_uid or document.get("monitor_uid") != service_uid:
+        raise BookingError("trusted service UID does not match the install manifest")
+    return manifest, document
+
+
+def _validated_manifest_system_services(
+    manifest: dict,
+    config_document: dict,
+    *,
+    expected_owner: int,
+    require_installed: bool,
+) -> dict:
+    services = validate_system_services_document(manifest.get("system_services"))
+    expected = {
+        "config_file": manifest["config_file"],
+        "data_dir": manifest["data_dir"],
+        "socket_directory": str(Path(manifest["broker_socket"]).parent),
+        "service_uid": manifest["service_uid"],
+        "service_gid": manifest["service_gid"],
+    }
+    for key, value in expected.items():
+        if services[key] != value:
+            raise BookingError(f"tracked system service {key} does not match the install manifest")
+    if config_document.get("broker_uid") != services["service_uid"]:
+        raise BookingError("tracked system service UID does not match trusted configuration")
+    if require_installed and services["phase"] != PHASE_INSTALLED:
+        raise BookingError(
+            "system service lifecycle is incomplete; finish it before this operation"
+        )
+    directory = Path(services["unit_directory"])
+    metadata = directory.lstat()
+    if metadata.st_uid != expected_owner:
+        raise BookingError("system unit directory ownership drifted")
+    return services
+
+
+def _print_admin_services_inspection(inspection: dict, *, json_output: bool) -> None:
+    if json_output:
+        print(json.dumps(inspection, ensure_ascii=False, sort_keys=True))
+        return
+    print("GPUbk system services")
+    print(f"  operation:  {inspection['operation']}")
+    print(f"  status:     {inspection['status']}")
+    if inspection.get("unit_directory"):
+        print(f"  directory:  {inspection['unit_directory']}")
+    if inspection.get("python_executable"):
+        print(f"  python:     {inspection['python_executable']}")
+    for name, status in inspection.get("units", {}).items():
+        print(f"  unit:       {name} ({status})")
+    for blocker in inspection.get("blockers", []):
+        print(f"  blocked:    {blocker}")
 
 
 def _run_admin_uninstall(args: argparse.Namespace) -> int:
@@ -466,6 +896,13 @@ def _run_admin_transfer(args: argparse.Namespace) -> int:
                 f"{result['service_username']} (UID {result['service_uid']})"
             )
             print("preserved: reservations, user UIDs, audit logs, and usage history")
+        if result.get("system_services_updated"):
+            print("next: sudo systemctl daemon-reload")
+            print(
+                "next: sudo systemctl start "
+                "gpubk-broker.service gpubk-monitor.service"
+            )
+        else:
             print(
                 f"next: start 'bk broker' as {result['service_username']}, then run "
                 "'bk doctor --probe --strict'"
@@ -548,6 +985,20 @@ def inspect_admin_uninstall(
                 "managed configuration changed after initialization; "
                 "review it before uninstalling"
             )
+    system_services_present = manifest.get("system_services") is not None
+    if system_services_present:
+        if current_config is None:
+            raise BookingError("trusted configuration is missing while system services are tracked")
+        try:
+            current_document = json.loads(current_config)
+        except json.JSONDecodeError as exc:
+            raise BookingError("trusted configuration is invalid JSON") from exc
+        _validated_manifest_system_services(
+            manifest,
+            current_document,
+            expected_owner=expected_owner,
+            require_installed=False,
+        )
 
     data_dir = _manifest_absolute_path(manifest, "data_dir")
     broker_socket = _manifest_absolute_path(manifest, "broker_socket")
@@ -607,6 +1058,11 @@ def inspect_admin_uninstall(
         )
 
     blockers = []
+    if system_services_present:
+        blockers.append(
+            "tracked system services must be removed first; run: "
+            "sudo bk admin services uninstall --yes"
+        )
     if socket_state == "active":
         blockers.append("broker is running; stop it before uninstalling")
     if usage_lock == "active":
@@ -652,6 +1108,7 @@ def inspect_admin_uninstall(
         "socket_state": socket_state,
         "usage_lock": usage_lock,
         "ledger_lock": ledger_lock,
+        "system_services_present": system_services_present,
         "actions": actions,
         "blockers": blockers,
     }
@@ -842,6 +1299,7 @@ def recover_admin_transfer(
         "service_uid": old_pair[0],
         "service_gid": old_pair[1],
         "service_username": plan.current_service.username,
+        "system_services_updated": plan.manifest.get("system_services") is not None,
         "accounts_changed": False,
     }
 
@@ -916,6 +1374,18 @@ def _load_admin_transfer_plan(
             raise BookingError(
                 f"target account {target.username} is not in broker group GID "
                 f"{broker_gid}; add it before transferring"
+            )
+    if manifest.get("system_services") is not None:
+        services = _validated_manifest_system_services(
+            manifest,
+            document,
+            expected_owner=expected_owner,
+            require_installed=True,
+        )
+        statuses, blockers = inspect_system_service_files(services)
+        if blockers or any(value != "managed" for value in statuses.values()):
+            raise BookingError(
+                "tracked system services must be fully installed and unchanged before transfer"
             )
     return AdminTransferPlan(
         config_file=config_file,
@@ -1060,6 +1530,13 @@ def _transfer_plan_from_journal(journal: dict) -> AdminTransferPlan:
         != broker_socket_mode
     ):
         raise BookingError("transfer journal prior broker socket mode is inconsistent")
+    if manifest.get("system_services") is not None:
+        _validated_manifest_system_services(
+            manifest,
+            config_document,
+            expected_owner=admin_uid,
+            require_installed=True,
+        )
     return AdminTransferPlan(
         config_file=config_file,
         data_dir=data_dir,
@@ -1148,6 +1625,11 @@ def inspect_admin_transfer(
                 f"transfer managed data ownership to "
                 f"{plan.target_service.uid}:{plan.target_service.primary_gid}",
                 "update trusted broker_uid and monitor_uid",
+                *(
+                    ["update tracked systemd units to the target UID and GID"]
+                    if plan.manifest.get("system_services") is not None
+                    else []
+                ),
                 "update the root-only install manifest",
             ],
         }
@@ -1198,6 +1680,15 @@ def apply_admin_transfer(
     new_config["broker_uid"] = target.uid
     new_config["monitor_uid"] = target.uid
     new_config_payload = _config_payload(new_config)
+    old_system_services = plan.manifest.get("system_services")
+    new_system_services = None
+    if old_system_services is not None:
+        new_system_services = retarget_system_services_document(
+            old_system_services,
+            service_uid=new_pair[0],
+            service_gid=new_pair[1],
+            expected_owner=expected_owner,
+        )
     history = plan.manifest.get("service_transfers", [])
     if not isinstance(history, list):
         raise BookingError("install manifest service transfer history is invalid")
@@ -1216,6 +1707,8 @@ def apply_admin_transfer(
         "previous_config_sha256": None,
         "service_transfers": [*history[-31:], transfer_event],
     }
+    if new_system_services is not None:
+        new_manifest["system_services"] = new_system_services
     journal_path = _transfer_journal_path(plan.config_file)
     journal = _build_transfer_journal(
         plan,
@@ -1246,6 +1739,12 @@ def apply_admin_transfer(
                     expected_mode=BROKER_SOCKET_DIRECTORY_MODE,
                     require_directory=True,
                 )
+                if new_system_services is not None:
+                    apply_installed_system_services(
+                        new_system_services,
+                        allowed_current=[old_system_services],
+                        expected_owner=expected_owner,
+                    )
                 _write_new_file(
                     plan.config_file,
                     new_config_payload,
@@ -1286,6 +1785,7 @@ def apply_admin_transfer(
         "config_file": str(plan.config_file),
         "data_dir": str(plan.data_dir),
         "reservations_rewritten": False,
+        "system_services_updated": new_system_services is not None,
         "accounts_changed": False,
     }
 
@@ -1742,6 +2242,23 @@ def _rollback_admin_transfer(
         )
     except BaseException as exc:
         errors.append(f"socket ownership: {exc}")
+    try:
+        old_services = plan.manifest.get("system_services")
+        if old_services is not None:
+            expected_owner = _manifest_nonnegative_int(plan.manifest, "admin_uid")
+            transferred_services = retarget_system_services_document(
+                old_services,
+                service_uid=plan.target_service.uid,
+                service_gid=plan.target_service.primary_gid,
+                expected_owner=expected_owner,
+            )
+            apply_installed_system_services(
+                old_services,
+                allowed_current=[transferred_services],
+                expected_owner=expected_owner,
+            )
+    except BaseException as exc:
+        errors.append(f"system services: {exc}")
     try:
         _restore_transfer_snapshot(plan.config_file, journal.get("config_before"))
     except BaseException as exc:
@@ -2443,7 +2960,7 @@ def _build_plan(
         enabled=interactive and args.slot_minutes is None,
     )
     max_shared_users = _ask_int(
-        "Shared capacity units per GPU",
+        "Maximum shared slots per GPU",
         args.max_shared_users if args.max_shared_users is not None else 2,
         minimum=1,
         maximum=MAX_SHARED_UNITS,
@@ -2838,7 +3355,7 @@ def _print_plan(plan: AdminInitPlan, inspection: AdminInspection) -> None:
     print(f"  data:       {plan.data_dir}")
     print(f"  config:     {plan.config_file}")
     print(f"  time slice: {plan.slot_minutes} minutes")
-    print(f"  sharing:    {plan.max_shared_users} capacity units per GPU")
+    print(f"  sharing:    max {plan.max_shared_users} slots per GPU")
     print(f"  service:    {plan.service.username} (UID {plan.service.uid})")
     print(f"  socket:     {plan.broker_socket} mode={plan.broker_socket_mode:04o}")
     print(

@@ -4,6 +4,8 @@ import runpy
 import unittest
 from pathlib import Path
 
+from bk.systemd import system_unit_text
+
 
 ROOT = Path(__file__).resolve().parents[1]
 ACTION_REF = re.compile(r"^\s*-\s+uses:\s+([^\s@]+)@([^\s#]+)")
@@ -72,6 +74,9 @@ class ReleaseConfigurationTests(unittest.TestCase):
             self.assertIn("/opt/gpubk", text)
             self.assertIn("bk admin transfer NEWUSER --dry-run", text)
             self.assertIn("bk admin transfer --recover --yes", text)
+            self.assertIn("bk admin services install --yes", text)
+            self.assertIn("gpubk-broker.service", text)
+            self.assertIn("gpubk-monitor.service", text)
             self.assertIn("bk admin uninstall --dry-run --purge-data", text)
             self.assertIn("0644", text)
             self.assertIn("0755", text)
@@ -79,6 +84,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("account owns the ledger", security)
         self.assertIn("SO_PEERCRED", security)
         self.assertIn("bk admin transfer", security)
+        self.assertIn("bk admin services", security)
         self.assertNotIn("defaults to open cooperative access", security)
 
     def test_telemetry_contract_is_packaged_and_linked(self):
@@ -122,6 +128,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("monitor_uid", guide)
         self.assertIn("pip install --upgrade 'gpubk[gpu]'", guide)
         self.assertIn("bk admin transfer NEWUSER --dry-run", guide)
+        self.assertIn("bk admin services install --yes", guide)
         self.assertIn("Do not run a 0.1 worker", guide)
 
     def test_bundled_monitor_unit_defers_timing_to_trusted_config(self):
@@ -145,6 +152,30 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("TimeoutStopSec=75", unit)
         self.assertIn("StartLimitIntervalSec=60", unit)
         self.assertIn("StartLimitBurst=3", unit)
+
+    def test_bundled_system_units_are_non_root_and_boot_persistent(self):
+        directory = ROOT / "src" / "bk" / "data" / "systemd" / "system"
+        broker = (directory / "gpubk-broker.service").read_text(encoding="utf-8")
+        monitor = (directory / "gpubk-monitor.service").read_text(encoding="utf-8")
+
+        for unit in (broker, monitor):
+            self.assertIn("User=@SERVICE_UID@", unit)
+            self.assertIn("Group=@SERVICE_GID@", unit)
+            self.assertIn("ProtectSystem=strict", unit)
+            self.assertIn("NoNewPrivileges=true", unit)
+            self.assertIn("WantedBy=multi-user.target", unit)
+            self.assertNotIn("User=root", unit)
+        rendered_broker = system_unit_text(
+            "broker",
+            python_executable="/opt/gpubk/bin/python",
+            config_file=Path("/var/lib/gpubk/config.json"),
+            service_uid=1000,
+            service_gid=1000,
+            data_dir=Path("/var/lib/gpubk"),
+            socket_directory=Path("/run/gpubk"),
+        )
+        self.assertIn("RuntimeDirectoryPreserve=yes", rendered_broker)
+        self.assertIn("Wants=gpubk-broker.service", monitor)
 
     def test_prerelease_targets_a_documented_final_version(self):
         init = (ROOT / "src" / "bk" / "__init__.py").read_text(encoding="utf-8")
@@ -194,6 +225,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("python -m pip install '.[gpu]'", workflow)
         self.assertIn("nvmlDeviceGetProcessUtilization", workflow)
         self.assertIn("Verify scheduled-command wheel flow", workflow)
+        self.assertIn('"bk/tutorial.py"', workflow)
+        self.assertIn("GPUbk tutorial 1/", workflow)
         self.assertIn("service uninstall worker --target-dir", workflow)
         self.assertIn('"BK_WORKER_LIVE_GUARD": "0"', workflow)
         self.assertIn('stored["job"]["status"] != "succeeded"', workflow)

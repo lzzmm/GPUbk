@@ -8,9 +8,9 @@ audit-tail response uses `schema_version: "gpubk.audit.v1"`; worker liveness use
 
 ```bash
 bk agent context --compact
-bk agent recommend COUNT DURATION [--mode s|x] [--start ISO] [--gpu 0,1] [--mem 12g] [--share 1/2] --compact
-bk COUNT DURATION [--mem 12g] [--share 1/2] --op-id ID --json
-bk agent edit RESERVATION --duration 2h [--share 1/2] --op-id ID --compact
+bk agent recommend COUNT DURATION [--mode s|x] [--start ISO] [--gpu 0,1] [--mem 12g] [--share SLOTS] --compact
+bk COUNT DURATION [--mem 12g] [--share SLOTS] --op-id ID --json
+bk agent edit RESERVATION --duration 2h [--share SLOTS] --op-id ID --compact
 bk agent cancel RESERVATION --compact
 bk l --json
 bk j --json
@@ -47,7 +47,7 @@ Recommendation fields:
   active policy and is also not current.
 - `gpu_details`: live status, predicted recent load, reservation pressure, physical free VRAM, and projected reservation headroom.
 - `nearest_available`: suggestion only when an exact request is unavailable.
-- `share_units_per_gpu` and `share_fraction_per_gpu`: admission capacity requested on each GPU. Context policy supplies `shared_capacity_units_per_gpu`. Missing fields on legacy reservations mean one unit.
+- `share_units_per_gpu` and `share_capacity_units_per_gpu`: integer admission slots requested and available on each GPU. Missing request fields on legacy reservations mean one slot.
 - `warnings`: incomplete history, live-busy device, memory assumption, or allocator fallback.
 - Scheduled job objects may include `launch_guard_state=waiting`, `waiting_since`, and a
   privacy-safe `message`; exit status `3` from `bk worker --once` means due work is waiting for
@@ -102,7 +102,7 @@ only to terminal private job logs.
 matching `events` in chronological order, and a nullable `warning`. It reads backward with bounded
 memory, scans at most 64 MiB, skips malformed records, and never accepts a UID argument.
 
-`share` accepts whole units, an exactly representable fraction, or a percentage. `share_with=N` reserves all but `N` minimum units. These values control scheduling admission and inferred VRAM, not hardware-enforced compute bandwidth. Explicit `expected_memory` remains the actual per-GPU estimate and is not multiplied by share units.
+`share` accepts only an integer from 1 through `shared_capacity_units_per_gpu`. It controls scheduling admission and inferred VRAM, not hardware-enforced compute bandwidth. Explicit `expected_memory` remains the actual per-GPU estimate and is not multiplied by share slots.
 
 ## MCP Tools
 

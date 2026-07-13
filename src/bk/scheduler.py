@@ -817,8 +817,8 @@ def _availability_detail_indexed(
             return (
                 False,
                 f"shared capacity full on GPU {gpu} "
-                f"(need {share_units}/{max_shared_users}, projected "
-                f"{used_units + share_units}/{max_shared_users})",
+                f"(request {share_units} slot(s), currently used {used_units}, "
+                f"projected {used_units + share_units}, maximum {max_shared_users})",
             )
         capacity = (gpu_memory_capacity_mb or {}).get(gpu)
         if capacity:
@@ -1383,7 +1383,7 @@ def _normalize_expected_memory(value: Optional[int]) -> Optional[int]:
 def _request_share_units(mode: str, value: Optional[int], capacity_units: int) -> int:
     if mode == MODE_EXCLUSIVE:
         if value is not None:
-            raise BookingError("share units apply only to shared reservations")
+            raise BookingError("shared slots apply only to shared reservations")
         return capacity_units
     try:
         return normalize_share_units(value, capacity_units)

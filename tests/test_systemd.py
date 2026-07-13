@@ -7,15 +7,90 @@ from bk.config import Config
 from bk.models import BookingError
 from bk.systemd import (
     MANAGED_UNIT_MARKER,
+    SYSTEM_MANAGED_UNIT_MARKER,
     default_user_unit_dir,
     install_user_unit,
     service_environment,
+    system_unit_names,
+    system_unit_text,
     uninstall_user_unit,
     unit_text,
 )
 
 
 class BundledSystemdTests(unittest.TestCase):
+    def test_system_units_run_as_configured_non_root_owner_and_are_hardened(self):
+        common = {
+            "service_uid": 1001,
+            "service_gid": 1002,
+            "config_file": Path("/etc/gpubk/config.json"),
+            "data_dir": Path("/var/lib/gpubk"),
+            "socket_directory": Path("/run/gpubk"),
+            "python_executable": Path("/opt/gpubk/bin/python"),
+        }
+
+        broker = system_unit_text("broker", **common)
+        monitor = system_unit_text("monitor", **common)
+
+        self.assertEqual(
+            system_unit_names(),
+            ("gpubk-broker.service", "gpubk-monitor.service"),
+        )
+        for rendered in (broker, monitor):
+            self.assertTrue(rendered.startswith(SYSTEM_MANAGED_UNIT_MARKER))
+            self.assertIn("User=1001", rendered)
+            self.assertIn("Group=1002", rendered)
+            self.assertIn('Environment="BK_CONFIG_FILE=/etc/gpubk/config.json"', rendered)
+            self.assertIn('WorkingDirectory="/var/lib/gpubk"', rendered)
+            self.assertIn('ReadWritePaths="/var/lib/gpubk" "/run/gpubk"', rendered)
+            self.assertIn("NoNewPrivileges=true", rendered)
+            self.assertIn("ProtectSystem=strict", rendered)
+            self.assertIn("WantedBy=multi-user.target", rendered)
+            self.assertNotIn("User=root", rendered)
+            self.assertNotIn("@SERVICE_UID@", rendered)
+        self.assertIn(
+            'ExecStartPre="/opt/gpubk/bin/python" -m bk broker --check', broker
+        )
+        self.assertIn('ExecStart="/opt/gpubk/bin/python" -m bk broker', broker)
+        self.assertIn("RuntimeDirectory=gpubk", broker)
+        self.assertIn('ExecStart="/opt/gpubk/bin/python" -m bk monitor', monitor)
+        self.assertNotIn("RuntimeDirectory=", monitor)
+
+    def test_system_broker_creates_nested_run_directory_but_not_persistent_path(self):
+        common = {
+            "service_uid": 1001,
+            "service_gid": 1001,
+            "config_file": Path("/etc/gpubk/config.json"),
+            "data_dir": Path("/srv/gpubk"),
+            "python_executable": Path("/opt/gpubk/bin/python"),
+        }
+
+        volatile = system_unit_text(
+            "broker", socket_directory=Path("/run/lab/gpubk"), **common
+        )
+        persistent = system_unit_text(
+            "broker", socket_directory=Path("/srv/gpubk/run"), **common
+        )
+
+        self.assertIn("RuntimeDirectory=lab/gpubk", volatile)
+        self.assertNotIn("RuntimeDirectory=", persistent)
+
+    def test_system_unit_rejects_root_identity_and_relative_paths(self):
+        common = {
+            "service_uid": 1001,
+            "service_gid": 1001,
+            "config_file": Path("/etc/gpubk/config.json"),
+            "data_dir": Path("/var/lib/gpubk"),
+            "socket_directory": Path("/run/gpubk"),
+            "python_executable": Path("/opt/gpubk/bin/python"),
+        }
+        with self.assertRaisesRegex(BookingError, "positive integer"):
+            system_unit_text("broker", **{**common, "service_uid": 0})
+        with self.assertRaisesRegex(BookingError, "must be absolute"):
+            system_unit_text(
+                "broker", **{**common, "python_executable": Path("python3")}
+            )
+
     def test_units_are_bundled_and_remain_user_scoped(self):
         python = Path("/opt/bk venv/bin/python")
         environment = {"BK_DATA_DIR": "/data2/shared/bk", "PYTHONUNBUFFERED": "1"}

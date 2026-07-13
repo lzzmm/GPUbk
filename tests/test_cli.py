@@ -412,7 +412,6 @@ class CliTests(unittest.TestCase):
             user_input = "\n".join(
                 [
                     "",       # shared
-                    "",       # default shared capacity
                     "many",   # invalid GPU count
                     "1",
                     "7m",     # invalid duration
@@ -420,6 +419,7 @@ class CliTests(unittest.TestCase):
                     "hwo",    # invalid start
                     "now",
                     "",       # automatic GPUs
+                    "",       # default shared slot request
                     "",       # automatic VRAM estimate
                     "",       # no command
                     "",       # confirm
@@ -445,6 +445,7 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("cancelled", result.stdout)
+            self.assertNotIn("Traceback", result.stderr)
             self.assertFalse((Path(tmp) / "ledger.json").exists())
 
     def test_guided_add_eof_cancels_cleanly(self):
@@ -453,7 +454,35 @@ class CliTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("cancelled", result.stdout)
-            self.assertNotIn("Traceback", result.stderr)
+
+    def test_guided_add_reports_max_used_and_requested_shared_slots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            start = iso(ceil_5m(datetime.now(timezone.utc) + timedelta(days=1)))
+            existing = self.run_bk(
+                ["1", "30m", "--gpu", "0", "--start", start],
+                data_dir,
+            )
+            user_input = "\n".join(
+                [
+                    "",       # shared
+                    "1",      # one GPU
+                    "30m",
+                    start,
+                    "0",      # exact GPU
+                    "cancel", # stop at the slot prompt
+                    "",
+                ]
+            )
+
+            guided = self.run_bk_with_input(["add"], data_dir, user_input)
+
+            self.assertEqual(existing.returncode, 0, existing.stderr)
+            self.assertEqual(guided.returncode, 0, guided.stderr)
+            self.assertIn("max 2; used G0=1; request 1-2", guided.stdout)
+            self.assertIn("cancelled", guided.stdout)
+            ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(ledger["reservations"]), 1)
 
     def test_exclusive_command_uses_exclusive_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -572,7 +601,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertIn("shared-capacity", result.stdout)
             self.assertIn("count=3", result.stdout)
-            self.assertIn("units=3/2", result.stdout)
+            self.assertIn("used=3 max=2", result.stdout)
             self.assertIn("left", result.stdout)
             self.assertIn("right", result.stdout)
             self.assertIn("third", result.stdout)
@@ -1517,13 +1546,13 @@ class CliTests(unittest.TestCase):
             user_input = "\n".join(
                 [
                     "",      # keep mode
-                    "",      # keep share
                     "7m",    # invalid duration
                     "45m",
                     "hwo",   # invalid start
                     "",      # keep start
                     "",      # keep GPUs
                     "",      # keep count
+                    "",      # keep shared slot request
                     "",      # keep memory
                     "",      # do not queue
                     "",      # confirm
@@ -1545,13 +1574,13 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(duration, timedelta(minutes=45))
 
-    def test_weighted_share_and_share_with_use_the_same_capacity(self):
+    def test_integer_shared_slots_use_one_capacity_model(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
             env = {"BK_MAX_SHARED_USERS": "4"}
 
             weighted = self.run_bk(
-                ["1", "30m", "--gpu", "0", "--share", "3/4", "-q"],
+                ["1", "30m", "--gpu", "0", "--share", "3", "-q"],
                 data_dir,
                 env,
             )
@@ -1561,8 +1590,8 @@ class CliTests(unittest.TestCase):
             self.assertEqual(weighted.returncode, 0, weighted.stderr)
             self.assertEqual(remaining.returncode, 0, remaining.stderr)
             self.assertEqual(queued.returncode, 0, queued.stderr)
-            self.assertIn("share=3/4", weighted.stdout)
-            self.assertIn("share=1/4", remaining.stdout)
+            self.assertIn("share=3 slots (max 4)", weighted.stdout)
+            self.assertIn("share=1 slot (max 4)", remaining.stdout)
             self.assertIn("queued:", queued.stdout)
             ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
             self.assertEqual([item["share_units"] for item in ledger["reservations"]], [3, 1, 1])
@@ -1572,16 +1601,16 @@ class CliTests(unittest.TestCase):
             )
             self.assertEqual(ledger["reservations"][0]["end_at"], ledger["reservations"][2]["start_at"])
 
-        with tempfile.TemporaryDirectory() as tmp:
-            result = self.run_bk(
-                ["1", "30m", "--share-with", "1", "--json"],
-                Path(tmp),
-                {"BK_MAX_SHARED_USERS": "4"},
+            payload_result = self.run_bk(
+                ["1", "30m", "--share", "3", "--json"],
+                Path(tmp) / "json",
+                env,
             )
-            self.assertEqual(result.returncode, 0, result.stderr)
-            payload = json.loads(result.stdout)
+            self.assertEqual(payload_result.returncode, 0, payload_result.stderr)
+            payload = json.loads(payload_result.stdout)
             self.assertEqual(payload["reservation"]["share_units_per_gpu"], 3)
-            self.assertEqual(payload["reservation"]["share_fraction_per_gpu"], "3/4")
+            self.assertEqual(payload["reservation"]["share_capacity_units_per_gpu"], 4)
+            self.assertNotIn("share_fraction_per_gpu", payload["reservation"])
 
     def test_direct_edit_can_change_shared_capacity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1592,25 +1621,25 @@ class CliTests(unittest.TestCase):
                 data_dir,
                 env,
             )
-            edited = self.run_bk(["e", "1", "--share", "3/4"], data_dir, env)
+            edited = self.run_bk(["e", "1", "--share", "3"], data_dir, env)
 
             self.assertEqual(created.returncode, 0, created.stderr)
             self.assertEqual(edited.returncode, 0, edited.stderr)
-            self.assertIn("share=3/4", edited.stdout)
+            self.assertIn("share=3 slots (max 4)", edited.stdout)
             reservation = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))["reservations"][0]
             self.assertEqual(reservation["share_units"], 3)
 
     def test_slots_preserves_share_in_copyable_booking_command(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_bk(
-                ["slots", "1", "30m", "--share-with", "1", "--limit", "1"],
+                ["slots", "1", "30m", "--share", "3", "--limit", "1"],
                 Path(tmp),
                 {"BK_MAX_SHARED_USERS": "4"},
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("share 3/4", result.stdout)
-            self.assertIn("--share 3/4", result.stdout)
+            self.assertIn("share 3 slots (max 4)", result.stdout)
+            self.assertIn("--share 3", result.stdout)
 
     def test_status_is_compact_and_timeline_is_a_separate_aligned_view(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1635,12 +1664,12 @@ class CliTests(unittest.TestCase):
             data_dir = Path(tmp)
             env = {"BK_MAX_SHARED_USERS": "4"}
             first = self.run_bk(
-                ["1", "30m", "--start", "2030-01-01T00:00:00Z", "--share", "3/4"],
+                ["1", "30m", "--start", "2030-01-01T00:00:00Z", "--share", "3"],
                 data_dir,
                 env,
             )
             second = self.run_bk(
-                ["1", "30m", "--start", "2030-01-01T00:00:00Z", "--share", "1/4"],
+                ["1", "30m", "--start", "2030-01-01T00:00:00Z", "--share", "1"],
                 data_dir,
                 env,
             )
@@ -1909,6 +1938,8 @@ class CliTests(unittest.TestCase):
             result = self.run_bk(["--help"], Path(tmp), {"COLUMNS": "72"})
 
             self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("START HERE\n", result.stdout)
+            self.assertIn("bk tutorial", result.stdout)
             self.assertIn("BOOK\n", result.stdout)
             self.assertIn("VIEW\n", result.stdout)
             self.assertIn("bk 2 1h", result.stdout)
@@ -1922,6 +1953,7 @@ class CliTests(unittest.TestCase):
             cases = (
                 (["add", "--help"], "usage: bk add", "mode [s shared"),
                 (["tui", "--help"], "usage: bk tui", "GPUbk TUI fallback"),
+                (["tutorial", "--help"], "usage: bk tutorial", "GPUbk tutorial 1/"),
                 (["mcp", "--help"], "usage: bk mcp", "MCP server requires"),
                 (["usage", "--help"], "usage: bk usage", "usage: bk usage me"),
                 (["book", "--help"], "usage: bk book", "Unknown command"),
@@ -1935,6 +1967,23 @@ class CliTests(unittest.TestCase):
                     self.assertIn(expected, result.stdout)
                     self.assertNotIn(forbidden, result.stdout + result.stderr)
             self.assertFalse(data_dir.exists())
+
+    def test_tutorial_is_replayable_and_does_not_create_a_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            result = self.run_bk(
+                ["tutorial"],
+                data_dir,
+                {"XDG_STATE_HOME": str(root / "state")},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("GPUbk tutorial 1/", result.stdout)
+            self.assertIn("bk 1 30m", result.stdout)
+            self.assertIn("bk tutorial --tui", result.stdout)
+            self.assertNotIn("\x1b[", result.stdout)
+            self.assertFalse((data_dir / "ledger.json").exists())
 
     def test_launch_only_commands_reject_unexpected_arguments(self):
         with tempfile.TemporaryDirectory() as tmp:

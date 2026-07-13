@@ -38,6 +38,7 @@ Verify the installation:
 ```bash
 bk --version
 bk --help
+bk tutorial
 ```
 
 That is enough for a private installation: run `bk` immediately. A shared
@@ -56,6 +57,34 @@ Some older Debian/Ubuntu pip builds ignore the isolated setuptools requested by
 `pyproject.toml` and silently create an unusable `UNKNOWN` package. GPUbk detects
 that condition and fails with an upgrade hint instead.
 
+## First Five Minutes
+
+The tutorial is read-only: it explains commands using the active server policy
+but never creates or changes a reservation.
+
+```bash
+bk tutorial          # replayable, line-oriented walkthrough
+bk tutorial --tui    # visual timeline and keyboard tour
+```
+
+The first plain `bk` prompt prints one short tutorial hint. The first `bk t`
+launch opens the TUI tour automatically. These two reminders are recorded only
+in the current user's `XDG_STATE_HOME` (normally `~/.local/state/bk`); they do
+not touch the shared ledger and do not affect other users. Both tours remain
+available after the reminders have been dismissed.
+
+A normal first session is:
+
+```bash
+bk slots 1 30m       # preview choices, no write
+bk 1 30m             # book the earliest suitable shared GPU
+bk st                # check live state
+bk l                 # list your reservations
+bk e 1               # guided edit with input recovery
+bk d 1               # cancel by list number or short ID
+bk t                 # use the visual timeline
+```
+
 ## Book GPUs
 
 Shared mode is the default:
@@ -64,8 +93,7 @@ Shared mode is the default:
 bk 1 30m                         # one GPU for 30 minutes
 bk book 1 30m                    # equivalent explicit command form
 bk 2 1h30m --mem 12g            # 12 GiB expected VRAM per GPU
-bk 1 1h --share 1/2             # reserve half of the shared capacity
-bk 1 1h --share-with 1          # leave room for at most one minimum-share booking
+bk 1 1h --share 2               # request two integer shared slots per GPU
 bk s 1 2h --gpu 3               # explicit shared mode on GPU 3
 bk x 2 4h                        # exclusive mode
 bk 1 1h --at +30m                # human-friendly relative time
@@ -100,11 +128,10 @@ Scheduling rules are intentionally small:
 - An exact new booking may use the current slice boundary or a future boundary. An
   earlier historical slice is rejected; retrying an already-applied operation ID still
   returns the original reservation.
-- Each GPU has `max_shared_users` capacity units. A shared booking uses one unit
-  by default; `--share 3/4`, `--share 3`, and an exact percentage select a
-  larger portion. `--share-with 1` reserves all but one unit. Capacity is checked
-  independently in every overlapping booking interval.
-- Share units control admission and inferred VRAM, not hardware-enforced SM
+- Each GPU has `max_shared_users` integer shared slots. A shared booking uses one
+  slot by default; `--share 3` requests three slots on every selected GPU.
+  Capacity is checked independently in every overlapping booking interval.
+- Shared slots control admission and inferred VRAM, not hardware-enforced SM
   bandwidth. Use MIG/MPS or device controls when physical partitioning is required.
 - Exclusive reservations cannot overlap anything.
 - `--mem` is expected VRAM **per GPU**. Administrators can require it for all
@@ -160,6 +187,7 @@ first option.
 ```bash
 bk
 bk t
+bk tutorial --tui
 ```
 
 Useful TUI keys:
@@ -177,7 +205,7 @@ Useful TUI keys:
 | `Shift` + adjustment | Use a larger step when the terminal reports it |
 | `1`-`9` | Pick a GPU count and jump to the nearest valid slot |
 | `s`, `x` | Switch between shared and exclusive in Add/Edit |
-| `u` | Set shared capacity as units, a fraction, or a percentage |
+| `u` | Set the integer shared slots requested per GPU |
 | `f`, `g` | Find any suitable GPUs, or keep the selected GPUs fixed |
 | `n` | Return to the live `NOW` window |
 | `c` | Toggle the dark/light theme |
@@ -447,7 +475,7 @@ Agents should use the versioned JSON interface instead of parsing terminal text:
 ```bash
 bk agent context --compact
 bk agent recommend 2 1h30m --mem 12g --compact
-bk 2 1h30m --mem 12g --share 1/2 --op-id run-20260712-001 --json
+bk 2 1h30m --mem 12g --share 2 --op-id run-20260712-001 --json
 bk agent edit 6e957ef1 --duration 2h --op-id edit-20260712-001 --compact
 bk agent cancel 6e957ef1 --compact
 ```
@@ -499,13 +527,18 @@ sudo /opt/gpubk/bin/python -m pip install --upgrade pip
 sudo /opt/gpubk/bin/python -m pip install 'gpubk[gpu]'
 sudo ln -s /opt/gpubk/bin/bk /usr/local/bin/bk
 sudo bk admin init --yes
+sudo bk admin services install --yes
+sudo systemctl daemon-reload
+sudo systemctl enable --now gpubk-broker.service gpubk-monitor.service
+bk doctor --probe --require-monitor --strict
 ```
 
 On Debian or Ubuntu, install `python3-venv` first if `venv` is unavailable. The
 initializer detects the GPUs and uses the account that invoked `sudo` as the
 broker and monitor owner. It creates the same production paths used by a normal
 deployment: `/etc/gpubk`, `/var/lib/gpubk`, and `/run/gpubk`. It does not create
-an account or a group.
+an account or a group. The tracked system units start at boot, run under that
+non-root UID, and keep writable access limited to the data and socket directories.
 
 By default every local account can connect to the Unix socket and use `bk`, but
 only the selected owner can write the ledger files. Ordinary users cannot edit
@@ -530,7 +563,8 @@ users can inspect scheduling state, but only the broker can mutate it. The
 broker authenticates each local connection from kernel peer credentials, not a
 client-supplied username or UID.
 
-Start the broker in a second terminal as the selected owner, without `sudo`:
+For a reversible foreground trial before enabling system services, start the
+broker in a second terminal as the selected owner, without `sudo`:
 
 ```bash
 bk broker --check
@@ -539,7 +573,7 @@ bk broker
 
 This foreground trial is not a simulation. It uses the real root-owned config,
 service-owned ledger, Unix socket, locking, GPU probes, and user identities.
-Only process supervision differs from a later background deployment. Do not pass
+Only process supervision differs from the systemd deployment. Do not pass
 `--gpu-count` on a GPU server unless you deliberately want simulated topology.
 
 Then, as an ordinary user:
@@ -553,41 +587,50 @@ bk t
 ```
 
 To hand operation to another existing local account, stop the broker and monitor,
-preview the transaction, then apply it:
+preview the transaction, apply it, then reload and restart the tracked units:
 
 ```bash
+sudo systemctl stop gpubk-broker.service gpubk-monitor.service
 sudo bk admin transfer NEWUSER --dry-run
 sudo bk admin transfer NEWUSER --yes
+sudo systemctl daemon-reload
+sudo systemctl start gpubk-broker.service gpubk-monitor.service
 ```
 
 The command takes broker, monitor, and ledger maintenance guards, changes managed
 ownership in place, and updates only `broker_uid` and `monitor_uid`. Reservation
 UIDs, bookings, audit events, usage history, and scheduling policy are not
-rewritten. A root-only recovery journal protects the operation; after an
-interrupted handoff run `sudo bk admin transfer --recover --yes`.
+rewritten. Tracked system units are updated to the new numeric UID and GID in the
+same transaction. A root-only recovery journal protects the operation; after an
+interrupted handoff run `sudo bk admin transfer --recover --yes`, reload systemd,
+and restart the units.
 
 Package upgrades do not rewrite configuration or data. Stop the broker and monitor,
 upgrade the isolated environment, restart the same processes, and verify:
 
 ```bash
+sudo systemctl stop gpubk-broker.service gpubk-monitor.service
 sudo /opt/gpubk/bin/python -m pip install --upgrade 'gpubk[gpu]'
+sudo bk admin services install --yes
+sudo systemctl daemon-reload
+sudo systemctl start gpubk-broker.service gpubk-monitor.service
 bk --version
 bk broker --check
-# Restart the broker and monitor with your process manager.
-bk doctor --probe --strict
+bk doctor --probe --require-monitor --strict
 ```
 
 See [UPGRADING.md](UPGRADING.md) for service restart, rollback, and release-specific
 checks.
 
-Stop the foreground broker with `Ctrl+C` before uninstalling. Preview first;
-non-empty data is never deleted without the explicit purge flag:
+Stop and disable the tracked services before uninstalling. GPUbk verifies each
+unit against its root-only manifest, restores any reviewed pre-existing unit,
+and refuses drift. Non-empty data is never deleted without the explicit purge
+flag:
 
 ```bash
-# If this account installed the optional monitor unit:
-systemctl --user disable --now bk-monitor.service
-bk service uninstall monitor
-systemctl --user daemon-reload
+sudo systemctl disable --now gpubk-monitor.service gpubk-broker.service
+sudo bk admin services uninstall --yes
+sudo systemctl daemon-reload
 
 sudo bk admin uninstall --dry-run --purge-data
 sudo bk admin uninstall --purge-data --yes
@@ -604,6 +647,11 @@ isolated Python environment; pre-existing files and directories recorded by the
 install manifest are restored. Each user who installed a worker unit can remove
 it in the same way with `systemctl --user disable --now bk-worker.service` and
 `bk service uninstall worker`.
+
+`bk admin services status` reports the tracked interpreter, UID/GID, unit file
+state, and remaining enable links. GPUbk writes unit files but leaves
+`systemctl enable`, `start`, `stop`, and `disable` visible in the deployment
+steps so an administrator can see exactly when a persistent process changes.
 
 ### Configuration and production notes
 
@@ -690,8 +738,8 @@ ledger. Do not retry with altered limits; inspect `bk config`, repair the truste
 configuration, reinstall captured service settings if necessary, then restart.
 
 `max_shared_users` is retained as the compatible configuration name; it now
-defines whole shared capacity units per GPU. Old reservations without a
-`share_units` field consume one unit.
+defines the integer shared-slot maximum per GPU. Old reservations without a
+`share_units` field consume one slot.
 
 `slot_minutes` controls booking start and duration granularity. It defaults to
 `5` and may be any divisor of one hour from 1 through 60. `BK_SLOT_MINUTES`
@@ -798,7 +846,7 @@ Booking and the TUI can run with simulated GPU count:
 
 ```bash
 BK_DATA_DIR=/tmp/gpubk-demo BK_GPU_COUNT=4 BK_MAX_SHARED_USERS=4 bk t
-BK_DATA_DIR=/tmp/gpubk-demo BK_GPU_COUNT=4 BK_MAX_SHARED_USERS=4 bk 1 30m --share 3/4
+BK_DATA_DIR=/tmp/gpubk-demo BK_GPU_COUNT=4 BK_MAX_SHARED_USERS=4 bk 1 30m --share 3
 ```
 
 The cards show unknown hardware metrics, but scheduling, shared capacity, the

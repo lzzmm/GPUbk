@@ -32,9 +32,10 @@ from .scheduler import (
     shared_capacity_units_for_gpu,
 )
 from .service import submit_cancellation
-from .sharing import parse_share_units, reservation_share_units, share_example, share_text
+from .sharing import parse_share_units, reservation_share_units, share_text
 from .storage import LedgerStore
 from .timeparse import format_local_range, parse_iso, parse_memory_mb, utc_now
+from .tutorial import TUI_TOUR, mark_onboarding_seen, onboarding_seen
 from .usage import ProcessUsage, classify_process_usage, summarize_process_command
 from .usage_store import UsageAuditStore
 from .worker_status import inspect_worker_status, reservations_need_worker
@@ -130,7 +131,7 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("Shift", "Larger step for movement, duration, and zoom"),
             ("v", "Cycle 1x, 6x, or 24x when Shift is not reported"),
             ("s / x", "Choose shared or exclusive mode"),
-            ("u", "Set shared capacity units or fraction"),
+            ("u", "Set the integer shared slots requested per GPU"),
             ("m", "Set expected VRAM per GPU, such as 12g"),
             ("r", "Reset Add defaults or restore original Edit values"),
             ("Enter / Esc", "Submit the exact preview or cancel"),
@@ -158,9 +159,10 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
     (
         "Quick Tour",
         (
+            ("bk tutorial", "Replay the safe CLI walkthrough anytime"),
             ("bk 2 1h", "Book two shared GPUs at best available time"),
             ("bk 1 1h --mem 12g", "Book shared capacity with expected VRAM"),
-            ("bk 1 1h --share 1/2", "Reserve half of the shared capacity"),
+            ("bk 1 1h --share 2", "Request two integer shared slots per GPU"),
             ("bk x 1 1h", "Book one GPU exclusively; x means exclusive"),
             ("bk tui", "Open this timeline"),
             ("a then 2", "Find earliest two-GPU slot; Enter confirms"),
@@ -171,6 +173,9 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("bk doctor", "Read-only policy and ledger diagnostics"),
         ),
     ),
+)
+QUICK_TOUR_PAGE = next(
+    index for index, (title, _entries) in enumerate(HELP_PAGES) if title == "Quick Tour"
 )
 
 
@@ -236,16 +241,38 @@ class AddPreview:
     share_capacity: int = 1
 
 
-def run_tui(config: Config, store: LedgerStore) -> int:
+def run_tui(
+    config: Config,
+    store: LedgerStore,
+    *,
+    show_tutorial: bool = False,
+) -> int:
+    first_tour = show_tutorial
+    if not first_tour:
+        try:
+            first_tour = not onboarding_seen(TUI_TOUR)
+        except (OSError, ValueError):
+            first_tour = False
     try:
-        return curses.wrapper(_run, config, store)
+        return curses.wrapper(_run, config, store, first_tour)
     except curses.error:
         _print_fallback(config, store)
         return 0
 
 
-def _run(stdscr, config: Config, store: LedgerStore) -> int:
+def _run(
+    stdscr,
+    config: Config,
+    store: LedgerStore,
+    show_tutorial: bool = False,
+) -> int:
     _init_curses(stdscr, config.tui_refresh_seconds)
+    if show_tutorial:
+        _help_dialog(stdscr, initial_page=QUICK_TOUR_PAGE, tutorial=True)
+        try:
+            mark_onboarding_seen(TUI_TOUR)
+        except (OSError, ValueError):
+            pass
     state = TuiState(
         booking_slot_minutes=config.slot_minutes,
         add_duration_steps=_default_editor_duration_steps(config.slot_minutes),
@@ -702,7 +729,7 @@ def _header_lines(
     wide_details = (
         f" data={config.data_dir} | M:{_collector_label(state.collector_status)} "
         f"| W:{_worker_label(state.worker_status)} "
-        f"| shared_capacity={config.max_shared_users} units/GPU "
+        f"| share_max={config.max_shared_users} slots/GPU "
         f"| refresh={config.tui_refresh_seconds:g}s | n NOW | q quit | ? help"
     )
     if width >= 100 and len(wide_title) < width and len(wide_details) < width:
@@ -716,7 +743,7 @@ def _header_lines(
         suffix = (
             f" | M:{_collector_label(state.collector_status)} "
             f"| W:{_worker_label(state.worker_status)} "
-            f"| cap={config.max_shared_users}u/GPU | "
+            f"| max={config.max_shared_users} slots | "
             f"{config.tui_refresh_seconds:g}s refresh | n NOW | ? help"
         )
         path_budget = max(1, width - len(" data=") - len(suffix) - 1)
@@ -813,7 +840,7 @@ def _draw_time_axis(
     _addstr(stdscr, row, 0, f"Date {_date_label(local_start)}".ljust(label_width), width, COLOR_MUTED)
     _addstr(stdscr, row + 1, 0, "Hour".ljust(label_width), width, COLOR_MUTED)
     _addstr(stdscr, row + 2, 0, "Minute".ljust(label_width), width, COLOR_MUTED)
-    _addstr(stdscr, row + 3, 0, " GPU Share Util Free".ljust(label_width), width, COLOR_MUTED)
+    _addstr(stdscr, row + 3, 0, " GPU Used Util Free".ljust(label_width), width, COLOR_MUTED)
     _addstr(stdscr, row, label_width, dates, width, COLOR_MUTED)
     _addstr(stdscr, row + 1, label_width, hours, width, COLOR_MUTED)
     _addstr(stdscr, row + 2, label_width, minutes, width, COLOR_MUTED)
@@ -862,7 +889,7 @@ def _editor_banner_text(
     if state.edit_mode and state.edit_reservation_id:
         operation += f" {state.edit_reservation_id[:id_width]}"
     mode = (
-        f"S{share_text(preview.share_units, preview.share_capacity)}"
+        f"S{preview.share_units}"
         if preview.mode == MODE_SHARED
         else "X"
     )
@@ -1544,12 +1571,13 @@ def _handle_add_key(
             state.message = "share capacity applies only to shared reservations"
             state.error = True
             return
-        default = share_text(state.add_share_units, config.max_shared_users)
+        default = str(state.add_share_units)
+        usage = _editor_shared_slot_usage(config, store, state)
         raw = _prompt_line(
             stdscr,
-            f"Share per GPU (1-{config.max_shared_users}, {share_example(config.max_shared_users)})",
+            f"Slots/GPU max={config.max_shared_users} {_editor_slot_usage_text(usage)} request=",
             default,
-            title="Shared capacity",
+            title="Shared slots",
         )
         if raw:
             try:
@@ -1558,7 +1586,10 @@ def _handle_add_key(
                 state.message = str(exc)
                 state.error = True
                 return
-        state.message = f"share per GPU: {share_text(state.add_share_units, config.max_shared_users)}"
+        state.message = (
+            f"shared request: {state.add_share_units} slot(s)/GPU; "
+            f"maximum {config.max_shared_users}"
+        )
         state.error = False
         return
     if key in (ord("r"), ord("R")):
@@ -1979,7 +2010,12 @@ def _prompt_line(stdscr, prompt: str, default: str = "", *, title: str = "Input"
     return values[0]
 
 
-def _help_dialog(stdscr, initial_page: int = 0) -> None:
+def _help_dialog(
+    stdscr,
+    initial_page: int = 0,
+    *,
+    tutorial: bool = False,
+) -> None:
     height, width = stdscr.getmaxyx()
     page = min(max(0, initial_page), len(HELP_PAGES) - 1)
     max_rows = max(len(entries) for _title, entries in HELP_PAGES)
@@ -1998,7 +2034,8 @@ def _help_dialog(stdscr, initial_page: int = 0) -> None:
             max(14, max((len(key) for key, _description in entries), default=0) + 2),
             max(14, win_width // 3),
         )
-        heading = f" GPUbk Help {page + 1}/{len(HELP_PAGES)}  {title} "
+        dialog_name = "Tutorial" if tutorial else "Help"
+        heading = f" GPUbk {dialog_name} {page + 1}/{len(HELP_PAGES)}  {title} "
         _win_addstr(win, 0, 2, heading, COLOR_HEADER, curses.A_BOLD)
         for offset, (key_label, description) in enumerate(entries):
             row = offset + 2
@@ -2009,7 +2046,7 @@ def _help_dialog(stdscr, initial_page: int = 0) -> None:
                 continue
             _win_addstr(win, row, 3, key_label, COLOR_PREVIEW_SHARED, curses.A_BOLD)
             _win_addstr(win, row, 3 + key_width, description, COLOR_MUTED)
-        footer = " Left/Right page   1-4 jump   q/Esc/? close "
+        footer = f" Left/Right page   1-{len(HELP_PAGES)} jump   q/Esc/? close "
         _win_addstr(win, win_height - 2, 2, footer, COLOR_HEADER, curses.A_BOLD)
         win.refresh()
         key = win.getch()
@@ -2157,6 +2194,57 @@ def _preview_status_text(preview: AddPreview, operation: str = "add") -> str:
     )
 
 
+def _editor_shared_slot_usage(
+    config: Config,
+    store: LedgerStore,
+    state: TuiState,
+) -> dict[int, int]:
+    view_start = _editor_view_start(state)
+    start = view_start + timedelta(
+        minutes=state.add_start_steps * state.booking_slot_minutes
+    )
+    end = start + timedelta(
+        minutes=state.add_duration_steps * state.booking_slot_minutes
+    )
+    active = [
+        item
+        for item in list_active(store.load())
+        if str(item.get("id")) != state.edit_reservation_id
+    ]
+    selected = state.add_selected_gpus or {state.add_cursor_gpu}
+    usage = {}
+    for gpu in sorted(selected):
+        overlapping = [
+            item
+            for item in active
+            if gpu in item.get("gpus", [])
+            and parse_iso(item["start_at"]) < end
+            and start < parse_iso(item["end_at"])
+        ]
+        if any(item.get("mode") == MODE_EXCLUSIVE for item in overlapping):
+            usage[gpu] = config.max_shared_users
+        else:
+            usage[gpu] = shared_capacity_units_for_gpu(
+                overlapping,
+                gpu,
+                start,
+                end,
+                config.max_shared_users,
+            )
+    return usage
+
+
+def _editor_slot_usage_text(usage: dict[int, int]) -> str:
+    if not usage:
+        return "used=0"
+    if len(usage) <= 4:
+        return "used=" + ",".join(
+            f"G{gpu}:{used}" for gpu, used in sorted(usage.items())
+        )
+    values = list(usage.values())
+    return f"used={min(values)}-{max(values)} on {len(values)} GPUs"
+
+
 def _memory_input_text(value: Optional[int]) -> str:
     if value is None:
         return ""
@@ -2195,8 +2283,8 @@ def _table_header(
     gpu_width = _reservation_gpu_width(width, gpu_count)
     gpu_header = "GPU"
     if width < 100:
-        return f"{'#':>3} {'ID':<{id_width}} {'User':<10} {'M':<1} {gpu_header:<{gpu_width}} {'Share':<5} {'Start':<11} {'End':<11} {'Dur':<7}"
-    return f"{'#':>3} {'ID':<{id_width}} {'User':<16} {'Mode':<4} {gpu_header:<{gpu_width}} {'Share':<5} {'Start':<11} {'End':<11} {'Dur':<7}"
+        return f"{'#':>3} {'ID':<{id_width}} {'User':<10} {'M':<1} {gpu_header:<{gpu_width}} {'Req':<5} {'Start':<11} {'End':<11} {'Dur':<7}"
+    return f"{'#':>3} {'ID':<{id_width}} {'User':<16} {'Mode':<4} {gpu_header:<{gpu_width}} {'Req':<5} {'Start':<11} {'End':<11} {'Dur':<7}"
 
 
 def _reservation_table_line(
@@ -2241,7 +2329,7 @@ def _reservation_gpu_width(width: int, gpu_count: int) -> int:
 def _capacity_text(reservation: dict, active: Sequence[dict], shared_limit: int) -> str:
     if reservation.get("mode") == MODE_EXCLUSIVE:
         return "-"
-    return share_text(reservation_share_units(reservation, shared_limit), shared_limit)
+    return str(reservation_share_units(reservation, shared_limit))
 
 
 def _reservation_color_map(
@@ -2444,7 +2532,7 @@ def _share_lane_label(
     suffix = f" +{hidden}" if hidden else ""
     units = reservation_share_units(reservation, shared_limit)
     return (
-        f"G{gpu} {share_text(units, shared_limit)} "
+        f"G{gpu} S{units} "
         f"{str(reservation.get('id', ''))[:id_width]} {username}{suffix}"
     )
 
@@ -2514,7 +2602,7 @@ def _gpu_label(
     exclusive: bool = False,
 ) -> str:
     gpu_field = _truncate(f"G{gpu.index}", 4)
-    capacity_field = _truncate("X" if exclusive else f"{peak_shared}/{shared_limit}", 5)
+    capacity_field = _truncate("X" if exclusive else str(peak_shared), 5)
     extras = [f"!{violations}"] if violations else []
     util = f"{gpu.utilization_percent}%" if gpu.utilization_percent is not None else "-"
     memory = "-"
@@ -2988,7 +3076,7 @@ def _win_addstr(win, row: int, col: int, text: str, color: int = 0, attr: int = 
 def _print_fallback(config: Config, store: LedgerStore) -> None:
     now = utc_now()
     print("GPUbk TUI fallback")
-    print(f"data={config.data_dir} shared_capacity={config.max_shared_users} units/GPU")
+    print(f"data={config.data_dir} shared_capacity={config.max_shared_users} slots/GPU")
     print("active reservations:")
     active = list_active(store.load(), now)
     id_width = _visible_id_width(active)

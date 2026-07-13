@@ -37,6 +37,8 @@ from bk.tui import (
     _duration_detail_text,
     _duration_text,
     _editor_banner_text,
+    _editor_shared_slot_usage,
+    _editor_slot_usage_text,
     _footer_label,
     _gpu_label,
     _gpu_row_label,
@@ -498,7 +500,49 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertTrue(valid.valid, valid.reason)
         self.assertEqual((valid.share_units, valid.share_capacity), (2, 4))
         self.assertFalse(blocked.valid)
-        self.assertIn("projected 5/4", blocked.reason)
+        self.assertIn("projected 5, maximum 4", blocked.reason)
+
+    def test_editor_slot_usage_reports_selected_gpus_and_excludes_edited_booking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config = Config(
+                data_dir=Path(tmp),
+                gpu_count=2,
+                max_shared_users=4,
+            )
+            store = LedgerStore(config.data_dir)
+            existing = add_booking(
+                store,
+                config,
+                BookingRequest(
+                    actor=Actor(1001, "alice"),
+                    count=1,
+                    duration_seconds=30 * 60,
+                    start_at=self.start,
+                    mode=MODE_SHARED,
+                    preferred_gpus=[0],
+                    allow_queue=False,
+                    share_units=2,
+                ),
+            ).reservation
+            state = TuiState(
+                add_mode=True,
+                editor_view_start=self.start,
+                add_start_steps=0,
+                add_duration_steps=6,
+                add_selected_gpus={0, 1},
+            )
+
+            usage = _editor_shared_slot_usage(config, store, state)
+            self.assertEqual(usage, {0: 2, 1: 0})
+            self.assertEqual(_editor_slot_usage_text(usage), "used=G0:2,G1:0")
+
+            state.add_mode = False
+            state.edit_mode = True
+            state.edit_reservation_id = existing["id"]
+            self.assertEqual(
+                _editor_shared_slot_usage(config, store, state),
+                {0: 0, 1: 0},
+            )
 
     def test_preview_rejects_a_start_before_the_current_five_minute_interval(self):
         now = datetime(2030, 1, 1, 17, 2, tzinfo=timezone.utc)
@@ -1055,7 +1099,7 @@ class TuiAddPreviewTests(unittest.TestCase):
             reservation("exclusive", os.getuid(), MODE_EXCLUSIVE, [1], self.start, self.end),
         ]
 
-        self.assertEqual(_capacity_text(active[0], active, 2), "1/2")
+        self.assertEqual(_capacity_text(active[0], active, 2), "1")
         self.assertEqual(_capacity_text(active[2], active, 2), "-")
 
     def test_two_shared_reservations_split_gpu_band_into_vertical_lanes(self):
@@ -1190,7 +1234,7 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertTrue(first[2] & curses.A_BLINK)
         self.assertEqual(second[:2], (BAR_CHAR, color_map["large"]))
         self.assertFalse(second[2] & curses.A_BLINK)
-        self.assertEqual(_capacity_text(large, active, 4), "3/4")
+        self.assertEqual(_capacity_text(large, active, 4), "3")
 
     def test_shared_weave_gives_each_reservation_equal_area_per_period(self):
         for count in (3, 4, 5, 6, 8):
@@ -1322,8 +1366,9 @@ class TuiAddPreviewTests(unittest.TestCase):
         narrow = _gpu_label(GpuSnapshot(index=0, name="unknown"), 20, peak_shared=4, shared_limit=4)
 
         self.assertIn("G0", label)
-        self.assertIn("4/4", label)
-        self.assertIn("4/4", narrow)
+        self.assertIn(" 4 ", label)
+        self.assertIn(" 4 ", narrow)
+        self.assertNotIn("of4", label)
         self.assertNotIn("unknown", label)
 
     def test_gpu_metric_columns_do_not_move_when_shared_capacity_changes(self):
@@ -1339,9 +1384,10 @@ class TuiAddPreviewTests(unittest.TestCase):
         idle = _gpu_label(gpu, 32, peak_shared=0, shared_limit=2)
         shared = _gpu_label(gpu, 32, peak_shared=2, shared_limit=2)
 
-        self.assertIn("0/2", idle)
-        self.assertIn("2/2", shared)
-        self.assertEqual(idle.index("0/2"), shared.index("2/2"))
+        self.assertIn(" 0 ", idle)
+        self.assertIn(" 2 ", shared)
+        self.assertEqual(idle.split()[1], "0")
+        self.assertEqual(shared.split()[1], "2")
         self.assertEqual(idle.index("72%"), shared.index("72%"))
         self.assertEqual(idle.index("92.0G"), shared.index("92.0G"))
 
@@ -1359,7 +1405,7 @@ class TuiAddPreviewTests(unittest.TestCase):
         exclusive = _gpu_label(gpu, 32, shared_limit=4, exclusive=True)
 
         self.assertIn("X", exclusive)
-        self.assertNotIn("0/4", exclusive)
+        self.assertNotIn("of4", exclusive)
         self.assertEqual(shared.index("72%"), exclusive.index("72%"))
         self.assertEqual(shared.index("92.0G"), exclusive.index("92.0G"))
 
@@ -1379,7 +1425,8 @@ class TuiAddPreviewTests(unittest.TestCase):
         label = _gpu_label(gpu, 32, peak_shared=2, shared_limit=4, violations=1)
 
         self.assertIn("!1", label)
-        self.assertIn("2/4", label)
+        self.assertIn(" 2 ", label)
+        self.assertNotIn("of4", label)
         self.assertIn("72%", label)
         self.assertIn("92.0G", label)
         self.assertIn("61C", label)

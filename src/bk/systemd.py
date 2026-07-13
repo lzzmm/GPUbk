@@ -20,8 +20,17 @@ UNITS = {
     "worker": "bk-worker.service",
 }
 MANAGED_UNIT_MARKER = "# Managed by GPUbk; remove with `bk service uninstall`.\n"
+SYSTEM_UNITS = {
+    "broker": "gpubk-broker.service",
+    "monitor": "gpubk-monitor.service",
+}
+SYSTEM_MANAGED_UNIT_MARKER = (
+    "# Managed by GPUbk; use `bk admin services` for lifecycle changes.\n"
+)
+DEFAULT_SYSTEM_UNIT_DIR = Path("/etc/systemd/system")
 
 _ENVIRONMENT_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+_TEMPLATE_MARKER = re.compile(r"@[A-Z][A-Z0-9_]*@")
 
 
 def default_user_unit_dir() -> Path:
@@ -48,6 +57,79 @@ def unit_text(
         "@PYTHON_EXECUTABLE@", _quote_systemd_argument(str(executable))
     ).replace("@SERVICE_ENVIRONMENT@", environment_text)
     return MANAGED_UNIT_MARKER + rendered
+
+
+def system_unit_text(
+    kind: str,
+    *,
+    service_uid: int,
+    service_gid: int,
+    config_file: Path,
+    data_dir: Path,
+    socket_directory: Path,
+    python_executable: Optional[Path] = None,
+) -> str:
+    filename = _system_unit_filename(kind)
+    if (
+        isinstance(service_uid, bool)
+        or not isinstance(service_uid, int)
+        or service_uid <= 0
+    ):
+        raise BookingError("system service UID must be a positive integer")
+    if (
+        isinstance(service_gid, bool)
+        or not isinstance(service_gid, int)
+        or service_gid < 0
+    ):
+        raise BookingError("system service GID must be a non-negative integer")
+    executable = _absolute_required_path(
+        Path(python_executable or sys.executable), "Python executable"
+    )
+    trusted_config = _absolute_required_path(config_file, "configuration")
+    state_directory = _absolute_required_path(data_dir, "data directory")
+    runtime_directory = _absolute_required_path(
+        socket_directory, "broker socket directory"
+    )
+    runtime_directives = ""
+    try:
+        runtime_relative = runtime_directory.relative_to("/run")
+    except ValueError:
+        pass
+    else:
+        if not runtime_relative.parts:
+            raise BookingError("broker socket directory cannot be /run itself")
+        runtime_name = "/".join(runtime_relative.parts)
+        runtime_directives = (
+            f"RuntimeDirectory={runtime_name}\n"
+            "RuntimeDirectoryMode=0755\n"
+            "RuntimeDirectoryPreserve=yes"
+        )
+    template = (
+        resources.files("bk")
+        .joinpath("data", "systemd", "system", filename)
+        .read_text(encoding="utf-8")
+    )
+    replacements = {
+        "@PYTHON_EXECUTABLE@": _quote_systemd_argument(str(executable)),
+        "@SERVICE_UID@": str(service_uid),
+        "@SERVICE_GID@": str(service_gid),
+        "@CONFIG_ENVIRONMENT@": _systemd_environment_line(
+            "BK_CONFIG_FILE", str(trusted_config)
+        ),
+        "@DATA_DIRECTORY@": _quote_systemd_argument(str(state_directory)),
+        "@SOCKET_DIRECTORY@": _quote_systemd_argument(str(runtime_directory)),
+        "@RUNTIME_DIRECTORY@": runtime_directives,
+    }
+    rendered = template
+    for marker, value in replacements.items():
+        rendered = rendered.replace(marker, value)
+    if _TEMPLATE_MARKER.search(rendered):
+        raise BookingError(f"unresolved systemd template marker in {filename}")
+    return SYSTEM_MANAGED_UNIT_MARKER + rendered
+
+
+def system_unit_names() -> tuple[str, ...]:
+    return tuple(SYSTEM_UNITS.values())
 
 
 def install_user_unit(
@@ -143,6 +225,23 @@ def _unit_filename(kind: str) -> str:
         return UNITS[kind]
     except KeyError as exc:
         raise BookingError(f"unknown service kind: {kind}") from exc
+
+
+def _system_unit_filename(kind: str) -> str:
+    try:
+        return SYSTEM_UNITS[kind]
+    except KeyError as exc:
+        raise BookingError(f"unknown system service kind: {kind}") from exc
+
+
+def _absolute_required_path(path: Path, label: str) -> Path:
+    expanded = path.expanduser()
+    if not expanded.is_absolute():
+        raise BookingError(f"{label} path for systemd must be absolute")
+    text = os.fspath(expanded)
+    if any(character in text for character in ("\x00", "\n", "\r")):
+        raise BookingError(f"invalid {label} path for systemd")
+    return Path(os.path.abspath(text))
 
 
 def _quote_systemd_argument(value: str) -> str:

@@ -21,8 +21,8 @@ Otherwise use the JSON CLI:
 
 ```bash
 bk agent context --compact
-bk agent recommend 2 1h30m --mode shared --mem 12g --share 1/2 --compact
-bk 2 1h30m --mem 12g --share 1/2 --op-id <stable-id> --json
+bk agent recommend 2 1h30m --mode shared --mem 12g --share 2 --compact
+bk 2 1h30m --mem 12g --share 2 --op-id <stable-id> --json
 bk agent edit <short-id> --duration 2h --op-id <stable-edit-id> --compact
 bk agent cancel <short-id> --compact
 bk log --limit 100 --json
@@ -33,8 +33,8 @@ Read [references/protocol.md](references/protocol.md) when implementing an integ
 ## Plan A Reservation
 
 1. Determine GPU count, duration, shared/exclusive mode, earliest or exact start, expected VRAM per GPU, and any requested shared capacity.
-2. For shared work, ask for expected VRAM and share intent when they materially affect placement. `share=3/4` reserves three capacity units on a four-unit server; `share_with=1` is the same asymmetric reservation. Two equal users should each request `1/2`.
-3. If expected VRAM is unknown, state that GPUbk derives it from the requested share. Share units constrain admission; they do not physically enforce GPU compute bandwidth without MIG/MPS.
+2. For shared work, ask for expected VRAM and an integer slot request when they materially affect placement. Read `shared_capacity_units_per_gpu`, report current use, and pass `share=3` to request three slots on a four-slot server.
+3. If expected VRAM is unknown, state that GPUbk derives it from the requested slots. Shared slots constrain admission; they do not physically enforce GPU compute bandwidth without MIG/MPS.
 4. Inspect context immediately before recommending. Current processes can change quickly.
 5. Run a read-only recommendation. Explain queued start, selected GPUs, confidence, live-busy warnings, and projected memory headroom.
 6. Treat explicit start as exact. It may use the active slice boundary or a future boundary,

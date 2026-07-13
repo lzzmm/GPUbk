@@ -92,9 +92,12 @@ jobs:
           with ZipFile(wheel) as archive:
               names = set(archive.namelist())
           required = {
+              "bk/tutorial.py",
               "bk/data/codex-skill/gpubk/SKILL.md",
               "bk/data/codex-skill/gpubk/agents/openai.yaml",
               "bk/data/codex-skill/gpubk/references/protocol.md",
+              "bk/data/systemd/system/gpubk-broker.service",
+              "bk/data/systemd/system/gpubk-monitor.service",
           }
           missing = required - names
           if missing:
@@ -105,6 +108,9 @@ jobs:
           python -m venv /tmp/bk-wheel-smoke
           /tmp/bk-wheel-smoke/bin/python -m pip install --no-deps dist/*.whl
           BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk --version
+          BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 XDG_STATE_HOME=/tmp/bk-wheel-state /tmp/bk-wheel-smoke/bin/bk tutorial > /tmp/bk-tutorial.txt
+          grep -- "GPUbk tutorial 1/" /tmp/bk-tutorial.txt
+          test ! -e /tmp/bk-wheel-data/ledger.json
           BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk agent context --compact > /tmp/bk-context.json
           /tmp/bk-wheel-smoke/bin/bk skill install --target /tmp/bk-wheel-skill
           /tmp/bk-wheel-smoke/bin/bk service show worker | grep -- "-m bk worker"
@@ -112,6 +118,22 @@ jobs:
           BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk service install worker --target-dir /tmp/bk-wheel-units
           BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk service uninstall worker --target-dir /tmp/bk-wheel-units
           test ! -e /tmp/bk-wheel-units/bk-worker.service
+          /tmp/bk-wheel-smoke/bin/python - <<'PY'
+          from pathlib import Path
+          from bk.systemd import system_unit_text
+
+          unit = system_unit_text(
+              "broker",
+              service_uid=1001,
+              service_gid=1001,
+              config_file=Path("/etc/gpubk/config.json"),
+              data_dir=Path("/var/lib/gpubk"),
+              socket_directory=Path("/run/gpubk"),
+              python_executable=Path("/opt/gpubk/bin/python"),
+          )
+          assert "User=1001" in unit
+          assert "RuntimeDirectory=gpubk" in unit
+          PY
       - name: Verify scheduled-command wheel flow
         run: |
           python - <<'PY'

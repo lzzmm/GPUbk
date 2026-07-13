@@ -70,7 +70,7 @@ Supported security boundaries:
   `CUDA_VISIBLE_DEVICES`, because NVML indices are not guaranteed to match CUDA ordinals.
   Missing identifiers fail closed on real NVML devices; disabling the guard explicitly accepts
   numeric-device compatibility risk.
-- Shared capacity units enforce ledger admission and inferred memory budgets only. They do
+- Integer shared slots enforce ledger admission and inferred memory budgets only. They do
   not enforce proportional SM time, memory isolation, or performance without MIG/MPS or
   another administrator-controlled GPU partitioning mechanism.
 - External allocators can advise ordering but cannot bypass deterministic validation.
@@ -122,6 +122,12 @@ Supported security boundaries:
   socket plus both writer locks, rejects links, hard links, special files, unknown top-level paths,
   owner or mode drift, and records root-only checksummed snapshots before changing ownership. A
   failed operation rolls back; an interrupted operation blocks uninstall until explicit recovery.
+- `bk admin services` tracks root-owned system unit snapshots in the install manifest. Unit
+  installation and removal are resumable, reject symlinks, hard links, owner/mode drift, and
+  checksum drift, and restore reviewed pre-existing files. The generated broker and monitor run
+  as the configured non-root UID with `NoNewPrivileges`, a read-only system view, and narrowly
+  declared writable data and socket paths. Enabling or disabling boot persistence remains an
+  explicit `systemctl` administrator action.
 
 Administrator responsibilities:
 
@@ -133,6 +139,9 @@ Administrator responsibilities:
   is the default and is fully supported; a dedicated non-login account is optional operational
   isolation. GPUbk never creates, deletes, or changes accounts, groups, or memberships. Use
   `bk admin transfer` instead of copying state or editing identity fields during a handoff.
+- Prefer the tracked system-level broker and monitor units on a shared server. User-level monitor
+  units and linger are suitable for private installations, but they are not part of the root-owned
+  shared-server handoff or uninstall transaction.
 - On a shared deployment, keep the system or external configuration in a root-owned
   directory such as `/etc/gpubk`, outside the service-owned ledger directory. Put one
   absolute `data_dir` in that file so every invocation resolves the same ledger. File mode

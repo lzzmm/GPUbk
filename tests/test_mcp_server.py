@@ -103,11 +103,12 @@ class McpBackendTests(unittest.TestCase):
         self.assertEqual(self.store.load()["reservations"], [])
 
     def test_weighted_share_is_available_to_mcp_clients(self):
-        first = self.backend.book(1, "30m", "mcp-weighted-1", gpus=[0], share="2")
+        first = self.backend.book(1, "30m", "mcp-weighted-1", gpus=[0], share=2)
         second = self.backend.book(1, "30m", "mcp-weighted-2", gpus=[0])
 
         self.assertEqual(first["reservation"]["share_units_per_gpu"], 2)
-        self.assertEqual(first["reservation"]["share_fraction_per_gpu"], "2/2")
+        self.assertEqual(first["reservation"]["share_capacity_units_per_gpu"], 2)
+        self.assertNotIn("share_fraction_per_gpu", first["reservation"])
         self.assertEqual(second["status"], "queued")
         self.assertNotEqual(
             first["reservation"]["start_at"], second["reservation"]["start_at"]
