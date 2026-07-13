@@ -4,6 +4,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Make the no-GPU demo portable to systems where `/tmp` is a symbolic link, while retaining the
+  fail-closed directory policy and reporting the rejected path clearly.
 - Exercise the real update path in every release build by creating a ledger with the latest public
   package, installing the candidate wheel over it, proving read-only compatibility, and performing
   a new weighted-capacity write.

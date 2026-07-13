@@ -140,7 +140,10 @@ class SecureFileIoTests(unittest.TestCase):
             target.mkdir()
             link.symlink_to(target, target_is_directory=True)
 
-            with self.assertRaises(NotADirectoryError):
+            with self.assertRaisesRegex(
+                NotADirectoryError,
+                "symbolic link in directory path.*use a canonical path",
+            ):
                 ensure_directory(link, 0o700)
 
     def test_directory_helper_rejects_mode_drift_when_required(self):

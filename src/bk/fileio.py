@@ -248,6 +248,12 @@ def _open_directory(path: Path) -> int:
 
 
 def _validate_directory_metadata(metadata: os.stat_result, path: Path) -> None:
+    if stat.S_ISLNK(metadata.st_mode):
+        raise NotADirectoryError(
+            errno.ENOTDIR,
+            f"refusing symbolic link in directory path: {path}; use a canonical path",
+            str(path),
+        )
     if not stat.S_ISDIR(metadata.st_mode):
         raise NotADirectoryError(
             errno.ENOTDIR,

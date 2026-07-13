@@ -896,12 +896,16 @@ recovery, private job specs, MCP isolation, and administrator responsibilities.
 Booking and the TUI can run with simulated GPU count:
 
 ```bash
-BK_DATA_DIR=/tmp/gpubk-demo BK_GPU_COUNT=4 BK_MAX_SHARED_USERS=4 bk t
-BK_DATA_DIR=/tmp/gpubk-demo BK_GPU_COUNT=4 BK_MAX_SHARED_USERS=4 bk 1 30m --share 3
+export BK_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gpubk-demo.XXXXXX")"
+export BK_GPU_COUNT=4 BK_MAX_SHARED_USERS=4
+bk t
+bk 1 30m --share 3
 ```
 
-The cards show unknown hardware metrics, but scheduling, shared capacity, the
-timeline, Add/Edit, logs, and Agent JSON remain usable.
+The private directory is created before GPUBK starts, so the example also works
+when an operating system exposes `/tmp` through a symbolic link. The cards show
+unknown hardware metrics, but scheduling, shared capacity, the timeline,
+Add/Edit, logs, and Agent JSON remain usable.
 
 ## Development
 
