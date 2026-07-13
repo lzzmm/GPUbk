@@ -149,6 +149,7 @@ class CliTests(unittest.TestCase):
                 7.5,
             )
             self.assertTrue(payload["effective"]["allocator_command_configured"])
+            self.assertIsNone(payload["effective"]["storage_gid"])
             self.assertNotIn("secret-value", result.stdout)
             self.assertEqual(payload["ledger_policy"]["status"], "unbound")
             self.assertIn("BK_SLOT_MINUTES", payload["environment_overrides"])
@@ -947,6 +948,52 @@ class CliTests(unittest.TestCase):
             self.assertIn("ledger-read", issue_types)
             self.assertFalse(payload["healthy"])
             self.assertEqual(target.read_bytes(), original)
+
+    def test_doctor_reports_configured_storage_gid_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "shared"
+            data_dir.mkdir(mode=0o700)
+            data_dir.chmod(0o2770)
+            actual_gid = data_dir.stat().st_gid
+            config_dir = root / "trusted"
+            config_dir.mkdir(mode=0o700)
+            config_path = config_dir / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "config_version": 1,
+                        "data_dir": str(data_dir),
+                        "gpu_count": 1,
+                        "file_mode": "0660",
+                        "dir_mode": "2770",
+                        "storage_gid": actual_gid + 1,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config_path.chmod(0o600)
+
+            result = self.run_bk(
+                ["doctor", "--json", "--strict"],
+                data_dir,
+                {"BK_CONFIG_FILE": str(config_path)},
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            payload = json.loads(result.stdout)
+            self.assertEqual(payload["storage_gid"], actual_gid + 1)
+            root_issues = [
+                item
+                for item in payload["storage_issues"]
+                if item.get("path") == str(data_dir)
+                and item["type"] in {"directory-gid", "usage-directory-gid"}
+            ]
+            self.assertEqual(len(root_issues), 1)
+            issue = root_issues[0]
+            self.assertEqual(issue["type"], "directory-gid")
+            self.assertEqual(issue["expected_gid"], actual_gid + 1)
+            self.assertEqual(issue["actual_gid"], actual_gid)
 
     def test_doctor_reports_hard_linked_ledger_without_reading_it(self):
         with tempfile.TemporaryDirectory() as tmp:

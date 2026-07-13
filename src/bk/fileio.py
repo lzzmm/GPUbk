@@ -145,13 +145,24 @@ def ensure_directory(
             os.close(fd)
 
 
-def setgid_directory_gid(path: Path, mode: int) -> int | None:
+def setgid_directory_gid(
+    path: Path,
+    mode: int,
+    *,
+    expected_gid: int | None = None,
+) -> int | None:
     if not mode & stat.S_ISGID:
         return None
     fd = _open_directory(path)
     try:
         metadata = os.fstat(fd)
         _validate_directory_fd(fd, path, expected_mode=mode)
+        if expected_gid is not None and metadata.st_gid != expected_gid:
+            raise PermissionError(
+                errno.EPERM,
+                f"refusing data directory with GID {metadata.st_gid}; "
+                f"expected configured storage_gid {expected_gid}: {path}",
+            )
         return metadata.st_gid
     finally:
         os.close(fd)

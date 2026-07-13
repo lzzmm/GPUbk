@@ -72,6 +72,7 @@ class AgentServiceTests(unittest.TestCase):
 
         self.assertEqual(context["schema_version"], AGENT_SCHEMA_VERSION)
         self.assertEqual(context["policy"]["granularity_minutes"], 5)
+        self.assertIsNone(context["policy"]["storage_gid"])
         self.assertTrue(context["policy"]["worker_live_guard"])
         self.assertEqual(context["gpu_advice"]["order"], [1, 0])
         self.assertEqual(context["gpu_advice"]["gpus"][1]["name"], "idle")

@@ -47,6 +47,7 @@ class BkMcpBackend:
             self.config.backup_keep,
             self.config.file_mode,
             self.config.dir_mode,
+            self.config.storage_gid,
         )
 
     @property

@@ -146,6 +146,7 @@ def _store(config: Config) -> UsageAuditStore:
         config.lock_timeout_seconds,
         config.file_mode,
         config.dir_mode,
+        config.storage_gid,
     )
 
 

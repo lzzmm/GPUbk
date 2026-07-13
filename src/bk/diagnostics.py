@@ -90,6 +90,14 @@ def _probe_data_directory(config: Config) -> dict:
                 expected_mode=f"{config.dir_mode:04o}",
                 actual_mode=f"{actual:04o}",
             )
+        if config.storage_gid is not None and metadata.st_gid != config.storage_gid:
+            return _result(
+                "data-directory",
+                "fail",
+                "directory GID does not match configured storage_gid",
+                expected_gid=config.storage_gid,
+                actual_gid=metadata.st_gid,
+            )
         if not os.access(config.data_dir, os.R_OK | os.W_OK | os.X_OK):
             return _result("data-directory", "fail", "current UID cannot read, write, and traverse")
         return _result(

@@ -131,6 +131,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             config.backup_keep,
             config.file_mode,
             config.dir_mode,
+            config.storage_gid,
         )
         if not argv:
             return _interactive_shell(config, store)
@@ -1156,7 +1157,9 @@ def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     )
     print(
         f"storage: data={effective['data_dir']} modes={effective['file_mode']}/"
-        f"{effective['dir_mode']} backups={effective['backup_keep']}"
+        f"{effective['dir_mode']} gid="
+        f"{effective['storage_gid'] if effective['storage_gid'] is not None else 'directory'} "
+        f"backups={effective['backup_keep']}"
     )
     print(
         f"worker: poll={effective['worker_poll_seconds']}s "
@@ -1226,6 +1229,7 @@ def _effective_config(config: Config) -> dict:
         "monitor_interval_seconds": config.monitor_interval_seconds,
         "monitor_rollup_seconds": config.monitor_rollup_seconds,
         "monitor_uid": config.monitor_uid,
+        "storage_gid": config.storage_gid,
         "tui_refresh_seconds": config.tui_refresh_seconds,
         "file_mode": f"{config.file_mode:04o}",
         "dir_mode": f"{config.dir_mode:04o}",
@@ -1952,6 +1956,7 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         config.lock_timeout_seconds,
         config.file_mode,
         config.dir_mode,
+        config.storage_gid,
     )
     storage_issues = []
     try:
@@ -1980,7 +1985,21 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         )
     else:
         try:
-            storage_issues.extend(usage_store.health_issues())
+            usage_issues = usage_store.health_issues()
+            root_gid_already_reported = any(
+                item.get("type") == "directory-gid"
+                and item.get("path") == str(store.data_dir)
+                for item in storage_issues
+            )
+            storage_issues.extend(
+                item
+                for item in usage_issues
+                if not (
+                    root_gid_already_reported
+                    and item.get("type") == "usage-directory-gid"
+                    and item.get("path") == str(store.data_dir)
+                )
+            )
         except Exception as exc:
             storage_issues.append(
                 {
@@ -2134,6 +2153,7 @@ def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         "configured_gpu_count": config.gpu_count,
         "booking_slot_minutes": config.slot_minutes,
         "monitor_uid": config.monitor_uid,
+        "storage_gid": config.storage_gid,
         "monitor_required": args.require_monitor,
         "collector": collector,
         "file_mode": f"{config.file_mode:04o}",
@@ -2229,6 +2249,7 @@ def _reset_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         config.lock_timeout_seconds,
         config.file_mode,
         config.dir_mode,
+        config.storage_gid,
     )
     with audit_store.lock():
         result = store.reset()

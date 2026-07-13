@@ -197,6 +197,12 @@ class SecureFileIoTests(unittest.TestCase):
             path.chmod(0o2770)
 
             self.assertEqual(setgid_directory_gid(path, 0o2770), path.stat().st_gid)
+            with self.assertRaisesRegex(PermissionError, "configured storage_gid"):
+                setgid_directory_gid(
+                    path,
+                    0o2770,
+                    expected_gid=path.stat().st_gid + 1,
+                )
             self.assertIsNone(setgid_directory_gid(path, 0o700))
 
     def test_directory_fsync_rejects_symbolic_link(self):

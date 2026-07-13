@@ -74,6 +74,7 @@ def build_gpu_advice(
             config.lock_timeout_seconds,
             config.file_mode,
             config.dir_mode,
+            config.storage_gid,
         ).load_load_history()
     live = assess_gpu_live_states(devices, config.gpu_count)
     historical = historical_gpu_loads(

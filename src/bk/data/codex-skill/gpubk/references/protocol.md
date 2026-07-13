@@ -22,7 +22,7 @@ bk usage samples --since 2d --resolution 5m --json --compact
 ```
 
 Omitting `--start` uses the active configured booking interval when possible, then permits earliest-slot queueing. Providing `--start` means exact placement at the active slice boundary or a future boundary; a new write to an older historical slice is rejected. Read `policy.granularity_minutes` from context instead of assuming five minutes. Human CLI users may use `--at`; Agents should keep using explicit ISO 8601 and structured fields.
-The ledger binds its scheduling and storage policy on first write. Agents must surface policy-mismatch errors instead of retrying with altered local limits.
+The ledger binds its scheduling and storage policy on first write. Enabling `storage_gid` later binds it on the next write; once bound, omission or replacement is a policy mismatch. Agents must surface policy-mismatch errors instead of retrying with altered local limits. Context `policy.storage_gid` is the optional trusted numeric group binding for shared storage. A GID mismatch is an operator repair condition, not a reason to retry with a different policy.
 
 Recommendation fields:
 

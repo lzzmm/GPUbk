@@ -137,12 +137,14 @@ class LedgerStore:
         backup_keep: int = 10,
         file_mode: int = 0o600,
         dir_mode: int = 0o700,
+        storage_gid: Optional[int] = None,
     ):
         self.data_dir = data_dir
         self.lock_timeout_seconds = lock_timeout_seconds
         self.backup_keep = backup_keep
         self.file_mode = file_mode
         self.dir_mode = dir_mode
+        self.storage_gid = storage_gid
         self.ledger_path = data_dir / "ledger.json"
         self.lock_path = data_dir / "ledger.lock"
         self.log_path = data_dir / "ops.log"
@@ -282,6 +284,16 @@ class LedgerStore:
                     "path": str(self.data_dir),
                     "expected": f"{self.dir_mode:04o}",
                     "actual": f"{actual:04o}",
+                }
+            )
+        if self.storage_gid is not None and metadata.st_gid != self.storage_gid:
+            issues.append(
+                {
+                    "type": "directory-gid",
+                    "path": str(self.data_dir),
+                    "expected_gid": self.storage_gid,
+                    "actual_gid": metadata.st_gid,
+                    "message": "data directory does not match configured storage_gid",
                 }
             )
         managed_gid = metadata.st_gid if self.dir_mode & stat.S_ISGID else None
@@ -530,7 +542,11 @@ class LedgerStore:
         )
 
     def _managed_gid(self) -> Optional[int]:
-        return setgid_directory_gid(self.data_dir, self.dir_mode)
+        return setgid_directory_gid(
+            self.data_dir,
+            self.dir_mode,
+            expected_gid=self.storage_gid,
+        )
 
     def _load_unlocked(self, *, require_modes: bool = False) -> dict:
         if not os.path.lexists(self.ledger_path):

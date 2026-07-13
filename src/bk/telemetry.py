@@ -28,6 +28,7 @@ def open_usage_store(config: Optional[Config] = None) -> UsageAuditStore:
         effective.lock_timeout_seconds,
         effective.file_mode,
         effective.dir_mode,
+        effective.storage_gid,
     )
 
 

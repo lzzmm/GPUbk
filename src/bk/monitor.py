@@ -536,6 +536,7 @@ def run_monitor(
         config.lock_timeout_seconds,
         config.file_mode,
         config.dir_mode,
+        config.storage_gid,
     )
     lease = audit_store.lock(timeout_seconds=min(2.0, config.lock_timeout_seconds))
     try:

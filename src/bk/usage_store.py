@@ -135,11 +135,13 @@ class UsageAuditStore:
         lock_timeout_seconds: float = 10.0,
         file_mode: int = 0o600,
         dir_mode: int = 0o700,
+        storage_gid: Optional[int] = None,
     ):
         self.data_dir = data_dir
         self.lock_timeout_seconds = lock_timeout_seconds
         self.file_mode = file_mode
         self.dir_mode = dir_mode
+        self.storage_gid = storage_gid
         self.lock_path = data_dir / "usage.lock"
 
         self.usage_dir = data_dir / "usage"
@@ -222,7 +224,11 @@ class UsageAuditStore:
         )
 
     def _managed_gid(self) -> Optional[int]:
-        return setgid_directory_gid(self.data_dir, self.dir_mode)
+        return setgid_directory_gid(
+            self.data_dir,
+            self.dir_mode,
+            expected_gid=self.storage_gid,
+        )
 
     def load_state(self) -> Dict[str, dict]:
         if self.transition_journal_path.exists():
@@ -716,6 +722,31 @@ class UsageAuditStore:
 
     def health_issues(self) -> List[dict]:
         issues = []
+        if self.storage_gid is not None and os.path.lexists(self.data_dir):
+            try:
+                root_metadata = self.data_dir.lstat()
+            except OSError as exc:
+                issues.append(
+                    {
+                        "type": "usage-path-stat",
+                        "path": str(self.data_dir),
+                        "message": str(exc),
+                    }
+                )
+            else:
+                if (
+                    stat.S_ISDIR(root_metadata.st_mode)
+                    and root_metadata.st_gid != self.storage_gid
+                ):
+                    issues.append(
+                        {
+                            "type": "usage-directory-gid",
+                            "path": str(self.data_dir),
+                            "expected_gid": self.storage_gid,
+                            "actual_gid": root_metadata.st_gid,
+                            "message": "data directory does not match configured storage_gid",
+                        }
+                    )
         managed_gid = _setgid_directory_gid(self.data_dir, self.dir_mode)
         usage_issue, usage_dir_safe = _usage_path_health(
             self.usage_dir,

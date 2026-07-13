@@ -485,6 +485,7 @@ group-writable ledger directory:
   "monitor_interval_seconds": 2,
   "monitor_rollup_seconds": 60,
   "monitor_uid": 1001,
+  "storage_gid": 1002,
   "tui_refresh_seconds": 1,
   "file_mode": "0660",
   "dir_mode": "2770"
@@ -506,7 +507,12 @@ behavior and is required unless `BK_DATA_DIR` is also set. Explicit
 system discovery. Set both variables when deliberately combining an alternate
 data directory with an external configuration.
 
-Replace `1001` with `id -u <monitor-account>`. The configuration file and every
+Replace `1001` with `id -u <monitor-account>` and `1002` with
+`getent group gpuusers | cut -d: -f3`. `storage_gid` is optional, but setting it
+binds the data root itself to the lab group's numeric GID; a consistently
+mis-grouped directory tree is then rejected instead of looking healthy merely
+because all children match one another. It requires a setgid `dir_mode`.
+The configuration file and every
 directory that contains it must be owned by root or the current UID and must
 not be writable by group or other users. A
 root-owned file inside `/data2/shared/bk` is still replaceable by members who
@@ -541,7 +547,8 @@ bk config --json
 
 Environment variables override ordinary file values, and a command flag
 overrides the corresponding default for that invocation. Security role
-`monitor_uid` is file-only and cannot be replaced by an environment variable.
+`monitor_uid` and `storage_gid` are file-only and cannot be replaced by
+environment variables.
 New files should declare
 `"config_version": 1`; unversioned files remain readable for compatibility.
 Unknown keys, wrong types, non-finite numbers, unsafe paths, and excessive
@@ -561,9 +568,10 @@ back only to a backup that passes the same complete validation.
 
 All users and user services must resolve the same data and configuration paths.
 The standard `/etc/gpubk/config.json` layout provides that automatically. The
-first write binds scheduling and storage policy into the ledger; clients with
-conflicting settings fail closed. Run the deployment preflight from a clean
-login environment before enabling services:
+first write binds scheduling and storage policy into the ledger. Enabling
+`storage_gid` also binds that GID on the next write; once bound, every client
+must use the same trusted value. Clients with conflicting settings fail closed.
+Run the deployment preflight from a clean login environment before enabling services:
 
 ```bash
 bk config

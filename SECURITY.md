@@ -20,6 +20,10 @@ Supported security boundaries:
   a newly atomically replaced file inherits that GID. Ledger transactions, audit appends, telemetry
   writes, compaction, migration, and retention cleanup enforce the same GID before mutating data
   and never repair it implicitly.
+- Administrators may bind the data root to a numeric group with file-only `storage_gid`. This
+  closes the case where the complete tree is internally consistent but belongs to the wrong Unix
+  group. Ordinary environment variables cannot replace the trusted value; once enabled, the
+  ledger policy also rejects clients which omit or change it.
 - Scheduled command arguments live in UID-owned `0600` specs, not the shared ledger.
 - Terminal and expired private command specs are pruned by the owning UID; unreferenced specs
   receive a 24-hour race-safety grace period.

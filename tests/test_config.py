@@ -49,6 +49,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.monitor_rollup_seconds, 60)
             self.assertEqual(config.tui_refresh_seconds, 1.0)
             self.assertIsNone(config.monitor_uid)
+            self.assertIsNone(config.storage_gid)
             self.assertIsNone(config.config_owner_uid)
 
     def test_trusted_system_config_supplies_shared_data_dir_without_shell_exports(self):
@@ -339,6 +340,9 @@ class ConfigTests(unittest.TestCase):
                         "gpu_count": 3,
                         "slot_minutes": 10,
                         "monitor_uid": 1234,
+                        "storage_gid": data_dir.stat().st_gid,
+                        "file_mode": "0660",
+                        "dir_mode": "2770",
                     }
                 ),
                 encoding="utf-8",
@@ -351,6 +355,7 @@ class ConfigTests(unittest.TestCase):
                     "BK_DATA_DIR": str(data_dir),
                     "BK_CONFIG_FILE": str(config_path),
                     "BK_MONITOR_UID": "9999",
+                    "BK_STORAGE_GID": "9999",
                 },
                 clear=True,
             ):
@@ -362,6 +367,7 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.gpu_count, 3)
             self.assertEqual(config.slot_minutes, 10)
             self.assertEqual(config.monitor_uid, 1234)
+            self.assertEqual(config.storage_gid, data_dir.stat().st_gid)
             self.assertEqual(config.config_owner_uid, os.getuid())
 
     def test_explicit_config_file_must_exist(self):
@@ -627,6 +633,19 @@ class ConfigTests(unittest.TestCase):
                 with mock.patch.dict("os.environ", {"BK_DATA_DIR": tmp}, clear=True):
                     with self.assertRaisesRegex(ValueError, "monitor_uid"):
                         load_config()
+
+    def test_storage_gid_is_file_only_and_requires_setgid_directory_mode(self):
+        for value in (True, -1, 2**32 - 1):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "config.json"
+                path.write_text(json.dumps({"storage_gid": value}), encoding="utf-8")
+                path.chmod(0o600)
+                with mock.patch.dict("os.environ", {"BK_DATA_DIR": tmp}, clear=True):
+                    with self.assertRaisesRegex(ValueError, "storage_gid"):
+                        load_config()
+
+        with self.assertRaisesRegex(ValueError, "setgid dir_mode"):
+            Config(Path("/tmp/gpubk-storage-gid"), storage_gid=os.getgid())
 
     def test_file_mode_rejects_executable_bits(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -418,6 +418,32 @@ class UsageStoreTests(unittest.TestCase):
             self.assertEqual(issue["actual_gid"], expected_gid + 1)
             self.assertTrue(partition.exists())
 
+    def test_configured_storage_gid_rejects_the_wrong_usage_data_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "shared"
+            data_dir.mkdir(mode=0o700)
+            data_dir.chmod(0o2770)
+            actual_gid = data_dir.stat().st_gid
+            store = UsageAuditStore(
+                data_dir,
+                file_mode=0o660,
+                dir_mode=0o2770,
+                storage_gid=actual_gid + 1,
+            )
+
+            with self.assertRaisesRegex(PermissionError, "configured storage_gid"):
+                store.append_rollups([self._rollup_at(0)])
+
+            self.assertFalse(store.usage_dir.exists())
+            issue = next(
+                item
+                for item in store.health_issues()
+                if item.get("path") == str(data_dir)
+                and item["type"] == "usage-directory-gid"
+            )
+            self.assertEqual(issue["expected_gid"], actual_gid + 1)
+            self.assertEqual(issue["actual_gid"], actual_gid)
+
     def test_append_rejects_partition_gid_drift_before_updating_users(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = UsageAuditStore(

@@ -101,6 +101,12 @@ keep the data directory's numeric GID. Run plain `bk doctor --json --strict`
 after the upgrade. If it reports a mode, GID, or link-count issue, stop GPUbk
 writers and have an administrator repair that named path and its ownership
 deliberately; GPUbk does not silently `chmod` or `chgrp` existing shared data.
+Existing setgid configurations may omit `storage_gid`. To enable the stronger
+root-group binding, obtain the numeric lab-group GID with
+`getent group <group> | cut -d: -f3`, add it to the trusted configuration, and
+run `bk doctor --probe --strict` before restarting writers. The next successful
+ledger write upgrades a legacy policy with this GID. After that point, clients
+which omit it or configure another GID are rejected.
 
 ## Running-job boundary
 

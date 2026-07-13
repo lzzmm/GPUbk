@@ -359,6 +359,33 @@ class LedgerStorageTests(unittest.TestCase):
             self.assertEqual(store.ledger_path.read_bytes(), original_ledger)
             self.assertEqual(store.log_path.read_bytes(), original_log)
 
+    def test_configured_storage_gid_rejects_the_wrong_data_directory_group(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "shared"
+            data_dir.mkdir(mode=0o700)
+            data_dir.chmod(0o2770)
+            actual_gid = data_dir.stat().st_gid
+            store = LedgerStore(
+                data_dir,
+                file_mode=0o660,
+                dir_mode=0o2770,
+                storage_gid=actual_gid + 1,
+            )
+            mutator = mock.Mock()
+
+            with self.assertRaisesRegex(PermissionError, "configured storage_gid"):
+                store.transaction(mutator)
+
+            mutator.assert_not_called()
+            self.assertFalse(store.backup_dir.exists())
+            issue = next(
+                item
+                for item in store.health_issues()
+                if item.get("path") == str(data_dir) and item["type"] == "directory-gid"
+            )
+            self.assertEqual(issue["expected_gid"], actual_gid + 1)
+            self.assertEqual(issue["actual_gid"], actual_gid)
+
     def test_atomic_ledger_write_rejects_bad_inherited_gid_and_cleans_temporary_file(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp) / "shared"

@@ -11,10 +11,11 @@ from .models import BookingError
 BOOKING_GRANULARITY_SECONDS = DEFAULT_SLOT_MINUTES * 60
 LEDGER_POLICY_VERSION = 1
 LEDGER_POLICY_KEY = "policy"
+STORAGE_GID_POLICY_KEY = "storage_gid"
 
 
 def policy_for_config(config: Config) -> dict:
-    return {
+    policy = {
         "version": LEDGER_POLICY_VERSION,
         "gpu_count": config.gpu_count,
         "max_shared_reservations_per_gpu": config.max_shared_users,
@@ -24,6 +25,9 @@ def policy_for_config(config: Config) -> dict:
         "file_mode": f"{config.file_mode:04o}",
         "dir_mode": f"{config.dir_mode:04o}",
     }
+    if config.storage_gid is not None:
+        policy[STORAGE_GID_POLICY_KEY] = config.storage_gid
+    return policy
 
 
 def bind_ledger_policy(ledger: dict, config: Config) -> bool:
@@ -31,6 +35,10 @@ def bind_ledger_policy(ledger: dict, config: Config) -> bool:
         ledger[LEDGER_POLICY_KEY] = policy_for_config(config)
         return True
     validate_ledger_policy(ledger, config)
+    current = ledger[LEDGER_POLICY_KEY]
+    if config.storage_gid is not None and STORAGE_GID_POLICY_KEY not in current:
+        current[STORAGE_GID_POLICY_KEY] = config.storage_gid
+        return True
     return False
 
 
@@ -45,8 +53,16 @@ def validate_ledger_policy(ledger: dict, config: Config) -> None:
     mismatches = [
         f"{key}: ledger={current.get(key)!r} local={value!r}"
         for key, value in expected.items()
-        if current.get(key) != value
+        if key != STORAGE_GID_POLICY_KEY and current.get(key) != value
     ]
+    if (
+        STORAGE_GID_POLICY_KEY in current
+        and current[STORAGE_GID_POLICY_KEY] != config.storage_gid
+    ):
+        mismatches.append(
+            f"{STORAGE_GID_POLICY_KEY}: ledger={current[STORAGE_GID_POLICY_KEY]!r} "
+            f"local={config.storage_gid!r}"
+        )
     if mismatches:
         raise BookingError("local configuration does not match ledger policy: " + "; ".join(mismatches))
 

@@ -29,6 +29,7 @@ class UsageQueryService:
             config.lock_timeout_seconds,
             config.file_mode,
             config.dir_mode,
+            config.storage_gid,
         )
 
     def samples(

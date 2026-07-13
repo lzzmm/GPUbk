@@ -423,6 +423,7 @@ sudo install -d -m 0755 -o root -g root /etc/gpubk
   "monitor_interval_seconds": 2,
   "monitor_rollup_seconds": 60,
   "monitor_uid": 1001,
+  "storage_gid": 1002,
   "tui_refresh_seconds": 1,
   "file_mode": "0660",
   "dir_mode": "2770"
@@ -441,7 +442,10 @@ sudo chmod 0644 /etc/gpubk/config.json
 显式设置 `BK_DATA_DIR` 会保留原有私有/数据目录内配置行为并跳过系统配置自动发现；
 需要组合其他数据目录与外部配置时应同时设置两个变量。
 
-请用 `id -u <monitor账号>` 的结果替换 `1001`。配置文件及其每一级目录必须由 root
+请用 `id -u <monitor账号>` 的结果替换 `1001`，用
+`getent group gpuusers | cut -d: -f3` 的结果替换 `1002`。`storage_gid` 可省略；
+配置后会把数据根目录本身绑定到实验室组的数字 GID，避免整棵目录树一致地落入错误组
+却仍显示健康。该字段要求 `dir_mode` 带 setgid 位。配置文件及其每一级目录必须由 root
 或当前 UID 所有，并且不可被 group/other 写入。
 即使文件自身是 root 所有的 `0644`，只要它位于 `/data2/shared/bk` 这种组可写目录中，
 目录成员仍能通过 rename 替换它。GPUbk 会按文件描述符逐级固定并验证配置路径，拒绝
@@ -468,8 +472,9 @@ bk config
 bk config --json
 ```
 
-环境变量可覆盖普通文件值，单次命令参数再覆盖对应默认值。安全角色 `monitor_uid`
-只能来自配置文件，不能用环境变量替换。新配置应声明
+环境变量可覆盖普通文件值，单次命令参数再覆盖对应默认值。安全角色 `monitor_uid` 和
+`storage_gid` 只能来自配置文件，不能用环境变量替换。启用 `storage_gid` 后会在下一次
+写入时绑定到台账，此后所有客户端必须使用相同的可信 GID。新配置应声明
 `"config_version": 1`，旧的无版本配置仍可兼容读取。未知字段、错误类型、NaN/Infinity、
 不安全路径和越界数值会直接报错，不再静默忽略。JSON 报告只列出当前生效的环境变量名，
 不会输出外部分配器命令内容。

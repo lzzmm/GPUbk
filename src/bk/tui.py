@@ -736,6 +736,7 @@ def _refresh_collector_status(config: Config, state: TuiState, now: datetime) ->
         config.lock_timeout_seconds,
         config.file_mode,
         config.dir_mode,
+        config.storage_gid,
     )
     state.collector_status = store.load_collector_status(
         now=now,

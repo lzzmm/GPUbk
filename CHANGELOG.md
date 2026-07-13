@@ -6,7 +6,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 - Verify setgid GID inheritance during deployment preflight, report numeric group drift across
   existing ledger, backup, and telemetry paths, and fail every shared write path before mutation
-  when an existing or newly created managed path does not retain the data directory's group.
+  when an existing or newly created managed path does not retain the data directory's group; add
+  optional file-only, ledger-bound `storage_gid` to bind the data root to the intended Unix group
+  as well.
 - Require production release tags to be annotated and point exactly at the current `main` tip,
   preventing a valid-looking version from being published from an older main-history commit.
 - Keep collector crash evidence honest: fatal sampling failures attempt a partial rollup flush

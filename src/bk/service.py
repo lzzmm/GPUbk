@@ -321,6 +321,7 @@ def build_agent_context(
         config.lock_timeout_seconds,
         config.file_mode,
         config.dir_mode,
+        config.storage_gid,
     ).load_collector_status(
         now=generated_at,
         expected_gpu_count=config.gpu_count,
@@ -343,6 +344,7 @@ def build_agent_context(
             "shared_memory_reserve_mb": config.shared_memory_reserve_mb,
             "queue_search_hours": config.queue_search_hours,
             "ledger_retention_days": config.ledger_retention_days,
+            "storage_gid": config.storage_gid,
             "worker_live_guard": config.worker_live_guard,
             "worker_max_parallel": config.worker_max_parallel,
             "worker_effective_max_parallel": config.effective_worker_max_parallel,

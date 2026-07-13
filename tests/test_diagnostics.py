@@ -237,6 +237,33 @@ class DeploymentDiagnosticsTests(unittest.TestCase):
             self.assertEqual(atomic["directory_gid"], atomic["file_gid"])
             self.assertTrue(probes_ready(checks), checks)
 
+    def test_preflight_rejects_data_directory_outside_configured_storage_gid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / "shared"
+            data_dir.mkdir(mode=0o700)
+            data_dir.chmod(0o2770)
+            actual_gid = data_dir.stat().st_gid
+            config = Config(
+                data_dir=data_dir,
+                gpu_count=1,
+                file_mode=0o660,
+                dir_mode=0o2770,
+                storage_gid=actual_gid + 1,
+            )
+
+            with mock.patch(
+                "bk.diagnostics.snapshot",
+                return_value=[GpuSnapshot(0, "gpu0", source="simulation")],
+            ):
+                checks = run_deployment_probes(config)
+
+            directory = checks[0]
+            self.assertEqual(directory["status"], "fail")
+            self.assertEqual(directory["expected_gid"], actual_gid + 1)
+            self.assertEqual(directory["actual_gid"], actual_gid)
+            self.assertEqual(checks[1]["message"], "data directory is not ready")
+            self.assertEqual(list(data_dir.glob(".gpubk-probe-*")), [])
+
 
 if __name__ == "__main__":
     unittest.main()

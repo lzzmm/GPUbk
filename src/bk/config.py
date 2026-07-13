@@ -88,6 +88,7 @@ CONFIG_FILE_KEYS = frozenset(
         "allocator_timeout_seconds",
         "allocator_weight",
         "monitor_uid",
+        "storage_gid",
     }
 )
 
@@ -133,6 +134,7 @@ class Config:
     config_owner_uid: Optional[int] = None
     worker_max_parallel: int = DEFAULT_WORKER_MAX_PARALLEL
     worker_termination_grace_seconds: float = DEFAULT_WORKER_TERMINATION_GRACE_SECONDS
+    storage_gid: Optional[int] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "slot_minutes", validate_slot_minutes(self.slot_minutes))
@@ -152,6 +154,13 @@ class Config:
             "monitor_uid",
             validate_optional_uid(self.monitor_uid, "monitor_uid"),
         )
+        object.__setattr__(
+            self,
+            "storage_gid",
+            validate_optional_gid(self.storage_gid, "storage_gid"),
+        )
+        if self.storage_gid is not None and not self.dir_mode & stat.S_ISGID:
+            raise ValueError("storage_gid requires a setgid dir_mode such as 2770")
         object.__setattr__(
             self,
             "config_owner_uid",
@@ -289,6 +298,20 @@ def validate_optional_uid(value: object, key: str) -> Optional[int]:
         parsed = int(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{key} must be an integer UID or null") from exc
+    if parsed < 0 or parsed > MAX_UID:
+        raise ValueError(f"{key} must be between 0 and {MAX_UID}")
+    return parsed
+
+
+def validate_optional_gid(value: object, key: str) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        raise ValueError(f"{key} must be an integer GID or null")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{key} must be an integer GID or null") from exc
     if parsed < 0 or parsed > MAX_UID:
         raise ValueError(f"{key} must be between 0 and {MAX_UID}")
     return parsed
@@ -630,6 +653,7 @@ def load_config() -> Config:
             maximum=MAX_TUI_REFRESH_SECONDS,
         ),
         monitor_uid=validate_optional_uid(raw.get("monitor_uid"), "monitor_uid"),
+        storage_gid=validate_optional_gid(raw.get("storage_gid"), "storage_gid"),
         config_owner_uid=config_owner_uid,
         file_mode=_mode_value(raw, "file_mode", DEFAULT_PRIVATE_FILE_MODE, directory=False),
         dir_mode=_mode_value(raw, "dir_mode", DEFAULT_PRIVATE_DIR_MODE, directory=True),
