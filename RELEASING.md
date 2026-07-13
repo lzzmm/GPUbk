@@ -4,7 +4,7 @@
 
 GPUBK publishes without a stored PyPI API token. Before the first release:
 
-1. In GitHub, create environments named `testpypi` and `pypi`. Require the `lzzmm` reviewer for `pypi`, restrict it to `v*.*.*` tags, and keep `main` protected by the complete CI check set. The public repository currently enforces these rules for administrators too.
+1. In GitHub, create environments named `testpypi` and `pypi`. Require the `lzzmm` reviewer for `pypi`, restrict it to the `main` branch and `v*.*.*` tags, and keep `main` protected by the complete CI check set. The public repository currently enforces these rules for administrators too.
 2. In TestPyPI's trusted-publisher settings, add owner `lzzmm`, repository `gpubk`, workflow `release.yml`, and environment `testpypi`.
 3. In PyPI's pending trusted-publisher form, enter project `gpubk`, owner `lzzmm`, repository `gpubk`, workflow `release.yml`, and environment `pypi`.
 4. Protect `main` with pull requests, strict GitHub Actions checks, linear history, resolved conversations, and force-push/deletion prevention. Protect version tags from update and deletion, and enable private vulnerability reporting.
@@ -18,13 +18,31 @@ The publish jobs receive `id-token: write` only inside their protected environme
 Use a unique PEP 440 prerelease such as `0.2.0rc1` in `src/bk/__init__.py` and
 keep the target heading, for example `## 0.2.0 - Unreleased`, in
 `CHANGELOG.md`. Push the candidate branch, wait for CI, then manually dispatch
-the `Release` workflow for that branch. Manual dispatch accepts prereleases
-only and stops after TestPyPI installation verification. It never publishes to
-PyPI.
+the `Release` workflow from `main` with `promote_run_id` left empty. This mode
+accepts prereleases only and stops after TestPyPI digest and installation
+verification.
 
 Test the exact TestPyPI wheel in an isolated environment and data directory.
 Increment the prerelease number for every retry; neither package index permits
 replacing an uploaded file.
+
+Publishing a tested candidate to public PyPI is an explicit promotion, not a
+rebuild:
+
+1. Confirm the TestPyPI `Release` run completed successfully and copy its
+   numeric run ID from the Actions URL.
+2. Set `PYPI_RELEASE_ENABLED` to `true`.
+3. Dispatch `Release` from `main` again and enter that ID as `promote_run_id`.
+4. Review and approve the protected `pypi` deployment.
+5. Wait for the PyPI digest comparison and installation test, then return
+   `PYPI_RELEASE_ENABLED` to `false`.
+
+The promotion job accepts only a successful `release.yml` run from this
+repository's `main` branch with a successful `verify-testpypi` job. It downloads
+that run's immutable artifact, validates its SHA-256 file set and wheel metadata,
+and compares it with TestPyPI before requesting an OIDC upload. Candidate
+promotion does not create a GitHub tag or GitHub Release; those remain reserved
+for final versions and their immutable release assets.
 
 ## Every release
 
@@ -102,7 +120,8 @@ replacing an uploaded file.
 
 The workflow rejects a tag that is lightweight, points anywhere other than the
 current `main` tip, is a prerelease, does not match the package, or still has an
-`Unreleased` changelog heading. It
-also rejects an already-existing TestPyPI or PyPI version before requesting an
-upload. Production publication therefore always starts from a new final-version
-tag; manual dispatch remains the prerelease-only TestPyPI path.
+`Unreleased` changelog heading. It also rejects an already-existing TestPyPI or
+PyPI version before requesting an upload. A normal final publication therefore
+starts from a new final-version tag. Manual dispatch with an empty
+`promote_run_id` remains TestPyPI-only; a non-empty ID invokes the separately
+reviewed, artifact-preserving prerelease promotion path described above.
