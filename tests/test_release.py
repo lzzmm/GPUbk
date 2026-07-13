@@ -321,6 +321,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("already exists on TestPyPI", workflow)
         self.assertIn("already exists on PyPI", workflow)
         self.assertIn("pypa/gh-action-pypi-publish@", workflow)
+        self.assertEqual(workflow.count("packages-dir: dist/"), 2)
+        self.assertNotIn("name: python-package-distributions\n          path: dist/", workflow)
         self.assertNotIn("password:", workflow)
         self.assertNotIn("TWINE_PASSWORD", workflow)
 
