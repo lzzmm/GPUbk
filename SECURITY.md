@@ -47,6 +47,10 @@ Supported security boundaries:
 - Fatal worker cleanup force-kills and reaps supervised process groups without depending on a
   successful ledger read. If durable state cannot be updated, restart recovery keeps the job
   uncertain instead of claiming completion or retrying automatically.
+- Worker and monitor startup, daemon cycles, and locked worker mutations validate the ledger-bound
+  policy. Exit `78` is a persistent operator error: the bundled units do not restart it. A runtime
+  mismatch terminates locally supervised commands without committing shared completion state and
+  discards buffered monitor rollups instead of writing under an untrusted policy.
 - The default launch guard passes the stable UUIDs from that same NVML snapshot to
   `CUDA_VISIBLE_DEVICES`, because NVML indices are not guaranteed to match CUDA ordinals.
   Missing identifiers fail closed on real NVML devices; disabling the guard explicitly accepts
@@ -118,6 +122,9 @@ Administrator responsibilities:
   directories.
 - Keep `worker_live_guard=true` on shared servers. Disabling it restores direct launch behavior
   and accepts collisions with activity that appeared after booking.
+- Treat daemon exit `78` as configuration drift. Compare the trusted file and `bk config` output
+  with the ledger policy; never work around it by weakening capacity, storage, memory, or
+  granularity settings in a user environment.
 - Run `bk doctor --probe --strict` on the target mount before enabling services. Its lock check is
   cross-process on one host; shared NFS/FUSE deployments still require a second-host lock test.
 - After enabling the monitor, run `bk doctor --require-monitor --strict`. Preflight intentionally

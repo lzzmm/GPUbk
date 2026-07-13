@@ -15,8 +15,10 @@ from unittest import mock
 import bk.worker as worker_module
 from bk.config import Config
 from bk.gpu import GpuProcessSnapshot, GpuSnapshot
+from bk.job_recovery import RecoverySummary
 from bk.joblogs import MIB, job_log_paths, read_job_log_tail
 from bk.models import Actor, BookingError, BookingRequest
+from bk.policy import DaemonPolicyError
 from bk.scheduler import add_booking, cancel_booking
 from bk.storage import LedgerStore
 from bk.timeparse import utc_now
@@ -106,6 +108,67 @@ class ScheduledJobTests(unittest.TestCase):
         self.assertEqual(output["cuda"], "0")
         self.assertEqual(output["rid"], mine["id"])
         self.assertFalse(job_spec_path(self.config, mine["job"]["spec_id"]).exists())
+
+    def test_worker_rejects_policy_mismatch_before_acquiring_private_lease(self):
+        add_booking(
+            self.store,
+            self.config,
+            BookingRequest(
+                actor=self.actor,
+                count=1,
+                duration_seconds=10 * 60,
+                start_at=self.start,
+                preferred_gpus=[0],
+            ),
+        )
+        mismatch = replace(self.config, max_shared_users=3)
+
+        with mock.patch("bk.worker.acquire_job_worker_lease") as acquire:
+            with self.assertRaisesRegex(DaemonPolicyError, "worker configuration"):
+                run_worker(mismatch, self.store, self.actor, once=True, quiet=True)
+
+        acquire.assert_not_called()
+        self.assertFalse(self.log_dir.exists())
+
+    def test_worker_stops_before_claiming_when_policy_drifts_after_startup(self):
+        add_booking(
+            self.store,
+            self.config,
+            BookingRequest(
+                actor=self.actor,
+                count=1,
+                duration_seconds=10 * 60,
+                start_at=self.start,
+                preferred_gpus=[0],
+            ),
+        )
+
+        def drift_policy(*_args, **_kwargs):
+            def mutate(ledger):
+                ledger["policy"]["max_shared_reservations_per_gpu"] = 9
+                return ledger, None, [], True
+
+            self.store.transaction(mutate)
+            return RecoverySummary()
+
+        with mock.patch(
+            "bk.worker.recover_abandoned_jobs", side_effect=drift_policy
+        ), mock.patch("bk.worker.claim_due_jobs") as claim:
+            with self.assertRaisesRegex(DaemonPolicyError, "worker configuration"):
+                run_worker(self.config, self.store, self.actor, once=True, quiet=True)
+
+        claim.assert_not_called()
+
+    def test_cleanup_policy_error_does_not_mask_original_worker_failure(self):
+        with mock.patch(
+            "bk.worker.recover_abandoned_jobs",
+            side_effect=OSError("original worker failure"),
+        ), mock.patch(
+            "bk.worker._cleanup_job_specs_best_effort",
+            side_effect=DaemonPolicyError("cleanup policy drift"),
+        ):
+            with self.assertRaisesRegex(OSError, "original worker failure"):
+                run_worker(self.config, self.store, self.actor, once=True, quiet=True)
 
     def test_worker_runs_legal_same_gpu_shared_jobs_concurrently_by_default(self):
         self.config = replace(self.config, max_shared_users=4)
@@ -234,6 +297,67 @@ class ScheduledJobTests(unittest.TestCase):
             elapsed = time.monotonic() - started
             self.assertGreaterEqual(elapsed, 0.08)
             self.assertLess(elapsed, 3.0)
+            child_pid = int(pid_path.read_text(encoding="utf-8"))
+            with self.assertRaises(ProcessLookupError):
+                os.kill(child_pid, 0)
+            stored = next(
+                item
+                for item in self.store.load()["reservations"]
+                if item["id"] == reservation["id"]
+            )
+            self.assertEqual(stored["job"]["status"], "running")
+        finally:
+            if child_pid is not None:
+                try:
+                    os.killpg(child_pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def test_worker_reaps_child_without_shared_write_after_runtime_policy_drift(self):
+        pid_path = self.work_dir / "policy-drift-child.pid"
+        reservation = self.booking(
+            command=[
+                sys.executable,
+                "-c",
+                (
+                    "import os,pathlib,signal,time\n"
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+                    f"pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()), encoding='utf-8')\n"
+                    "while True: time.sleep(1)\n"
+                ),
+            ]
+        )
+        config = replace(self.config, worker_termination_grace_seconds=0.1)
+        original_reconcile = worker_module._reconcile_running
+        drifted = False
+
+        def drift_after_child_is_ready(*args, **kwargs):
+            nonlocal drifted
+            running = args[2]
+            if not drifted and running and pid_path.exists():
+                def mutate(ledger):
+                    ledger["policy"]["max_shared_reservations_per_gpu"] = 9
+                    return ledger, None, [], True
+
+                self.store.transaction(mutate)
+                drifted = True
+            return original_reconcile(*args, **kwargs)
+
+        child_pid = None
+        try:
+            with mock.patch(
+                "bk.worker._reconcile_running",
+                side_effect=drift_after_child_is_ready,
+            ), self.assertRaisesRegex(DaemonPolicyError, "worker configuration"):
+                run_worker(
+                    config,
+                    self.store,
+                    self.actor,
+                    once=True,
+                    poll_seconds=0.1,
+                    quiet=True,
+                )
+
             child_pid = int(pid_path.read_text(encoding="utf-8"))
             with self.assertRaises(ProcessLookupError):
                 os.kill(child_pid, 0)

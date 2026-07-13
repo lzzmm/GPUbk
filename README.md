@@ -270,6 +270,10 @@ If the current worker itself loses ledger access while supervising a command,
 its final process-group KILL and reap no longer depends on another successful
 ledger read. The unchanged durable job state is intentionally recovered as
 `uncertain` after restart rather than being reported as completed or retried.
+Worker startup, every polling cycle, and every locked worker transaction validate
+the ledger-bound policy. A mismatch exits with status `78` before acquiring a
+private lease at startup. Runtime drift stops and reaps supervised commands but
+does not reconcile or clean shared state under the wrong policy.
 
 `bk worker --status` reports `running`, `stopped`, `not-seen`, `other-instance`,
 `unverified`, or an unsafe/unavailable state without creating or modifying
@@ -401,15 +405,19 @@ for the account whose numeric UID is selected by `monitor_uid`. Its generated
 unit captures the absolute shared data directory and explicit trusted config
 path, plus any explicit non-secret configuration overrides active at install
 time. Uncaptured sampling and rollup values are reloaded from that config whenever
-the service starts. A duplicate writer (`75`) or role mismatch (`77`) is not
-restarted. Other failures retry at most three times in 60 seconds, allowing a
-short transient recovery without an endless log loop.
+the service starts. A duplicate writer (`75`), role mismatch (`77`), or ledger
+policy mismatch (`78`) is not restarted. Other failures retry at most three times
+in 60 seconds, allowing a short transient recovery without an endless log loop.
 The final command above is a read-only post-start check. Unlike deployment
 preflight, it fails when no collector heartbeat has ever been recorded.
 A normal signal-driven exit publishes `stopped`. A fatal sampling or storage
 error attempts to flush partial rollups but leaves the last `running`/`degraded`
 heartbeat untouched so it becomes `stale`; the original nonzero failure remains
 visible to systemd and the single-writer lease is still released.
+The monitor validates policy before telemetry maintenance or GPU sampling on
+every cycle. Policy drift is different from an ordinary sampling failure: pending
+rollups are discarded without a crash flush, no graceful stop is published, and
+the writer lease is released for operator repair.
 
 ## Agents and MCP
 
@@ -531,6 +539,9 @@ requires a trusted root-owned external or system configuration, a configured
 the process is not the configured writer. Single-user private directories do
 not require this role setting. Applied usage maintenance and migration use the
 same role; their dry-run forms stay available to ordinary users.
+Exit status `78` from either daemon means its effective policy differs from the
+ledger. Do not retry with altered limits; inspect `bk config`, repair the trusted
+configuration, reinstall captured service settings if necessary, then restart.
 
 `max_shared_users` is retained as the compatible configuration name; it now
 defines whole shared capacity units per GPU. Old reservations without a

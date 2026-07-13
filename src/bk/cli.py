@@ -35,7 +35,7 @@ from .models import (
     Actor,
     BookingError,
 )
-from .policy import validate_ledger_policy
+from .policy import DAEMON_POLICY_EXIT_CODE, DaemonPolicyError, validate_ledger_policy
 from .schedule_index import ReservationIndex
 from .scheduler import (
     find_earliest_slot,
@@ -197,6 +197,22 @@ def main(argv: Optional[List[str]] = None) -> int:
     except WorkerBusyError as exc:
         print(f"bk: {exc}", file=sys.stderr)
         return WORKER_BUSY_EXIT_CODE
+    except DaemonPolicyError as exc:
+        if _json_requested(argv):
+            print(
+                json.dumps(
+                    {
+                        "schema_version": AGENT_SCHEMA_VERSION,
+                        "kind": "error",
+                        "error": {"type": exc.__class__.__name__, "message": str(exc)},
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        else:
+            print(f"bk: {exc}", file=sys.stderr)
+        return DAEMON_POLICY_EXIT_CODE
     except (BookingError, ValueError, TimeoutError, OSError) as exc:
         if _json_requested(argv):
             print(
@@ -605,7 +621,10 @@ def _slots_command(argv: List[str], config: Config, store: LedgerStore) -> int:
 
 
 def _monitor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
-    parser = argparse.ArgumentParser(prog="bk monitor")
+    parser = argparse.ArgumentParser(
+        prog="bk monitor",
+        epilog="exit 75: writer busy; exit 77: role denied; exit 78: ledger policy mismatch",
+    )
     parser.add_argument(
         "--interval",
         type=float,
@@ -640,7 +659,10 @@ def _monitor_command(argv: List[str], config: Config, store: LedgerStore) -> int
 def _worker_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser = argparse.ArgumentParser(
         prog="bk worker",
-        epilog="exit 3: due work is waiting; exit 75: another worker holds this UID's lease",
+        epilog=(
+            "exit 3: due work is waiting; exit 75: another worker holds this UID's lease; "
+            "exit 78: ledger policy mismatch"
+        ),
     )
     parser.add_argument("--once", action="store_true", help="run due jobs, wait for them, then exit")
     parser.add_argument("--poll", type=float, help="poll interval in seconds")

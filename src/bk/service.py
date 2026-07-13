@@ -11,7 +11,7 @@ from .config import Config
 from .granularity import floor_to_slot, is_slot_aligned, slot_phrase
 from .ledger_schema import MAX_EDIT_OPERATIONS_PER_RESERVATION
 from .models import MODE_EXCLUSIVE, MODE_SHARED, Actor, BookingError, BookingRequest, BookingResult, EditRequest
-from .policy import validate_ledger_policy
+from .policy import DAEMON_POLICY_EXIT_CODE, validate_ledger_policy
 from .scheduler import (
     add_booking,
     cancel_booking,
@@ -354,6 +354,7 @@ def build_agent_context(
             "worker_recovery_grace_seconds": config.worker_recovery_grace_seconds,
             "worker_busy_exit_code": WORKER_BUSY_EXIT_CODE,
             "worker_waiting_exit_code": WORKER_WAITING_EXIT_CODE,
+            "daemon_policy_exit_code": DAEMON_POLICY_EXIT_CODE,
             "job_log_retention_days": config.job_log_retention_days,
             "job_log_max_mb": config.job_log_max_mb,
             "job_log_total_max_mb": config.job_log_total_max_mb,
@@ -391,6 +392,7 @@ def build_agent_context(
             "single_worker_lease": True,
             "worker_liveness": True,
             "worker_instance_binding": True,
+            "daemon_policy_guard": True,
             "scheduled_job_crash_recovery": True,
             "private_job_specs": True,
             "private_job_spec_cleanup": True,

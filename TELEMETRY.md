@@ -71,6 +71,9 @@ until a current monitor replaces it.
 treated as fresh data. A fresh heartbeat covering a different number of GPUs
 than the active policy is `topology-mismatch` and is also not current. These
 states are health evidence only, never an authorization or scheduling lock.
+Ledger-policy drift is handled more strictly than a sampling crash: validation
+runs before maintenance and sampling, buffered rollups are discarded without a
+flush, and the monitor exits `78` after releasing its writer lock.
 
 ## Query Interfaces
 

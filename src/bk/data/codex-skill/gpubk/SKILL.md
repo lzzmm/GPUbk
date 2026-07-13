@@ -71,6 +71,8 @@ NVML device cannot be bound safely.
 - `exists`: the operation ID was already applied; treat this as idempotent success.
 - JSON exit `2`: invalid request or write conflict. Inspect `error.message`.
 - Recommendation exit `3`: no legal exact slot; present `nearest_available` without booking it.
+- Daemon exit `78`: trusted configuration does not match the ledger. Stop retrying and surface an
+  operator repair action; never change policy limits to bypass it.
 - Context VRAM values distinguish known zero from unknown: `memory.used_mb=0` means the GPU is
   known empty, while `null` means telemetry is unavailable. Never coerce one into the other.
 - `uncertain` job: it may have run or produced partial side effects. Inspect `recovery_state`,
@@ -91,6 +93,8 @@ resource conflict. Keep `bk worker` running for scheduled commands. Use `list_gp
 quota excess to the user.
 Only one worker may hold a UID's private job directory. Exit `75` means another worker already
 holds the lease; do not loop or start a second worker.
+Capability `daemon_policy_guard=true` means worker transactions and monitor sampling revalidate
+the bound policy. Context `policy.daemon_policy_exit_code` supplies the persistent-error status.
 `policy.worker_effective_max_parallel` is the default scheduled-command concurrency after the
 configured safety cap is bounded by GPU shared capacity. Do not interpret it as extra capacity.
 Budget around `policy.worker_termination_grace_seconds`: scheduled commands receive TERM before

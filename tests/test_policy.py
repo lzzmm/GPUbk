@@ -6,7 +6,13 @@ from pathlib import Path
 
 from bk.config import Config
 from bk.models import Actor, BookingError, BookingRequest
-from bk.policy import bind_ledger_policy, policy_for_config, validate_ledger_policy
+from bk.policy import (
+    DaemonPolicyError,
+    PolicyGuardedLedgerStore,
+    bind_ledger_policy,
+    policy_for_config,
+    validate_ledger_policy,
+)
 from bk.scheduler import add_booking
 from bk.service import build_agent_context
 from bk.storage import LedgerStore
@@ -139,6 +145,45 @@ class LedgerPolicyTests(unittest.TestCase):
             build_agent_context(override, self.store, self.actor)
 
         self.assertEqual(self.store.ledger_path.read_bytes(), original)
+
+    def test_daemon_guard_revalidates_latest_policy_inside_transaction_lock(self):
+        add_booking(self.store, self.config, self.request)
+        guarded = PolicyGuardedLedgerStore(self.store, self.config, "worker")
+        guarded.load()
+
+        def replace_policy(ledger):
+            ledger["policy"]["max_shared_reservations_per_gpu"] = 99
+            return ledger, None, [], True
+
+        self.store.transaction(replace_policy)
+        after_drift = self.store.ledger_path.read_bytes()
+        called = False
+
+        def forbidden_mutation(ledger):
+            nonlocal called
+            called = True
+            return ledger, None, [], True
+
+        with self.assertRaisesRegex(DaemonPolicyError, "worker configuration"):
+            guarded.transaction(forbidden_mutation)
+
+        self.assertFalse(called)
+        self.assertEqual(self.store.ledger_path.read_bytes(), after_drift)
+
+    def test_daemon_guard_allows_legacy_unbound_start_but_detects_policy_removal(self):
+        guarded = PolicyGuardedLedgerStore(self.store, self.config, "monitor")
+        self.assertNotIn("policy", guarded.load())
+        add_booking(self.store, self.config, self.request)
+        self.assertIn("policy", guarded.load())
+
+        def remove_policy(ledger):
+            ledger.pop("policy", None)
+            return ledger, None, [], True
+
+        self.store.transaction(remove_policy)
+
+        with self.assertRaisesRegex(DaemonPolicyError, "ledger policy was removed"):
+            guarded.load()
 
     def test_granularity_override_cannot_mutate_a_bound_ledger(self):
         add_booking(self.store, self.config, self.request)

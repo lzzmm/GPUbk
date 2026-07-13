@@ -57,8 +57,10 @@ Recommendation fields:
   earlier side effects cannot be disproved. `remote-unverified`, `unverified`, and
   `termination-unverified` must never trigger automatic retry.
 - Context capabilities advertise `single_worker_lease`, `scheduled_job_crash_recovery`, and
-  `worker_liveness`, `worker_instance_binding`, and `collector_liveness`.
+  `worker_liveness`, `worker_instance_binding`, `daemon_policy_guard`, and `collector_liveness`.
   Worker exit `75` means the UID-private lease is already held; do not retry in a tight loop.
+  Context `policy.daemon_policy_exit_code` is `78`; worker or monitor exit `78` is a persistent
+  ledger-policy mismatch that requires operator repair and must not be automatically retried.
 - Context `worker` and `bk jobs --json` embed `gpubk.worker.v1`. Only `state=running` with
   `running=true`, `lease_held=true`, and `instance_match=true` is a positive liveness result,
   based on the UID-private global lock and matching digest-named instance lock. `lease` metadata

@@ -23,6 +23,7 @@ from .gpu import (
     snapshot,
 )
 from .models import BookingError
+from .policy import DaemonPolicyError, PolicyGuardedLedgerStore
 from .scheduler import list_active
 from .storage import LedgerStore
 from .timeparse import parse_iso, to_iso, utc_now
@@ -105,7 +106,11 @@ class UsageMonitor:
             config.monitor_rollup_seconds if rollup_seconds is None else rollup_seconds,
         )
         self.config = config
-        self.ledger_store = ledger_store
+        self.ledger_store = (
+            ledger_store
+            if isinstance(ledger_store, PolicyGuardedLedgerStore)
+            else PolicyGuardedLedgerStore(ledger_store, config, "monitor")
+        )
         self.audit_store = audit_store
         self.interval_seconds = interval_seconds
         self.rollup_seconds = rollup_seconds
@@ -147,6 +152,7 @@ class UsageMonitor:
         if self._closed:
             raise RuntimeError("monitor is closed")
         sampled_at = sampled_at or utc_now()
+        ledger = self.ledger_store.load()
         warnings = self._maintain_storage(sampled_at)
         devices = self.snapshot_provider(self.config)
         process_gap, utilization_gap, stable_identifier_gap = _telemetry_capability_gaps(
@@ -159,7 +165,7 @@ class UsageMonitor:
                 stable_identifier_gap,
             )
         )
-        reservations = list_active(self.ledger_store.load(), sampled_at)
+        reservations = list_active(ledger, sampled_at)
         usage_by_gpu = classify_process_usage(devices, reservations, sampled_at)
         workload_ids = _register_sample_workloads(
             self.audit_store,
@@ -368,6 +374,14 @@ class UsageMonitor:
         self._closed = True
         return flushed
 
+    def abort(self) -> None:
+        """Discard buffered telemetry without writing after a policy failure."""
+        self._rollups.clear()
+        self._device_rollups.clear()
+        self._workload_cache.clear()
+        self._pending_warnings.clear()
+        self._closed = True
+
     def take_warnings(self) -> Tuple[str, ...]:
         local = tuple(self._pending_warnings)
         self._pending_warnings.clear()
@@ -531,6 +545,8 @@ def run_monitor(
         ),
         config.monitor_rollup_seconds if rollup_seconds is None else rollup_seconds,
     )
+    daemon_store = PolicyGuardedLedgerStore(ledger_store, config, "monitor")
+    daemon_store.load()
     audit_store = UsageAuditStore(
         config.data_dir,
         config.lock_timeout_seconds,
@@ -550,7 +566,7 @@ def run_monitor(
         stop_event = threading.Event()
         previous_handlers = _install_signal_handlers(stop_event)
         try:
-            monitor = UsageMonitor(config, ledger_store, audit_store, interval_seconds, rollup_seconds)
+            monitor = UsageMonitor(config, daemon_store, audit_store, interval_seconds, rollup_seconds)
             print(
                 f"monitor started: interval={interval_seconds:g}s rollup={rollup_seconds}s "
                 f"data={config.data_dir}"
@@ -566,6 +582,9 @@ def run_monitor(
                         break
                     delay = max(0.0, interval_seconds - (time.monotonic() - started))
                     stop_event.wait(delay)
+            except DaemonPolicyError:
+                monitor.abort()
+                raise
             except BaseException:
                 _close_failed_monitor(monitor, samples)
                 raise

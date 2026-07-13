@@ -180,6 +180,24 @@ class CliTests(unittest.TestCase):
             self.assertEqual(mismatch_payload["ledger_policy"]["status"], "mismatch")
             self.assertIn("granularity", mismatch_payload["ledger_policy"]["message"])
 
+    def test_daemons_return_config_exit_code_without_creating_runtime_state_on_policy_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            created = self.run_bk(["1", "30m", "--quiet"], data_dir)
+            mismatch_env = {"BK_MAX_SHARED_USERS": "3"}
+
+            worker = self.run_bk(["worker", "--once"], data_dir, mismatch_env)
+            monitor = self.run_bk(["monitor", "--once"], data_dir, mismatch_env)
+
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertEqual(worker.returncode, 78, worker.stderr)
+            self.assertEqual(monitor.returncode, 78, monitor.stderr)
+            self.assertIn("worker configuration does not match", worker.stderr)
+            self.assertIn("monitor configuration does not match", monitor.stderr)
+            self.assertEqual(list(data_dir.rglob("worker.lock")), [])
+            self.assertFalse((data_dir / "usage.lock").exists())
+            self.assertFalse((data_dir / "usage").exists())
+
     def test_config_report_uses_external_trusted_config_without_writing_data(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

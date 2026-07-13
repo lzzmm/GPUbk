@@ -44,6 +44,11 @@ trusted path still requires `BK_CONFIG_FILE`.
 Confirm `bk config` reports the new canonical path and a matching ledger policy.
 Reinstall monitor and worker units with `--force` so they capture it. GPUbk rejects
 an existing configuration whose directory can be replaced by shared-group members.
+Both daemons now return `78` before normal startup when their effective policy
+does not match the ledger, and the bundled units deliberately do not restart
+that persistent error. Stop the service, correct the trusted configuration,
+reinstall the unit if captured paths or overrides changed, then start and verify
+it again. Do not alter ledger-bound limits merely to clear the exit code.
 
 GPUbk does not require an in-place ledger migration. It preserves unknown
 reservation extension fields and writes ledger changes atomically. Fields with

@@ -50,6 +50,7 @@ from .models import (
     Actor,
     BookingError,
 )
+from .policy import DaemonPolicyError, PolicyGuardedLedgerStore
 from .storage import LedgerStore
 from .scheduler import list_active
 from .timeparse import parse_iso, to_iso, utc_now
@@ -308,6 +309,8 @@ def run_worker(
     if parallel < 1:
         raise ValueError("worker max parallel jobs must be >= 1")
 
+    daemon_store = PolicyGuardedLedgerStore(store, config, "worker")
+    daemon_store.load()
     worker_id = str(uuid.uuid4())
     hostname = socket.gethostname()
     lease = acquire_job_worker_lease(config, actor, worker_id, hostname)
@@ -328,7 +331,7 @@ def run_worker(
 
     def reconcile(at: datetime) -> None:
         _reconcile_running(
-            store,
+            daemon_store,
             actor,
             running,
             at,
@@ -338,10 +341,12 @@ def run_worker(
         )
 
     next_spec_cleanup_at = 0.0
+    policy_failed = False
+    operation_failed = False
     try:
         previous_handlers = _install_signal_handlers(stop_event)
         recovery = recover_abandoned_jobs(
-            store,
+            daemon_store,
             actor,
             hostname=hostname,
             worker_id=worker_id,
@@ -373,8 +378,8 @@ def run_worker(
             reconcile(now)
             monotonic_now = time.monotonic()
             if monotonic_now >= next_spec_cleanup_at:
-                _cleanup_job_specs_best_effort(config, store, actor, now, quiet)
-                _cleanup_job_logs_best_effort(config, store, actor, now, quiet)
+                _cleanup_job_specs_best_effort(config, daemon_store, actor, now, quiet)
+                _cleanup_job_logs_best_effort(config, daemon_store, actor, now, quiet)
                 next_spec_cleanup_at = monotonic_now + JOB_SPEC_CLEANUP_INTERVAL_SECONDS
 
             if stop_event.is_set():
@@ -383,7 +388,7 @@ def run_worker(
                 if not running:
                     break
             else:
-                current_legacy = active_legacy_job_count(store.load(), actor, now)
+                current_legacy = active_legacy_job_count(daemon_store.load(), actor, now)
                 if current_legacy:
                     counts["waiting"] = max(counts["waiting"], current_legacy)
                     if not quiet and current_legacy != legacy_blocked:
@@ -399,7 +404,7 @@ def run_worker(
                 counts["waiting"] = 0
                 if legacy_blocked:
                     followup = recover_abandoned_jobs(
-                        store,
+                        daemon_store,
                         actor,
                         hostname=hostname,
                         worker_id=worker_id,
@@ -420,7 +425,7 @@ def run_worker(
                 if config.worker_live_guard:
                     eligible_ids, waiting, notices, launch_devices = _launch_guard_eligibility(
                         config,
-                        store,
+                        daemon_store,
                         actor,
                         now,
                         snapshot_provider,
@@ -430,7 +435,7 @@ def run_worker(
                         for notice in notices:
                             print(notice)
                 claimed = claim_due_jobs(
-                    store,
+                    daemon_store,
                     actor,
                     now,
                     worker_id=worker_id,
@@ -445,7 +450,7 @@ def run_worker(
                 for reservation in claimed:
                     started = _start_claimed_job(
                         config,
-                        store,
+                        daemon_store,
                         actor,
                         reservation,
                         log_dir,
@@ -455,7 +460,12 @@ def run_worker(
                         require_validated_devices=config.worker_live_guard,
                     )
                     if started is None:
-                        if _stored_job_status(store, str(reservation.get("id", ""))) == JOB_CANCELLED:
+                        if (
+                            _stored_job_status(
+                                daemon_store, str(reservation.get("id", ""))
+                            )
+                            == JOB_CANCELLED
+                        ):
                             counts["cancelled"] += 1
                         else:
                             counts["failed"] += 1
@@ -472,18 +482,46 @@ def run_worker(
                     break
 
             stop_event.wait(min(poll, 0.2) if once and running else poll)
+    except DaemonPolicyError:
+        policy_failed = True
+        operation_failed = True
+        raise
+    except BaseException:
+        operation_failed = True
+        raise
     finally:
         try:
             try:
                 if running:
-                    _shutdown_running_jobs(
-                        running,
-                        reconcile,
-                        config.worker_termination_grace_seconds,
-                        quiet=quiet,
-                    )
-                _cleanup_job_specs_best_effort(config, store, actor, utc_now(), quiet)
-                _cleanup_job_logs_best_effort(config, store, actor, utc_now(), quiet)
+                    if policy_failed:
+                        _shutdown_running_jobs_without_ledger(
+                            running,
+                            config.worker_termination_grace_seconds,
+                            quiet=quiet,
+                        )
+                    else:
+                        _shutdown_running_jobs(
+                            running,
+                            reconcile,
+                            config.worker_termination_grace_seconds,
+                            quiet=quiet,
+                        )
+                if not policy_failed:
+                    try:
+                        _cleanup_job_specs_best_effort(
+                            config, daemon_store, actor, utc_now(), quiet
+                        )
+                        _cleanup_job_logs_best_effort(
+                            config, daemon_store, actor, utc_now(), quiet
+                        )
+                    except DaemonPolicyError as exc:
+                        if not operation_failed:
+                            raise
+                        if not quiet:
+                            print(
+                                "warning: cleanup skipped after ledger policy drift; "
+                                f"preserving the original worker failure: {exc}"
+                            )
             finally:
                 _restore_signal_handlers(previous_handlers)
         finally:
@@ -1258,6 +1296,31 @@ def _shutdown_running_jobs(
         )
 
 
+def _shutdown_running_jobs_without_ledger(
+    running: Dict[str, RunningJob],
+    grace_seconds: float,
+    *,
+    quiet: bool,
+) -> None:
+    """Stop supervised children without reading or changing shared state."""
+    jobs = tuple(running.values())
+    _stop_running_jobs(running, utc_now())
+    deadline = time.monotonic() + grace_seconds
+    while any(_process_group_alive(item.process) for item in jobs) and time.monotonic() < deadline:
+        time.sleep(min(0.05, max(0.0, deadline - time.monotonic())))
+    _kill_and_reap_running_jobs(jobs)
+    for item in jobs:
+        try:
+            warning = item.log_pump.finish()
+        except (OSError, RuntimeError) as exc:
+            warning = str(exc)
+        if warning and not quiet:
+            print(
+                f"warning: {item.reservation_id[:8]} private job log is incomplete: {warning}"
+            )
+    running.clear()
+
+
 def _kill_and_reap_running_jobs(
     jobs: Sequence[RunningJob],
     timeout_seconds: float = 1.0,
@@ -1410,6 +1473,8 @@ def _cleanup_job_specs_best_effort(
 ) -> None:
     try:
         result = cleanup_job_specs(config, store, actor, now=now)
+    except DaemonPolicyError:
+        raise
     except (BookingError, OSError, ValueError) as exc:
         if not quiet:
             print(f"warning: private job spec cleanup failed: {exc}")
@@ -1428,6 +1493,8 @@ def _cleanup_job_logs_best_effort(
 ) -> None:
     try:
         result = cleanup_job_logs(config, store.load(), actor, now=now)
+    except DaemonPolicyError:
+        raise
     except (BookingError, OSError, ValueError) as exc:
         if not quiet:
             print(f"warning: private job log cleanup failed: {exc}")

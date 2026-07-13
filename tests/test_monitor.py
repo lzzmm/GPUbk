@@ -16,6 +16,7 @@ from bk.monitor import (
     monitor_configuration_error,
     run_monitor,
 )
+from bk.policy import DaemonPolicyError, policy_for_config
 from bk.storage import LedgerStore
 
 
@@ -192,12 +193,57 @@ class UsageMonitorTests(unittest.TestCase):
             self.assertEqual(target.read_text(encoding="utf-8"), "keep")
 
     @staticmethod
-    def write_ledger(path, reservations):
+    def write_ledger(path, reservations, policy=None):
         path.mkdir(parents=True, exist_ok=True)
+        payload = {"version": 1, "reservations": reservations}
+        if policy is not None:
+            payload["policy"] = policy
         (path / "ledger.json").write_text(
-            json.dumps({"version": 1, "reservations": reservations}),
+            json.dumps(payload),
             encoding="utf-8",
         )
+
+    def test_monitor_rejects_policy_mismatch_before_acquiring_telemetry_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            bound = Config(data_dir=data_dir, gpu_count=1, max_shared_users=2)
+            mismatch = Config(data_dir=data_dir, gpu_count=1, max_shared_users=3)
+            self.write_ledger(data_dir, [], policy_for_config(bound))
+
+            with mock.patch.object(UsageAuditStore, "lock") as lock:
+                with self.assertRaisesRegex(DaemonPolicyError, "monitor configuration"):
+                    run_monitor(mismatch, LedgerStore(data_dir), once=True)
+
+            lock.assert_not_called()
+            self.assertFalse((data_dir / "usage").exists())
+            self.assertFalse((data_dir / "usage.lock").exists())
+
+    def test_monitor_validates_policy_before_maintenance_or_gpu_sampling(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            bound = Config(data_dir=data_dir, gpu_count=1, max_shared_users=2)
+            mismatch = Config(data_dir=data_dir, gpu_count=1, max_shared_users=3)
+            self.write_ledger(data_dir, [], policy_for_config(bound))
+            audit_store = mock.Mock(spec=UsageAuditStore)
+            audit_store.load_state.return_value = {}
+            audit_store.load_load_history.return_value = {
+                "version": 1,
+                "updated_at": None,
+                "gpus": {},
+            }
+            snapshot_provider = mock.Mock(return_value=[])
+            monitor = UsageMonitor(
+                mismatch,
+                LedgerStore(data_dir),
+                audit_store,
+                snapshot_provider=snapshot_provider,
+            )
+
+            with self.assertRaisesRegex(DaemonPolicyError, "monitor configuration"):
+                monitor.collect(self.now)
+
+            audit_store.maintain.assert_not_called()
+            snapshot_provider.assert_not_called()
 
     def test_monitor_deduplicates_process_events_and_records_stops(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -436,6 +482,25 @@ class UsageMonitorTests(unittest.TestCase):
                 run_monitor(config, ledger_store, once=True)
 
             failed_monitor.close.assert_called_once_with(record_stopped=False)
+            with UsageAuditStore(data_dir).lock(timeout_seconds=0.05):
+                pass
+
+    def test_run_monitor_discards_buffers_instead_of_crash_flushing_policy_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            config = Config(data_dir=data_dir, gpu_count=1)
+            ledger_store = LedgerStore(data_dir)
+            failed_monitor = mock.Mock(spec=UsageMonitor)
+            failed_monitor.collect.side_effect = DaemonPolicyError("simulated policy drift")
+
+            with mock.patch(
+                "bk.monitor.UsageMonitor",
+                return_value=failed_monitor,
+            ), self.assertRaisesRegex(DaemonPolicyError, "simulated policy drift"):
+                run_monitor(config, ledger_store, once=True)
+
+            failed_monitor.abort.assert_called_once_with()
+            failed_monitor.close.assert_not_called()
             with UsageAuditStore(data_dir).lock(timeout_seconds=0.05):
                 pass
 
@@ -720,6 +785,37 @@ class UsageMonitorTests(unittest.TestCase):
             self.assertEqual(rollup["avg_device_util_percent"], 70)
             self.assertEqual(len(rollup["workload_ids"]), 1)
             self.assertTrue(rollup["partial"])
+
+    def test_abort_discards_pending_rollups_without_writing_or_stopped_heartbeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            self.write_ledger(data_dir, [])
+            config = Config(data_dir=data_dir, gpu_count=1)
+            audit_store = UsageAuditStore(data_dir)
+            device = GpuSnapshot(
+                0,
+                "sim",
+                utilization_percent=50,
+                source="simulation",
+            )
+            monitor = UsageMonitor(
+                config,
+                LedgerStore(data_dir),
+                audit_store,
+                snapshot_provider=lambda _config: [device],
+            )
+
+            monitor.collect(self.now)
+            self.assertEqual(audit_store.recent_rollups(10), [])
+            monitor.abort()
+
+            self.assertEqual(monitor.close(self.now + timedelta(seconds=1)), 0)
+            self.assertEqual(audit_store.recent_rollups(10), [])
+            collector = audit_store.load_collector_status(
+                now=self.now + timedelta(seconds=1)
+            )
+            self.assertEqual(collector["reported_status"], "degraded")
+            self.assertIsNone(collector.get("stopped_at"))
 
     def test_reserved_but_idle_user_is_present_in_rollup(self):
         with tempfile.TemporaryDirectory() as tmp:

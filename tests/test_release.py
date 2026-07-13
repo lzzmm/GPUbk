@@ -109,7 +109,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("ExecStart=@PYTHON_EXECUTABLE@ -m bk monitor\n", unit)
         self.assertNotIn("--interval", unit)
         self.assertNotIn("--rollup", unit)
-        self.assertIn("RestartPreventExitStatus=75 77", unit)
+        self.assertIn("RestartPreventExitStatus=75 77 78", unit)
         self.assertIn("StartLimitIntervalSec=60", unit)
         self.assertIn("StartLimitBurst=3", unit)
 
@@ -118,7 +118,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
             encoding="utf-8"
         )
 
-        self.assertIn("RestartPreventExitStatus=75", unit)
+        self.assertIn("RestartPreventExitStatus=75 78", unit)
         self.assertIn("TimeoutStopSec=75", unit)
         self.assertIn("StartLimitIntervalSec=60", unit)
         self.assertIn("StartLimitBurst=3", unit)

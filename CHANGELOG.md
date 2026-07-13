@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Fail worker and monitor startup closed when their trusted configuration disagrees with the
+  ledger, revalidate every daemon cycle and each worker transaction, discard buffered telemetry
+  on runtime policy drift, and reserve non-restarting exit status `78` for operator repair.
 - Bind each UID-private worker lease to a privacy-safe data-directory instance ID, so a worker
   serving another ledger or an old worker without the matching instance lock cannot falsely
   satisfy scheduled-command readiness checks in CLI, TUI, Agent, or MCP views.

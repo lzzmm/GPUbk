@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import Any, Callable, Optional, Tuple
 
 from .config import Config
 from .granularity import DEFAULT_SLOT_MINUTES
@@ -12,6 +12,48 @@ BOOKING_GRANULARITY_SECONDS = DEFAULT_SLOT_MINUTES * 60
 LEDGER_POLICY_VERSION = 1
 LEDGER_POLICY_KEY = "policy"
 STORAGE_GID_POLICY_KEY = "storage_gid"
+DAEMON_POLICY_EXIT_CODE = 78
+
+
+class DaemonPolicyError(BookingError):
+    """A long-running process cannot safely use the configured ledger."""
+
+
+class PolicyGuardedLedgerStore:
+    """Validate daemon policy on every ledger read and locked transaction."""
+
+    def __init__(self, store: Any, config: Config, daemon: str):
+        self._store = store
+        self._config = config
+        self._daemon = daemon
+        self._saw_bound_policy = False
+
+    def load(self) -> dict:
+        ledger = self._store.load()
+        self._validate(ledger)
+        return ledger
+
+    def load_read_only(self) -> dict:
+        ledger = self._store.load_read_only()
+        self._validate(ledger)
+        return ledger
+
+    def transaction(self, mutator: Callable[[dict], Any]) -> Any:
+        def guarded(ledger: dict) -> Any:
+            self._validate(ledger)
+            return mutator(ledger)
+
+        return self._store.transaction(guarded)
+
+    def _validate(self, ledger: dict) -> None:
+        if ledger.get(LEDGER_POLICY_KEY) is None and self._saw_bound_policy:
+            raise DaemonPolicyError(
+                f"{self._daemon} cannot continue because the ledger policy was removed; "
+                "restart it after the reset or restore completes"
+            )
+        validate_daemon_ledger_policy(ledger, self._config, self._daemon)
+        if ledger.get(LEDGER_POLICY_KEY) is not None:
+            self._saw_bound_policy = True
 
 
 def policy_for_config(config: Config) -> dict:
@@ -65,6 +107,16 @@ def validate_ledger_policy(ledger: dict, config: Config) -> None:
         )
     if mismatches:
         raise BookingError("local configuration does not match ledger policy: " + "; ".join(mismatches))
+
+
+def validate_daemon_ledger_policy(ledger: dict, config: Config, daemon: str) -> None:
+    try:
+        validate_ledger_policy(ledger, config)
+    except BookingError as exc:
+        raise DaemonPolicyError(
+            f"{daemon} configuration does not match the ledger; "
+            f"stop the daemon and align its trusted configuration: {exc}"
+        ) from exc
 
 
 def ledger_storage_modes(ledger: dict) -> Optional[Tuple[str, str]]:
