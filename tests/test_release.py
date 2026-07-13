@@ -352,7 +352,9 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("attach the wheel and sdist, then publish the draft", guide)
         self.assertIn("automatic digest comparison", guide)
         self.assertIn("confirm its recorded hashes", guide)
-        self.assertIn("prerelease-only TestPyPI path", guide)
+        self.assertIn("enter that ID as `promote_run_id`", guide)
+        self.assertIn("`PYPI_RELEASE_ENABLED` to `false`", guide)
+        self.assertIn("does not create a GitHub tag or GitHub Release", guide)
         self.assertNotIn("git tag -a v0.1.0", guide)
 
 
