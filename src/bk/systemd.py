@@ -9,7 +9,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Mapping, Optional
 
-from .config import CONFIG_ENV_MAP, Config
+from .config import CONFIG_ENV_MAP, MAX_GPU_COUNT, Config
 from .fileio import ensure_directory, fsync_directory, open_existing_regular
 from .models import BookingError
 from .userdirs import xdg_user_directory
@@ -67,6 +67,7 @@ def system_unit_text(
     config_file: Path,
     data_dir: Path,
     socket_directory: Path,
+    gpu_count: int,
     python_executable: Optional[Path] = None,
 ) -> str:
     filename = _system_unit_filename(kind)
@@ -82,6 +83,12 @@ def system_unit_text(
         or service_gid < 0
     ):
         raise BookingError("system service GID must be a non-negative integer")
+    if (
+        isinstance(gpu_count, bool)
+        or not isinstance(gpu_count, int)
+        or not 1 <= gpu_count <= MAX_GPU_COUNT
+    ):
+        raise BookingError(f"system service GPU count must be between 1 and {MAX_GPU_COUNT}")
     executable = _absolute_required_path(
         Path(python_executable or sys.executable), "Python executable"
     )
@@ -119,6 +126,9 @@ def system_unit_text(
         "@DATA_DIRECTORY@": _escape_systemd_path(str(state_directory)),
         "@SOCKET_DIRECTORY@": _escape_systemd_path(str(runtime_directory)),
         "@RUNTIME_DIRECTORY@": runtime_directives,
+        "@NVIDIA_DEVICE_ALLOW@": (
+            _nvidia_device_allow(gpu_count) if kind == "monitor" else ""
+        ),
     }
     rendered = template
     for marker, value in replacements.items():
@@ -126,6 +136,11 @@ def system_unit_text(
     if _TEMPLATE_MARKER.search(rendered):
         raise BookingError(f"unresolved systemd template marker in {filename}")
     return SYSTEM_MANAGED_UNIT_MARKER + rendered
+
+
+def _nvidia_device_allow(gpu_count: int) -> str:
+    paths = ["/dev/nvidiactl", *(f"/dev/nvidia{index}" for index in range(gpu_count))]
+    return "\n".join(f"DeviceAllow={path} rw" for path in paths)
 
 
 def system_unit_names() -> tuple[str, ...]:

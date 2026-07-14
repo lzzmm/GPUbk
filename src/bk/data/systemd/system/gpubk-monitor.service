@@ -30,13 +30,9 @@ ProtectControlGroups=true
 ProtectKernelLogs=true
 ProtectClock=true
 # ProtectClock adds an RTC allow rule. Keep the resulting device allowlist
-# explicit and grant this monitor access only to NVIDIA character devices.
+# explicit and grant this monitor only its configured NVIDIA device nodes.
 DevicePolicy=closed
-DeviceAllow=char-nvidia-frontend rw
-DeviceAllow=char-nvidia-uvm rw
-DeviceAllow=char-nvidia-caps rw
-DeviceAllow=char-nvidia-nvlink rw
-DeviceAllow=char-nvidia-nvswitch rw
+@NVIDIA_DEVICE_ALLOW@
 RestrictSUIDSGID=true
 LockPersonality=true
 ReadWritePaths=@DATA_DIRECTORY@ @SOCKET_DIRECTORY@

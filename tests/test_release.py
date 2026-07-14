@@ -235,14 +235,15 @@ class ReleaseConfigurationTests(unittest.TestCase):
             config_file=Path("/var/lib/gpubk/config.json"),
             service_uid=1000,
             service_gid=1000,
+            gpu_count=8,
             data_dir=Path("/var/lib/gpubk"),
             socket_directory=Path("/run/gpubk"),
         )
         self.assertIn("RuntimeDirectoryPreserve=yes", rendered_broker)
         self.assertIn("Wants=gpubk-broker.service", monitor)
         self.assertIn("DevicePolicy=closed", monitor)
-        self.assertIn("DeviceAllow=char-nvidia-frontend rw", monitor)
-        self.assertNotIn("char-nvidia", broker)
+        self.assertIn("@NVIDIA_DEVICE_ALLOW@", monitor)
+        self.assertNotIn("DeviceAllow=/dev/nvidia", broker)
 
     def test_prerelease_targets_a_documented_final_version(self):
         init = (ROOT / "src" / "bk" / "__init__.py").read_text(encoding="utf-8")

@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Optional, Sequence
 
+from .config import MAX_GPU_COUNT
 from .fileio import fsync_directory, open_existing_regular
 from .models import BookingError
 from .systemd import system_unit_names, system_unit_text
@@ -41,6 +42,7 @@ class SystemServicesPlan:
             "python_executable": self.document["python_executable"],
             "service_uid": self.document["service_uid"],
             "service_gid": self.document["service_gid"],
+            "gpu_count": self.document["gpu_count"],
             "units": dict(self.statuses),
             "blockers": list(self.blockers),
         }
@@ -54,12 +56,14 @@ def plan_system_services_install(
     socket_directory: Path,
     service_uid: int,
     service_gid: int,
+    gpu_count: int,
     unit_directory: Path,
     python_executable: Optional[Path],
     expected_owner: int,
     force: bool,
 ) -> SystemServicesPlan:
     _validate_identity(service_uid, service_gid)
+    _validate_gpu_count(gpu_count)
     config_file = _absolute_path(config_file, "configuration")
     data_dir = _absolute_path(data_dir, "data directory")
     socket_directory = _absolute_path(socket_directory, "socket directory")
@@ -117,6 +121,7 @@ def plan_system_services_install(
         python_executable=executable,
         expected_owner=expected_owner,
         expected_gid=managed_gid,
+        gpu_count=gpu_count,
     )
     files = {}
     for name in system_unit_names():
@@ -143,6 +148,7 @@ def plan_system_services_install(
         "socket_directory": str(socket_directory),
         "service_uid": service_uid,
         "service_gid": service_gid,
+        "gpu_count": gpu_count,
         "files": files,
     }
     document = validate_system_services_document(document)
@@ -254,6 +260,7 @@ def retarget_system_services_document(
         python_executable=Path(current["python_executable"]),
         expected_owner=expected_owner,
         expected_gid=Path(current["unit_directory"]).stat().st_gid,
+        gpu_count=current["gpu_count"],
     )
     updated = {
         **current,
@@ -341,6 +348,8 @@ def validate_system_services_document(value: object) -> dict:
         if not isinstance(path, str) or str(_absolute_path(Path(path), key)) != path:
             raise BookingError(f"system service manifest {key} is invalid")
     _validate_identity(value.get("service_uid"), value.get("service_gid"))
+    gpu_count = value.get("gpu_count", MAX_GPU_COUNT)
+    _validate_gpu_count(gpu_count)
     files = value.get("files")
     if not isinstance(files, dict) or set(files) != set(system_unit_names()):
         raise BookingError("system service manifest file set is invalid")
@@ -361,7 +370,7 @@ def validate_system_services_document(value: object) -> dict:
                 item["previous_managed"], managed=True
             )
         normalized_files[name] = normalized
-    return {**value, "files": normalized_files}
+    return {**value, "gpu_count": gpu_count, "files": normalized_files}
 
 
 def enabled_unit_links(document: object) -> tuple[Path, ...]:
@@ -386,6 +395,7 @@ def _render_managed_files(
     python_executable: Path,
     expected_owner: int,
     expected_gid: int,
+    gpu_count: int,
 ) -> dict[str, dict]:
     rendered = {}
     for kind, name in (("broker", system_unit_names()[0]), ("monitor", system_unit_names()[1])):
@@ -396,6 +406,7 @@ def _render_managed_files(
             config_file=config_file,
             data_dir=data_dir,
             socket_directory=socket_directory,
+            gpu_count=gpu_count,
             python_executable=python_executable,
         ).encode()
         rendered[name] = _payload_state(
@@ -425,6 +436,15 @@ def _validate_identity(uid: object, gid: object) -> None:
         raise BookingError("system service UID must be a positive integer")
     if isinstance(gid, bool) or not isinstance(gid, int) or gid < 0:
         raise BookingError("system service GID must be a non-negative integer")
+
+
+def _validate_gpu_count(value: object) -> None:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= MAX_GPU_COUNT
+    ):
+        raise BookingError(f"system service GPU count must be between 1 and {MAX_GPU_COUNT}")
 
 
 def _absolute_path(path: Path, label: str) -> Path:

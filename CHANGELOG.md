@@ -4,9 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
-- Preserve the monitor's systemd device allowlist hardening while explicitly permitting NVIDIA
-  character devices; `ProtectClock=true` otherwise leaves GPU telemetry blocked by the implicit
-  RTC-only device rule.
+- Preserve the monitor's systemd device allowlist hardening while explicitly permitting only
+  `/dev/nvidiactl` and the configured `/dev/nvidiaN` nodes; `ProtectClock=true` otherwise leaves
+  GPU telemetry blocked by the implicit RTC-only device rule, and group aliases are unreliable
+  for NVIDIA control-device access on affected cgroup/systemd combinations.
 - Treat unavailable per-process SM utilization as an explicit optional capability rather than a
   deployment blocker when device telemetry, process discovery, UID attribution, and stable GPU
   identifiers are all available. Existing degraded collector documents remain readable.

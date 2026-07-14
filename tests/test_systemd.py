@@ -26,6 +26,7 @@ class BundledSystemdTests(unittest.TestCase):
             "config_file": Path("/etc/gpubk/config.json"),
             "data_dir": Path("/var/lib/gpubk"),
             "socket_directory": Path("/run/gpubk"),
+            "gpu_count": 8,
             "python_executable": Path("/opt/gpubk/bin/python"),
         }
 
@@ -55,10 +56,11 @@ class BundledSystemdTests(unittest.TestCase):
         self.assertIn("RuntimeDirectory=gpubk", broker)
         self.assertIn('ExecStart="/opt/gpubk/bin/python" -m bk monitor', monitor)
         self.assertIn("DevicePolicy=closed", monitor)
-        self.assertIn("DeviceAllow=char-nvidia-frontend rw", monitor)
-        self.assertIn("DeviceAllow=char-nvidia-uvm rw", monitor)
-        self.assertIn("DeviceAllow=char-nvidia-caps rw", monitor)
-        self.assertNotIn("char-nvidia", broker)
+        self.assertIn("DeviceAllow=/dev/nvidiactl rw", monitor)
+        self.assertIn("DeviceAllow=/dev/nvidia0 rw", monitor)
+        self.assertIn("DeviceAllow=/dev/nvidia7 rw", monitor)
+        self.assertNotIn("DeviceAllow=/dev/nvidia8 rw", monitor)
+        self.assertNotIn("DeviceAllow=/dev/nvidia", broker)
         self.assertNotIn("RuntimeDirectory=", monitor)
 
     def test_system_broker_creates_nested_run_directory_but_not_persistent_path(self):
@@ -67,6 +69,7 @@ class BundledSystemdTests(unittest.TestCase):
             "service_gid": 1001,
             "config_file": Path("/etc/gpubk/config.json"),
             "data_dir": Path("/srv/gpubk"),
+            "gpu_count": 8,
             "python_executable": Path("/opt/gpubk/bin/python"),
         }
 
@@ -88,6 +91,7 @@ class BundledSystemdTests(unittest.TestCase):
             config_file=Path("/etc/gpubk/config.json"),
             data_dir=Path('/srv/GPU lab/percent%/quote"'),
             socket_directory=Path("/run/GPU lab"),
+            gpu_count=8,
             python_executable=Path("/opt/gpubk/bin/python"),
         )
 
@@ -106,10 +110,13 @@ class BundledSystemdTests(unittest.TestCase):
             "config_file": Path("/etc/gpubk/config.json"),
             "data_dir": Path("/var/lib/gpubk"),
             "socket_directory": Path("/run/gpubk"),
+            "gpu_count": 8,
             "python_executable": Path("/opt/gpubk/bin/python"),
         }
         with self.assertRaisesRegex(BookingError, "positive integer"):
             system_unit_text("broker", **{**common, "service_uid": 0})
+        with self.assertRaisesRegex(BookingError, "GPU count"):
+            system_unit_text("monitor", **{**common, "gpu_count": 0})
         with self.assertRaisesRegex(BookingError, "must be absolute"):
             system_unit_text(
                 "broker", **{**common, "python_executable": Path("python3")}

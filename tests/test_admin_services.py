@@ -31,6 +31,7 @@ class AdminSystemServicesTests(unittest.TestCase):
             socket_directory=root / "run" / "gpubk",
             service_uid=uid,
             service_gid=gid,
+            gpu_count=8,
             unit_directory=units,
             python_executable=Path(os.sys.executable),
             expected_owner=os.geteuid(),
