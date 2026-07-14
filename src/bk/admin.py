@@ -744,9 +744,6 @@ def inspect_admin_system_services(
     broker_socket = _manifest_absolute_path(manifest, "broker_socket")
     service_uid = _manifest_nonnegative_int(manifest, "service_uid")
     service_gid = _manifest_nonnegative_int(manifest, "service_gid")
-    gpu_count = document.get("gpu_count")
-    if isinstance(gpu_count, bool) or not isinstance(gpu_count, int):
-        raise BookingError("trusted configuration gpu_count is invalid")
     existing = manifest.get("system_services")
 
     if operation == "status":
@@ -792,7 +789,6 @@ def inspect_admin_system_services(
             socket_directory=broker_socket.parent,
             service_uid=service_uid,
             service_gid=service_gid,
-            gpu_count=gpu_count,
             unit_directory=unit_directory,
             python_executable=python_executable,
             expected_owner=expected_owner,

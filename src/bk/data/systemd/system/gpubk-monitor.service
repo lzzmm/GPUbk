@@ -28,11 +28,8 @@ ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
 ProtectKernelLogs=true
-ProtectClock=true
-# ProtectClock adds an RTC allow rule. Keep the resulting device allowlist
-# explicit and grant this monitor only its configured NVIDIA device nodes.
-DevicePolicy=closed
-@NVIDIA_DEVICE_ALLOW@
+# ProtectClock is intentionally omitted: its implicit RTC DeviceAllow rule
+# activates a device cgroup allowlist that can prevent NVML initialization.
 RestrictSUIDSGID=true
 LockPersonality=true
 ReadWritePaths=@DATA_DIRECTORY@ @SOCKET_DIRECTORY@
