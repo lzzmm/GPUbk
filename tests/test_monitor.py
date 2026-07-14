@@ -379,6 +379,9 @@ class UsageMonitorTests(unittest.TestCase):
             self.assertEqual({event["event"] for event in first.events}, {"process-start"})
             self.assertEqual(first.warnings, ("per-process utilization unavailable for GPU(s) 0",))
             self.assertEqual(second.warnings, ())
+            collector = UsageAuditStore(data_dir).load_collector_status(now=self.now)
+            self.assertEqual(collector["state"], "running")
+            self.assertEqual(collector["process_utilization_gap"], [0])
 
     def test_collector_heartbeat_is_rate_limited_and_marks_graceful_stop(self):
         with tempfile.TemporaryDirectory() as tmp:

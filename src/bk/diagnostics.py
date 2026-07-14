@@ -435,8 +435,8 @@ def _probe_gpu(config: Config) -> dict:
         if utilization_gap:
             return _result(
                 "gpu-telemetry",
-                "warn",
-                "NVML works, but per-process utilization is unavailable",
+                "pass",
+                "NVML device and process telemetry is available; per-process utilization is unsupported",
                 process_utilization_unavailable_indices=utilization_gap,
                 **details,
             )

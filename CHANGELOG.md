@@ -7,6 +7,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Preserve the monitor's systemd device allowlist hardening while explicitly permitting NVIDIA
   character devices; `ProtectClock=true` otherwise leaves GPU telemetry blocked by the implicit
   RTC-only device rule.
+- Treat unavailable per-process SM utilization as an explicit optional capability rather than a
+  deployment blocker when device telemetry, process discovery, UID attribution, and stable GPU
+  identifiers are all available. Existing degraded collector documents remain readable.
 - Compare every TestPyPI and PyPI wheel and source distribution SHA-256 against the original CI
   build before accepting an index verification or continuing a production release.
 - Make the no-GPU demo portable to systems where `/tmp` is a symbolic link, while retaining the

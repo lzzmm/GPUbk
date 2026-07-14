@@ -84,6 +84,18 @@ class CollectorStatusTests(unittest.TestCase):
         self.assertEqual(stopped_status["state"], "stopped")
         self.assertFalse(stopped_status["fresh"])
 
+    def test_running_status_may_report_optional_process_utilization_gap(self):
+        limited_device = dict(self.devices[0], process_utilization=False)
+        payload = self.document(
+            devices=[limited_device],
+            process_utilization_gap=[0],
+        )
+
+        status = classify_collector_document(payload, now=self.now)
+
+        self.assertEqual(status["state"], "running")
+        self.assertEqual(status["process_utilization_gap"], [0])
+
     def test_legacy_status_without_stable_identifier_capability_is_degraded(self):
         payload = self.document()
         payload.pop("stable_device_identifier_gap")

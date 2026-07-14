@@ -293,7 +293,6 @@ class UsageMonitor:
         degraded = bool(
             process_gap
             or identity_gap
-            or utilization_gap
             or stable_identifier_gap
             or any(not item["device_telemetry"] for item in device_status)
         )

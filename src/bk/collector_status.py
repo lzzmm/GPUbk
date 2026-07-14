@@ -186,16 +186,16 @@ def validate_collector_document(payload: object) -> dict:
             raise CollectorStatusError(
                 "stable_device_identifier_gap must match per-device stable identifier capabilities"
             )
-    derived_degraded = bool(
+    safety_degraded = bool(
         process_gap
         or identity_gap
-        or utilization_gap
         or stable_identifier_gap
         or any(not bool(item["device_telemetry"]) for item in devices)
     )
-    if state == "running" and derived_degraded:
+    any_capability_gap = bool(safety_degraded or utilization_gap)
+    if state == "running" and safety_degraded:
         raise CollectorStatusError("running collector status contains degraded capabilities")
-    if state == "degraded" and not derived_degraded:
+    if state == "degraded" and not any_capability_gap:
         raise CollectorStatusError("degraded collector status has no capability gap")
     if heartbeat <= 0:
         raise CollectorStatusError("heartbeat_interval_seconds must be positive")

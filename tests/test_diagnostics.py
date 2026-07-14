@@ -160,7 +160,7 @@ class DeploymentDiagnosticsTests(unittest.TestCase):
             self.assertEqual(gpu["status"], "fail")
             self.assertEqual(gpu["process_telemetry_unavailable_indices"], [0])
 
-    def test_nvml_without_per_process_utilization_is_not_strictly_ready(self):
+    def test_nvml_without_optional_per_process_utilization_remains_ready(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Config(data_dir=Path(tmp) / "data", gpu_count=1)
             devices = [
@@ -179,9 +179,9 @@ class DeploymentDiagnosticsTests(unittest.TestCase):
                 checks = run_deployment_probes(config)
 
             gpu = next(item for item in checks if item["name"] == "gpu-telemetry")
-            self.assertEqual(gpu["status"], "warn")
+            self.assertEqual(gpu["status"], "pass")
             self.assertEqual(gpu["process_utilization_unavailable_indices"], [0])
-            self.assertFalse(probes_ready(checks))
+            self.assertTrue(probes_ready(checks))
 
     def test_nvml_requires_stable_identifiers_for_scheduled_command_binding(self):
         with tempfile.TemporaryDirectory() as tmp:
