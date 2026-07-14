@@ -2,7 +2,22 @@
 
 All notable changes are documented here. The project follows Semantic Versioning once a public release is published.
 
-## 0.2.0 - Unreleased
+## 0.2.0 - 2026-07-15
+
+- Add `bk run`: it can launch a command on the current UID's active reservation with stable
+  CUDA device binding and a hard reservation-end deadline, or book the earliest legal slot and
+  hand an immediate/future command to the bounded worker.
+- Make guided booking default to one GPU for 30 minutes, expose fixed and excluded GPU choices,
+  and let strict shared-memory policy resolve `auto` into a conservative integer MiB/GPU budget
+  from live capacity telemetry instead of rejecting it after review.
+- Expand compact status reservations into aligned Slot, GPU, user, VRAM/GPU, job, start, end, and
+  duration columns on wide terminals; render fixed-position GPU maps with muted empty cells and
+  align TUI utilization percentages at the column boundary.
+- Label usage summaries as historical sampled data that excludes future reservations, and add
+  compact seven-day daily and eight-week weekly active/reserved GPU-hour charts to `bk usage`.
+- Split ordinary automation help from administrator-only operations, hide the administrator block
+  for other UIDs, retain read-only `bk doctor` for users, and document six/eight-character IDs as
+  collision-checked prefixes of the same stored UUID.
 
 - Add an optional, bounded interactive-login notice for each UID's active and nearest
   reservation. It is read-only, silent when empty, protected by a one-second shell timeout,
@@ -41,8 +56,9 @@ All notable changes are documented here. The project follows Semantic Versioning
   explicit crash recovery for the trusted configuration and install manifest.
 - Keep broker worker updates bounded on large ledgers by sending only changed reservations under
   digest compare-and-swap, while preserving the old full-ledger operation for rolling upgrades.
-- Default new shared-server deployments to automatic share-weighted VRAM estimates; administrators
-  can still opt into mandatory `--mem` declarations with `--require-shared-memory`.
+- Default new shared-server deployments to automatic share-weighted VRAM estimates. In strict
+  memory mode, `auto` resolves to an integer per-GPU budget from live capacity telemetry and fails
+  closed when capacity is unavailable; an explicit `--mem` value remains accepted.
 - Standardize the public brand as GPUBK and add `bk info`, TUI `i`, JSON, and Agent context
   access to the responsible Linux administrator account and its sanitized GECOS contact fields.
 - Render systemd path directives without surrounding quotes so system services load correctly on

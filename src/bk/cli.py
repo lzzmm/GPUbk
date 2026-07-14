@@ -3,8 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import shlex
 import shutil
+import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
 from itertools import combinations, islice
@@ -16,7 +18,7 @@ from .admin_info import administrator_display_lines, administrator_info
 from .advisor import GpuAdvice, build_gpu_advice
 from .config import CONFIG_ENV_MAP, CONFIG_VERSION, Config, load_config
 from .fileio import open_existing_regular
-from .gpu import snapshot
+from .gpu import cuda_visible_device_tokens, snapshot
 from .identity import current_actor
 from .joblogs import WorkerBusyError, JobLogCleanupResult, cleanup_job_logs, job_log_paths
 from .monitor import (
@@ -107,13 +109,13 @@ def main(argv: Optional[List[str]] = None) -> int:
     try:
         if argv and argv[0] == "help":
             if len(argv) == 1:
-                _print_help()
+                _print_help(_load_help_config())
                 return 0
             argv = [argv[1], "--help", *argv[2:]]
         if argv:
             head = argv[0]
             if head in {"-h", "--help"}:
-                _print_help()
+                _print_help(_load_help_config())
                 return 0
             if head in {"-V", "--version", "version"}:
                 print(f"bk {__version__}")
@@ -159,6 +161,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return run_usage_cli(argv[1:], config)
         if head in {"worker", "w"}:
             return _worker_command(argv[1:], config, store)
+        if head in {"run", "r"}:
+            return _run_command(argv[1:], config, store)
         if head in {"jobs", "j"}:
             return _jobs_command(argv[1:], config, store)
         if head in {"job-log", "jl"}:
@@ -196,7 +200,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         if head in {"list", "ls", "l"}:
             return _list_command(argv[1:], config, store)
         print(f"Unknown command: {head}", file=sys.stderr)
-        _print_help(file=sys.stderr)
+        _print_help(config, file=sys.stderr)
         return 2
     except MonitorBusyError as exc:
         print(f"bk: {exc}", file=sys.stderr)
@@ -355,6 +359,9 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         return True
     if head in {"worker", "w"}:
         _worker_command(args[1:], config, store)
+        return True
+    if head in {"run", "r"}:
+        _run_command(args[1:], config, store)
         return True
     if head in {"jobs", "j"}:
         _jobs_command(args[1:], config, store)
@@ -826,6 +833,182 @@ def _worker_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     if args.once and summary.waiting:
         return WORKER_WAITING_EXIT_CODE
     return 0
+
+
+def _run_command(argv: List[str], config: Config, store: LedgerStore) -> int:
+    run_args, command_argv = _split_job_command(argv)
+    booking_mode = MODE_SHARED
+    if run_args and run_args[0] in {"x", "exclusive"}:
+        booking_mode = MODE_EXCLUSIVE
+        run_args = run_args[1:]
+    elif run_args and run_args[0] in {"s", "shared"}:
+        run_args = run_args[1:]
+
+    if _looks_like_auto_request(run_args):
+        if command_argv is None:
+            raise BookingError(
+                "booking-and-run requires a command after --, for example "
+                "`bk run 1 30m -- python train.py`"
+            )
+        result = _book_command(
+            [*run_args, "--", *command_argv],
+            booking_mode,
+            config,
+            store,
+            prog="bk run",
+        )
+        if result:
+            return result
+        actor = _current_actor()
+        now = utc_now()
+        due = [
+            item
+            for item in _own_job_reservations(store, actor)
+            if parse_iso(item["start_at"]) <= now < parse_iso(item["end_at"])
+            and item.get("job", {}).get("status") in {"pending", "waiting"}
+        ]
+        if not due:
+            print("run: queued; your worker will launch the command at the reservation start")
+            print("worker: keep `bk worker` running; check with `bk worker --status`")
+            return 0
+        status = inspect_worker_status(config, actor)
+        if status.get("running") is True:
+            print("run: handed to the running worker")
+            return 0
+        print("run: reservation is active; starting a one-shot worker")
+        return _worker_command(["--once"], config, store)
+
+    parser = argparse.ArgumentParser(
+        prog="bk run",
+        description=(
+            "Run a command on GPUs from your active reservation, or book and run with "
+            "`bk run COUNT DURATION -- COMMAND`."
+        ),
+    )
+    parser.add_argument("reservation", nargs="?", help="number or unique booking ID prefix")
+    args = parser.parse_args(run_args)
+    actor = _current_actor()
+    now = utc_now()
+    current = [
+        item
+        for item in _own_active_reservations(store, actor)
+        if parse_iso(item["start_at"]) <= now < parse_iso(item["end_at"])
+    ]
+    selected = _select_current_run_reservations(current, args.reservation)
+    if not selected:
+        _print_next_run_advice(config, store, actor, now)
+        if command_argv is not None:
+            raise BookingError(
+                "you have no reservation active now; use "
+                "`bk run 1 30m -- COMMAND` to book the earliest slot and run"
+            )
+        return 0
+
+    gpus = sorted({int(gpu) for item in selected for gpu in item.get("gpus", [])})
+    ids = [str(item.get("id", "")) for item in selected]
+    print(
+        f"run: GPU={','.join(map(str, gpus))} from booking(s) "
+        f"{','.join(item[:8] for item in ids)}",
+        flush=True,
+    )
+    if command_argv is None:
+        print("example: bk run -- python train.py")
+        return 0
+    environment = os.environ.copy()
+    launch_devices = cuda_visible_device_tokens(gpus, snapshot(config))
+    environment["CUDA_VISIBLE_DEVICES"] = ",".join(launch_devices)
+    environment["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+    environment["BK_RESERVED_GPUS"] = ",".join(map(str, gpus))
+    environment["GPUBK_RESERVATION_IDS"] = ",".join(ids)
+    environment["GPUBK_GPU_IDS"] = ",".join(map(str, gpus))
+    if len(ids) == 1:
+        environment["BK_RESERVATION_ID"] = ids[0]
+    memory_budgets = {
+        int(item["expected_memory_mb"])
+        for item in selected
+        if item.get("expected_memory_mb") is not None
+    }
+    if len(memory_budgets) == 1:
+        environment["BK_EXPECTED_GPU_MEMORY_MB"] = str(next(iter(memory_budgets)))
+    deadline = min(parse_iso(item["end_at"]) for item in selected)
+    return _run_with_booking_deadline(command_argv, environment, deadline)
+
+
+def _run_with_booking_deadline(
+    command_argv: List[str], environment: dict[str, str], deadline: datetime
+) -> int:
+    remaining = max(0.0, (deadline - utc_now()).total_seconds())
+    if remaining <= 0:
+        raise BookingError("the selected reservation has already ended")
+    process = subprocess.Popen(command_argv, env=environment, start_new_session=True)
+    try:
+        return process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired:
+        print("run: reservation ended; stopping the command", file=sys.stderr)
+        _stop_process_group(process, signal.SIGTERM)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _stop_process_group(process, signal.SIGKILL)
+            process.wait()
+        return 124
+    except KeyboardInterrupt:
+        _stop_process_group(process, signal.SIGINT)
+        try:
+            return process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _stop_process_group(process, signal.SIGKILL)
+            process.wait()
+            return 130
+
+
+def _stop_process_group(process: subprocess.Popen, sig: signal.Signals) -> None:
+    if process.poll() is not None:
+        return
+    try:
+        os.killpg(process.pid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _select_current_run_reservations(
+    current: List[dict], token: Optional[str]
+) -> List[dict]:
+    if token is None:
+        return current
+    if token.isdigit():
+        index = int(token)
+        if 1 <= index <= len(current):
+            return [current[index - 1]]
+    matches = [item for item in current if str(item.get("id", "")).startswith(token)]
+    if len(matches) > 1:
+        raise BookingError(f"ambiguous active reservation ID: {token}")
+    if not matches:
+        raise BookingError(f"no active reservation matches: {token}")
+    return matches
+
+
+def _print_next_run_advice(
+    config: Config,
+    store: LedgerStore,
+    actor: Actor,
+    now: datetime,
+) -> None:
+    recommendation = recommend_booking(
+        config,
+        store,
+        actor,
+        count=1,
+        duration_seconds=max(30 * 60, config.slot_seconds),
+        start_at=now,
+        mode=MODE_SHARED,
+        allow_queue=True,
+        share_units=1,
+    )["recommendation"]
+    gpu_text = ",".join(map(str, recommendation["gpus"]))
+    start = format_local(str(recommendation["start_at"]))
+    print(f"run: no booking is active now; earliest suggestion is GPU={gpu_text} at {start}")
+    print("book and run: bk run 1 30m -- python train.py")
 
 
 def _jobs_command(argv: List[str], config: Config, store: LedgerStore) -> int:
@@ -1532,7 +1715,15 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
     recommendation = preview["recommendation"]
     start_text = format_local(recommendation["start_at"])
     gpu_text = ",".join(map(str, recommendation["gpus"]))
-    memory_text = "share-weighted estimate" if expected_memory_mb is None else _format_memory_mb(expected_memory_mb)
+    resolved_preview_memory = preview.get("request", {}).get(
+        "expected_memory_mb_per_gpu"
+    )
+    if expected_memory_mb is None and resolved_preview_memory is not None:
+        memory_text = f"auto (~{_format_memory_mb(int(resolved_preview_memory))})"
+    elif expected_memory_mb is None:
+        memory_text = "auto (share-weighted)"
+    else:
+        memory_text = _format_memory_mb(expected_memory_mb)
     print("Review")
     print(f"  mode={mode_raw} GPUs={count} ({gpu_text}) duration={_duration_compact(duration)}")
     if excluded:
@@ -1592,14 +1783,14 @@ def _guided_booking_fields(config: Config, store: LedgerStore) -> Optional[dict]
         ),
         (
             "count",
-            lambda _values: f"GPU count [1-{enabled_count} enabled]: ",
+            lambda _values: f"GPU count [1-{enabled_count} enabled] (1): ",
             lambda raw, _values: _guided_gpu_count(raw, enabled_count),
         ),
         (
             "duration",
             lambda _values: (
                 f"duration [multiple of {config.slot_minutes}m; "
-                f"e.g. {config.slot_minutes}m, 1h, 1d]: "
+                f"e.g. {config.slot_minutes}m, 1h, 1d] (30m): "
             ),
             lambda raw, _values: _guided_duration(raw, config.slot_minutes),
         ),
@@ -1634,13 +1825,7 @@ def _guided_booking_fields(config: Config, store: LedgerStore) -> Optional[dict]
         (
             "memory",
             lambda _values: "expected VRAM per GPU [auto or 12g] (auto): ",
-            lambda raw, values: _guided_memory(
-                raw,
-                required=(
-                    config.require_shared_memory
-                    and values["mode"] == MODE_SHARED
-                ),
-            ),
+            lambda raw, _values: _guided_memory(raw),
         ),
         (
             "command",
@@ -1918,7 +2103,7 @@ def _guided_edit_share(
 
 def _guided_gpu_count(raw: str, gpu_count: int) -> int:
     if not raw:
-        raise ValueError("GPU count is required, for example 1")
+        return 1
     try:
         count = int(raw)
     except ValueError as exc:
@@ -1929,7 +2114,7 @@ def _guided_gpu_count(raw: str, gpu_count: int) -> int:
 
 
 def _guided_duration(raw: str, slot_minutes: int) -> int:
-    duration = parse_duration_seconds(raw)
+    duration = parse_duration_seconds(raw or "30m")
     if duration % (slot_minutes * 60):
         raise ValueError(f"duration must be a multiple of {slot_minutes} minutes")
     return duration
@@ -2052,12 +2237,8 @@ def _guided_optional_count(raw: str, gpu_count: int, gpus: Optional[List[int]]) 
     return count
 
 
-def _guided_memory(raw: str, *, required: bool = False) -> Optional[int]:
+def _guided_memory(raw: str) -> Optional[int]:
     if not raw or raw.lower() == "auto":
-        if required:
-            raise ValueError(
-                "this server requires expected VRAM for shared reservations, such as 12g"
-            )
         return None
     return parse_memory_mb(raw)
 
@@ -3129,10 +3310,35 @@ def _get_reservation(store: LedgerStore, reservation_id: str) -> dict:
     raise BookingError("reservation not found")
 
 
-def _print_help(file=None) -> None:
+def _load_help_config() -> Optional[Config]:
+    try:
+        return load_config()
+    except (OSError, ValueError):
+        return None
+
+
+def _is_administrator(config: Optional[Config]) -> bool:
+    if config is None:
+        return False
+    return _current_actor().uid == administrator_info(config).uid
+
+
+def _print_help(config: Optional[Config] = None, file=None) -> None:
     file = file or sys.stdout
+    admin_help = ""
+    if _is_administrator(config):
+        admin_help = """
+ADMINISTRATION (current administrator only)
+  bk admin init                  initialize a shared server
+  bk admin services install      install tracked boot services
+  bk admin login-hook install    optional login booking notice
+  bk admin transfer USER         hand operation to another local account
+  bk admin uninstall --dry-run   preview a tracked server removal
+  bk broker                      service-account ledger writer
+  bk reset --yes                 private/test only; never shared
+"""
     print(
-        """GPUBK - shared GPU booking from the terminal
+        f"""GPUBK - shared GPU booking from the terminal
 
 START HERE
   bk tutorial                    safe, replayable CLI walkthrough
@@ -3165,8 +3371,10 @@ MANAGE
   bk lg [--limit 100] [--json]    recent personal operation log
 
 JOBS AND USAGE
-  bk w                            run this UID's due jobs
-  bk w --status                   check this UID's worker
+  bk run -- COMMAND              run on your active booking
+  bk run 1 30m -- COMMAND        book the earliest GPU and run now/later
+  bk worker                       launch commands at booking start
+  bk w --status                   inspect the command worker (`w` alias)
   bk j / bk jl ID / bk jr ID     list, inspect, or retry jobs
   bk j --cleanup                  prune private job files by policy
   bk m [--once]                  monitor GPU processes
@@ -3174,32 +3382,24 @@ JOBS AND USAGE
   bk u events / bk u samples     audit events or time series
   bk u demo --yes                verify live accounting on one idle GPU
 
-AGENTS AND ADMIN
+AUTOMATION
   bk agent context               stable machine-readable context
   bk agent recommend 2 1h       read-only legal placement
   bk mcp / bk skill install      MCP server or bundled Codex skill
-  bk admin init                  initialize a shared server
-  bk admin services install      install tracked boot services
-  bk admin login-hook install    optional login booking notice
-  bk admin transfer USER         hand operation to another local account
-  bk admin uninstall --dry-run   preview a tracked server removal
   bk service uninstall KIND      remove a managed user unit
-  bk broker                      service-account ledger writer
   bk config [--json]            inspect effective config and policy
-  bk doctor --probe --strict     verify deployment prerequisites
+  bk doctor                      read-only personal/server health check
   bk doctor --require-worker     verify this UID's scheduled-job worker
-  bk reset --yes                 private/test only; never shared
+{admin_help}
 
 TIME AND POLICY
-  Duration syntax: 30m, 1h30m, 1d; value must fit the configured slice.
-  Reservations use the server-configured slice (default: 5m).
-  Friendly time: --at +30m, --at 20:00, --at "tomorrow 09:00".
-  Machine time: --start 2030-01-01T20:00:00+08:00.
-  No time option: use the active slice, then queue to the earliest slot.
-  Explicit --at/--start is exact. For edits, --queue allows a move.
-  Shared is the default; s/shared and x/exclusive are accepted aliases.
-  Shared slots control admission and inferred VRAM.
-  They do not enforce GPU compute bandwidth.
+  Duration: 30m, 1h30m, 1d; align to the configured slice (default 5m).
+  No start: try now, then queue to the earliest valid slot.
+  Friendly start: --at +30m | 20:00 | "tomorrow 09:00".
+  Exact machine start: --start 2030-01-01T20:00:00+08:00.
+  Shared is default (`s`); exclusive is `x`.
+  --share N reserves N slots/GPU; auto VRAM uses the N/max proportion.
+  Slots and VRAM control admission, not compute bandwidth.
 
 Run `bk COMMAND --help` or `bk help COMMAND` for more options.
 Plain `bk` opens the prompt; `bk t` opens the full-screen TUI.
@@ -3235,7 +3435,9 @@ def _print_shell_help() -> None:
   u events | u samples      audit events or versioned time series
   u storage                 inspect tiers, retention, and migration
   u demo                    verify live accounting on one idle GPU
-  w | worker                execute only this UID's due jobs
+  run [ID] -- COMMAND       run now on GPUs from your active booking
+  run 1 30m -- COMMAND      book the earliest GPU and run now/later
+  w | worker                launch this UID's scheduled commands at start
   j | jobs                  list scheduled job states
   j --cleanup               prune private job files by policy
   jl <number|short_id>      show a job log
@@ -3370,7 +3572,9 @@ def _print_status(
     usage_by_gpu = classify_process_usage(gpu_snapshots, active, now)
     live_states = assess_gpu_live_states(gpu_snapshots, config.gpu_count)
     print("GPU status")
-    wide_status = shutil.get_terminal_size(fallback=(100, 24)).columns >= 88
+    terminal_width = shutil.get_terminal_size(fallback=(100, 24)).columns
+    wide_status = terminal_width >= 88
+    wide_reservations = terminal_width >= 124
     if wide_status:
         print(
             f"{'GPU':<4} {'Model':<14} {'Util':>5} {'VRAM free/total':>16} "
@@ -3431,15 +3635,30 @@ def _print_status(
     mine = _own_active_reservations(store, actor)
     print(f"Reservations: {len(active)} active, {len(mine)} yours | `bk l` details | `bk tl` timeline")
     if mine:
+        memory_capacities = {
+            gpu.index: gpu.memory_total_mb
+            for gpu in gpu_snapshots
+            if gpu.memory_total_mb > 0
+        }
+        if wide_reservations:
+            print(
+                f"  {'#':>2} {'ID':<8} {'Mode':<9} {'Slots':>5} {'GPU':<8} "
+                f"{'User':<12} {'VRAM/GPU':>10} {'Job':<10} {'Start':<14} {'End':<14} {'Dur':>7}"
+            )
         for index, reservation in enumerate(mine, 1):
             gpus = ",".join(str(item) for item in reservation.get("gpus", []))
-            if wide_status:
+            if wide_reservations:
+                start = parse_iso(reservation["start_at"]).astimezone()
+                end = parse_iso(reservation["end_at"]).astimezone()
                 print(
-                    f"  {index:>2} {_short_id(reservation)} {reservation['mode']:<9} "
-                    f"{_reservation_share_label(reservation, config)}"
-                    f"GPU={gpus:<7} {reservation['username']} "
-                    f"job={reservation.get('job', {}).get('status', '-'):<10} "
-                    f"{format_local_range(reservation['start_at'], reservation['end_at'])}"
+                    f"  {index:>2} {_short_id(reservation):<8} {reservation['mode']:<9} "
+                    f"{_reservation_slots_column(reservation, config):>5} "
+                    f"{_clip_text(gpus, 8):<8} "
+                    f"{_clip_text(str(reservation.get('username', '?')), 12):<12} "
+                    f"{_reservation_memory_column(reservation, config, memory_capacities):>10} "
+                    f"{_clip_text(str(reservation.get('job', {}).get('status', '-')), 10):<10} "
+                    f"{start:%m-%d %H:%M} {end:%m-%d %H:%M} "
+                    f"{_duration_compact(int((end - start).total_seconds())):>7}"
                 )
             else:
                 print(
@@ -3476,6 +3695,36 @@ def _print_status(
             timeline_gpus,
         )
     print()
+
+
+def _reservation_slots_column(reservation: dict, config: Config) -> str:
+    if reservation.get("mode") == MODE_EXCLUSIVE:
+        return "all"
+    units = reservation_share_units(reservation, config.max_shared_users)
+    return f"{units}/{config.max_shared_users}"
+
+
+def _reservation_memory_column(
+    reservation: dict,
+    config: Config,
+    capacities: dict[int, int],
+) -> str:
+    expected = reservation.get("expected_memory_mb")
+    if expected is not None:
+        return _format_memory_mb(int(expected))
+    if reservation.get("mode") != MODE_SHARED:
+        return "all"
+    units = reservation_share_units(reservation, config.max_shared_users)
+    inferred = [
+        inferred_share_memory_mb(
+            max(0, capacities[gpu] - config.shared_memory_reserve_mb),
+            config.max_shared_users,
+            units,
+        )
+        for gpu in reservation.get("gpus", [])
+        if gpu in capacities
+    ]
+    return f"auto~{_format_memory_mb(min(inferred))}" if inferred else "auto"
 
 
 def _print_timeline(

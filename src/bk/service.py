@@ -32,7 +32,11 @@ from .scheduler import (
     reservation_pressure_scores,
     shared_memory_headroom_for_reservation,
 )
-from .sharing import normalize_share_units, reservation_share_units
+from .sharing import (
+    inferred_share_memory_mb,
+    normalize_share_units,
+    reservation_share_units,
+)
 from .storage import AUDIT_SCHEMA_VERSION, LedgerStore
 from .timeparse import normalize_queue_start, parse_iso, to_iso, utc_now
 from .usage_store import UsageAuditStore
@@ -93,6 +97,15 @@ def submit_booking(
         normalize_queue_start(start_at, generated_at, config.slot_minutes)
         if allow_queue
         else start_at
+    )
+    expected_memory_mb, prepared_advice = _resolve_auto_memory_budget(
+        config,
+        mode,
+        expected_memory_mb,
+        share_units,
+        preferred_gpus,
+        excluded_gpus,
+        advice,
     )
     effective_share_units = _validate_recommendation_request(
         config,
@@ -158,7 +171,7 @@ def submit_booking(
             str(working_directory),
             execution_environment=job_environment,
         )
-    gpu_advice = advice or build_gpu_advice(config)
+    gpu_advice = prepared_advice or build_gpu_advice(config)
     allocator = _allocation_decision(
         config,
         store,
@@ -261,31 +274,6 @@ def submit_edit(
     generated_at = utc_now()
     ledger = store.load()
     validate_ledger_policy(ledger, config)
-    replay_request = EditRequest(
-        actor=actor,
-        reservation_id=reservation_id,
-        op_id=operation_id,
-        start_at=start_at,
-        duration_seconds=duration_seconds,
-        mode=mode,
-        preferred_gpus=list(preferred_gpus) if preferred_gpus is not None else None,
-        excluded_gpus=list(excluded_gpus) if excluded_gpus is not None else None,
-        count=count,
-        allow_queue=allow_queue,
-        expected_memory_mb=expected_memory_mb,
-        update_expected_memory=update_expected_memory,
-        share_units=share_units,
-        update_share_units=update_share_units,
-    )
-    replay = find_applied_edit(ledger, config, replay_request)
-    if replay is not None:
-        return _replayed_submission(
-            config,
-            actor,
-            replay,
-            advice,
-            generated_at,
-        )
     reservation = next(
         (
             item
@@ -341,6 +329,46 @@ def submit_edit(
             else len(reservation.get("gpus", []))
         )
     )
+    original_effective_memory = effective_memory
+    effective_memory, prepared_advice = _resolve_auto_memory_budget(
+        config,
+        effective_mode,
+        effective_memory,
+        effective_share_units,
+        effective_preferred,
+        excluded_gpus,
+        advice,
+    )
+    inferred_memory = (
+        original_effective_memory is None and effective_memory is not None
+    )
+    request_updates_memory = update_expected_memory or inferred_memory
+    request_memory = effective_memory if request_updates_memory else expected_memory_mb
+    replay_request = EditRequest(
+        actor=actor,
+        reservation_id=reservation_id,
+        op_id=operation_id,
+        start_at=start_at,
+        duration_seconds=duration_seconds,
+        mode=mode,
+        preferred_gpus=list(preferred_gpus) if preferred_gpus is not None else None,
+        excluded_gpus=list(excluded_gpus) if excluded_gpus is not None else None,
+        count=count,
+        allow_queue=allow_queue,
+        expected_memory_mb=request_memory,
+        update_expected_memory=request_updates_memory,
+        share_units=share_units,
+        update_share_units=update_share_units,
+    )
+    replay = find_applied_edit(ledger, config, replay_request)
+    if replay is not None:
+        return _replayed_submission(
+            config,
+            actor,
+            replay,
+            prepared_advice,
+            generated_at,
+        )
     normalized_share_units = _validate_recommendation_request(
         config,
         effective_count,
@@ -352,7 +380,7 @@ def submit_edit(
         effective_share_units,
     )
 
-    gpu_advice = advice or build_gpu_advice(config)
+    gpu_advice = prepared_advice or build_gpu_advice(config)
     allocator = _allocation_decision(
         config,
         store,
@@ -383,8 +411,8 @@ def submit_edit(
             gpu_scores=allocator.scores,
             count=count,
             allow_queue=allow_queue,
-            expected_memory_mb=expected_memory_mb,
-            update_expected_memory=update_expected_memory,
+            expected_memory_mb=request_memory,
+            update_expected_memory=request_updates_memory,
             gpu_memory_capacity_mb=gpu_advice.memory_capacities_mb,
             share_units=share_units,
             update_share_units=update_share_units,
@@ -624,6 +652,16 @@ def recommend_booking(
     )
     if effective_start < floor_to_slot(generated_at, config.slot_minutes):
         raise BookingError("booking start must not be before the current booking slice")
+    expected_memory_mb, prepared_advice = _resolve_auto_memory_budget(
+        config,
+        mode,
+        expected_memory_mb,
+        share_units,
+        preferred_gpus,
+        excluded_gpus,
+        advice,
+        at=generated_at,
+    )
     effective_share_units = _validate_recommendation_request(
         config,
         count,
@@ -636,7 +674,7 @@ def recommend_booking(
     )
     ledger = store.load()
     validate_ledger_policy(ledger, config)
-    gpu_advice = advice or build_gpu_advice(config, at=generated_at)
+    gpu_advice = prepared_advice or build_gpu_advice(config, at=generated_at)
     allocator = _allocation_decision(
         config,
         store,
@@ -1027,6 +1065,57 @@ def _public_reservation(
     }
 
 
+def _resolve_auto_memory_budget(
+    config: Config,
+    mode: str,
+    expected_memory_mb: Optional[int],
+    share_units: Optional[int],
+    preferred_gpus: Optional[Sequence[int]],
+    excluded_gpus: Optional[Sequence[int]],
+    advice: Optional[GpuAdvice],
+    *,
+    at: Optional[datetime] = None,
+) -> tuple[Optional[int], Optional[GpuAdvice]]:
+    if (
+        mode != MODE_SHARED
+        or expected_memory_mb is not None
+        or not config.require_shared_memory
+    ):
+        return expected_memory_mb, advice
+    try:
+        units = normalize_share_units(share_units, config.max_shared_users)
+    except (TypeError, ValueError) as exc:
+        raise BookingError(str(exc)) from exc
+    gpu_advice = advice or build_gpu_advice(config, at=at)
+    excluded = {int(gpu) for gpu in excluded_gpus or ()}
+    candidates = (
+        [int(gpu) for gpu in preferred_gpus]
+        if preferred_gpus is not None
+        else [gpu for gpu in config.enabled_gpus if gpu not in excluded]
+    )
+    capacities = gpu_advice.memory_capacities_mb
+    missing = [gpu for gpu in candidates if capacities.get(gpu, 0) <= 0]
+    if not candidates or missing:
+        detail = f" for GPU(s) {','.join(map(str, missing))}" if missing else ""
+        raise BookingError(
+            "automatic expected VRAM requires GPU memory telemetry"
+            f"{detail}; enter a per-GPU value such as 12g"
+        )
+    usable = min(
+        max(0, capacities[gpu] - config.shared_memory_reserve_mb)
+        for gpu in candidates
+    )
+    if usable <= 0:
+        raise BookingError(
+            "automatic expected VRAM has no usable memory after the administrator reserve; "
+            "enter a per-GPU value explicitly"
+        )
+    return (
+        inferred_share_memory_mb(usable, config.max_shared_users, units),
+        gpu_advice,
+    )
+
+
 def _validate_recommendation_request(
     config: Config,
     count: int,
@@ -1052,7 +1141,7 @@ def _validate_recommendation_request(
         and config.require_shared_memory
         and expected_memory_mb is None
     ):
-        raise BookingError("shared reservations must declare expected memory")
+        raise BookingError("shared reservations require an explicit or automatic VRAM budget")
     if mode == MODE_EXCLUSIVE:
         if share_units is not None:
             raise BookingError("shared slots apply only to shared reservations")

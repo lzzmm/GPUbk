@@ -121,6 +121,12 @@ bk config                         # inspect effective configuration and policy
 bk doctor                         # read-only ledger checks
 ```
 
+The stored reservation ID is a standard 36-character UUID. The CLI normally
+shows eight characters; the space-constrained TUI starts with the shortest
+unique six-character prefix and expands it on collisions. Either prefix can be
+used by `bk e`, `bk d`, or `bk run` while it is unique. GPUBK rejects ambiguous
+prefixes instead of guessing.
+
 Scheduling rules are intentionally small:
 
 - Start times and durations use the server's configured booking boundary.
@@ -234,7 +240,7 @@ always validate the selected interval again inside the locked scheduler
 transaction. Reservation focus starts on the header, so no booking blinks until
 you press Down. For servers with up to ten GPUs, the `GPU` column keeps one
 fixed position per device and shows only the numbers used by that reservation;
-empty positions stay blank. Reservation IDs use the shortest unique prefix from
+empty positions use the same muted dots as the timeline. Reservation IDs use the shortest unique prefix from
 six characters upward, so the table, share details, and process links agree.
 
 ## Run a Command at Reservation Time
@@ -242,6 +248,9 @@ six characters upward, so the table, share details, and process links agree.
 Put the command after `--`:
 
 ```bash
+bk run -- python train.py              # run on an active reservation now
+bk run 1 30m -- python train.py        # book the earliest GPU and run now/later
+bk run 1 30m --exclude 2,3 -- COMMAND  # avoid selected GPUs
 bk 2 1h30m --mem 12g -- python train.py --config exp.yaml
 bk j                    # list scheduled jobs
 bk j --cleanup          # inspect and prune private job files
@@ -249,6 +258,11 @@ bk w                    # run this user's due jobs
 bk w --status           # read-only worker liveness check
 bk jr ID --accept-duplicate-risk  # retry only after checking an uncertain job
 ```
+
+Plain `bk run` is read-only: it shows GPUs from current reservations or the next
+one-GPU suggestion. Immediate commands use stable GPU UUIDs when available and
+are stopped at the earliest selected reservation end. `bk w` is the short alias
+for `bk worker`, which launches commands attached to future reservations.
 
 The worker sets `CUDA_VISIBLE_DEVICES`, `CUDA_DEVICE_ORDER`,
 `BK_RESERVATION_ID`, and `BK_RESERVED_GPUS`. With the default live guard,

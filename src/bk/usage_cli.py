@@ -57,6 +57,11 @@ def run_usage_cli(argv: List[str], config: Config) -> int:
     parser.add_argument("--limit", type=int, default=1000)
     parser.add_argument("--json", action="store_true", help="emit one stable versioned JSON object")
     parser.add_argument("--compact", action="store_true", help="compact JSON with --json")
+    parser.add_argument(
+        "--no-chart",
+        action="store_true",
+        help="omit the 7-day and 8-week activity charts from the default personal summary",
+    )
     args = parser.parse_args(args_argv)
     if args.limit < 1:
         raise ValueError("--limit must be >= 1")
@@ -96,6 +101,8 @@ def run_usage_cli(argv: List[str], config: Config) -> int:
             print(json.dumps(record, ensure_ascii=False, sort_keys=True))
     else:
         _print_payload(payload)
+        if action == "me" and not args.no_chart:
+            _print_usage_trends(api, uid if uid is not None else os.getuid(), end)
     return 0
 
 
@@ -255,6 +262,16 @@ def _print_collector_summary(collector: object) -> None:
 
 
 def _print_users(payload: dict) -> None:
+    query = payload.get("query", {})
+    try:
+        start = parse_iso(str(query["start_at"])).astimezone()
+        end = parse_iso(str(query["end_at"])).astimezone()
+        print(
+            f"history: {start:%Y-%m-%d %H:%M} -> {end:%Y-%m-%d %H:%M} "
+            "(sampled past only; future reservations excluded)"
+        )
+    except (KeyError, TypeError, ValueError):
+        print("history: sampled past only; future reservations excluded")
     users = payload.get("users", [])
     if not users:
         print("no user usage records in this interval")
@@ -270,6 +287,71 @@ def _print_users(payload: dict) -> None:
             f"{_usage_duration(int(item['idle_reserved_gpu_seconds'])):>9} "
             f"{_usage_duration(int(item['violation_gpu_seconds'])):>8} "
             f"{_memory_compact(int(item['max_gpu_memory_mb'])):>9} {avg_sm:>7} {workloads}"
+        )
+
+
+def _print_usage_trends(api: UsageQueryService, uid: int, end: datetime) -> None:
+    start = end - timedelta(days=56)
+    payload = api.samples(
+        start=start,
+        end=end,
+        resolution="1d",
+        uid=uid,
+        limit=1000,
+    )
+    records = payload.get("records", [])
+    daily: dict[datetime.date, list[float]] = {}
+    weekly: dict[datetime.date, list[float]] = {}
+    for record in records:
+        try:
+            local_start = parse_iso(str(record["window_start"])).astimezone()
+        except (KeyError, TypeError, ValueError):
+            continue
+        active = max(0.0, float(record.get("active_observed_seconds", 0)))
+        reserved = (
+            max(0.0, float(record.get("observed_seconds", 0)))
+            if str(record.get("status", "")) == "ok"
+            else 0.0
+        )
+        day = local_start.date()
+        week = day - timedelta(days=day.weekday())
+        day_values = daily.setdefault(day, [0.0, 0.0])
+        week_values = weekly.setdefault(week, [0.0, 0.0])
+        day_values[0] += active
+        day_values[1] += reserved
+        week_values[0] += active
+        week_values[1] += reserved
+
+    today = end.astimezone().date()
+    current_week = today - timedelta(days=today.weekday())
+    daily_rows = [
+        (today - timedelta(days=offset), daily.get(today - timedelta(days=offset), [0.0, 0.0]))
+        for offset in range(6, -1, -1)
+    ]
+    weekly_rows = [
+        (
+            current_week - timedelta(days=7 * offset),
+            weekly.get(current_week - timedelta(days=7 * offset), [0.0, 0.0]),
+        )
+        for offset in range(7, -1, -1)
+    ]
+    print("\nActive GPU time (historical samples; active/reserved GPU-hours)")
+    print("Last 7 days")
+    _print_trend_rows(daily_rows, label_format=lambda day: day.strftime("%a %m-%d"))
+    print("Last 8 weeks")
+    _print_trend_rows(weekly_rows, label_format=lambda day: day.strftime("%m-%d"))
+
+
+def _print_trend_rows(rows, *, label_format) -> None:
+    hours = [values[0] / 3600 for _, values in rows]
+    peak = max(hours, default=0.0)
+    for (period, values), active_hours in zip(rows, hours):
+        reserved_hours = values[1] / 3600
+        length = 0 if peak <= 0 else max(1, round(active_hours / peak * 18))
+        bar = "█" * length
+        print(
+            f"  {label_format(period):<9} {bar:<18} "
+            f"{active_hours:>6.1f}/{reserved_hours:<6.1f}"
         )
 
 

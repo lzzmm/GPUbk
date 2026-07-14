@@ -317,6 +317,7 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         "--require-shared-memory",
         dest="require_shared_memory",
         action="store_true",
+        help="require a resolved VRAM budget; auto needs complete GPU memory telemetry",
     )
     memory.add_argument(
         "--allow-implicit-shared-memory",
@@ -3827,7 +3828,7 @@ def _build_plan(
         args.require_shared_memory
         if args.require_shared_memory is not None
         else _ask_bool(
-            "Require expected VRAM for shared bookings",
+            "Require a resolved VRAM budget for shared bookings",
             False,
             enabled=interactive,
         )
