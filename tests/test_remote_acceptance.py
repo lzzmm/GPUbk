@@ -239,6 +239,40 @@ class LocalAcceptanceRunnerTests(unittest.TestCase):
             download_report.assert_called_once()
             self.assertIn(LOCAL.CLEANUP_CODE, run_ssh.call_args_list[-1].args[1])
 
+    def test_orchestrator_falls_back_to_remote_pypi(self):
+        completed = LOCAL.subprocess.CompletedProcess(["ssh"], 0)
+        payload = {
+            "schema_version": "gpubk.acceptance.v1",
+            "result": "pass",
+            "counts": {"pass": 1, "warn": 0, "fail": 0, "skip": 0},
+        }
+        with tempfile.TemporaryDirectory() as raw_directory:
+            output = Path(raw_directory) / "reports"
+            with (
+                mock.patch.object(LOCAL, "require_local_commands"),
+                mock.patch.object(
+                    LOCAL,
+                    "prepare_wheelhouse",
+                    side_effect=LOCAL.DownloadUnavailable("DNS unavailable"),
+                ),
+                mock.patch.object(
+                    LOCAL,
+                    "run_ssh",
+                    side_effect=[completed, completed, completed],
+                ) as run_ssh,
+                mock.patch.object(LOCAL, "upload_bootstrap") as upload,
+                mock.patch.object(
+                    LOCAL,
+                    "download_report",
+                    return_value=(output / "report.tar.gz", payload),
+                ),
+            ):
+                result = LOCAL.main(["host", "--output-dir", str(output)])
+
+            self.assertEqual(result, 0)
+            upload.assert_called_once()
+            self.assertIn("--download-wheelhouse", run_ssh.call_args_list[1].args[1])
+
     def test_orchestrator_cleans_stage_after_upload_failure(self):
         completed = LOCAL.subprocess.CompletedProcess(["ssh"], 0)
         with tempfile.TemporaryDirectory() as raw_directory:
@@ -271,6 +305,51 @@ class LocalAcceptanceRunnerTests(unittest.TestCase):
 
 
 class RemoteAcceptanceRunnerTests(unittest.TestCase):
+    def test_remote_download_creates_a_verifiable_manifest(self):
+        with tempfile.TemporaryDirectory() as raw_directory:
+            stage = Path(raw_directory)
+            runner = stage / "acceptance_remote.py"
+            runner.write_text("# runner\n", encoding="utf-8")
+            downloader = stage / "remote_acceptance.py"
+            downloader.write_text(
+                """
+import hashlib
+
+def _digest(path):
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+def prepare_wheelhouse(destination, version, supplied, *, verify_index, python_executable):
+    destination.mkdir(mode=0o700)
+    wheel = destination / f'gpubk-{version}-py3-none-any.whl'
+    wheel.write_bytes(b'verified wheel')
+    return [wheel]
+
+def build_manifest(run_id, version, runner, wheels):
+    paths = [runner, *wheels]
+    files = {}
+    for path in paths:
+        name = 'acceptance_remote.py' if path == runner else f'wheelhouse/{path.name}'
+        files[name] = {'sha256': _digest(path), 'size': path.stat().st_size}
+    return {'schema_version': 'gpubk.acceptance-bundle.v1', 'run_id': run_id,
+            'version': version, 'files': files}
+""".lstrip(),
+                encoding="utf-8",
+            )
+            report = REMOTE.AcceptanceReport(run_id="run-1", version="1.2.3")
+
+            REMOTE.download_verified_wheelhouse(
+                report,
+                stage,
+                version="1.2.3",
+                run_id="run-1",
+                remote_python="python3",
+            )
+
+            manifest = REMOTE.load_and_verify_bundle(stage, "1.2.3", "run-1")
+            self.assertEqual(manifest["source"], "public-pypi-on-gpu-host")
+            self.assertFalse(downloader.exists())
+            self.assertEqual(report.checks[0]["status"], "pass")
+
     def test_isolated_environment_drops_all_inherited_bk_configuration(self):
         with tempfile.TemporaryDirectory() as raw_directory:
             root = Path(raw_directory)

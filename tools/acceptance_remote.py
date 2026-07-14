@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import platform
@@ -332,6 +333,56 @@ def load_and_verify_bundle(
         if sha256_file(path) != metadata.get("sha256"):
             raise ValueError(f"bundle digest mismatch for {relative}")
     return payload
+
+
+def download_verified_wheelhouse(
+    report: AcceptanceReport,
+    stage: Path,
+    *,
+    version: str,
+    run_id: str,
+    remote_python: str,
+) -> None:
+    """Build the normal verified bundle manifest using PyPI from this host."""
+    downloader_path = stage / "remote_acceptance.py"
+    if downloader_path.is_symlink() or not downloader_path.is_file():
+        raise ValueError("remote download helper is missing or unsafe")
+    spec = importlib.util.spec_from_file_location(
+        "gpubk_remote_download_helper", downloader_path
+    )
+    if spec is None or spec.loader is None:
+        raise ValueError("remote download helper could not be loaded")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    try:
+        spec.loader.exec_module(module)
+        wheelhouse = stage / "wheelhouse"
+        wheels = module.prepare_wheelhouse(
+            wheelhouse,
+            version,
+            None,
+            verify_index=True,
+            python_executable=remote_python,
+        )
+        manifest = module.build_manifest(
+            run_id, version, stage / "acceptance_remote.py", wheels
+        )
+        manifest["source"] = "public-pypi-on-gpu-host"
+        manifest_path = stage / "manifest.json"
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        manifest_path.chmod(0o600)
+        report.add(
+            "bundle.remote-download",
+            status="pass",
+            critical=True,
+            summary="GPU host downloaded and verified the exact PyPI wheelhouse",
+        )
+    finally:
+        sys.modules.pop(spec.name, None)
+        downloader_path.unlink(missing_ok=True)
 
 
 def find_command(value: str) -> str | None:
@@ -932,6 +983,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--system-bk", default="bk")
     result.add_argument("--sudo", action="store_true")
     result.add_argument("--include-journal", action="store_true")
+    result.add_argument("--download-wheelhouse", action="store_true")
     return result
 
 
@@ -941,6 +993,17 @@ def main(argv: list[str] | None = None) -> int:
     exit_code = 2
     try:
         stage = validate_stage(args.stage)
+        remote_python = find_command(args.remote_python)
+        if remote_python is None:
+            raise ValueError(f"remote Python is not executable: {args.remote_python}")
+        if args.download_wheelhouse:
+            download_verified_wheelhouse(
+                report,
+                stage,
+                version=args.version,
+                run_id=args.run_id,
+                remote_python=remote_python,
+            )
         report.bundle_manifest = load_and_verify_bundle(
             stage, args.version, args.run_id
         )
@@ -948,11 +1011,12 @@ def main(argv: list[str] | None = None) -> int:
             "bundle",
             status="pass",
             critical=True,
-            summary="uploaded wheelhouse matches the local SHA-256 manifest",
+            summary=(
+                "wheelhouse matches the verified SHA-256 manifest"
+                if args.download_wheelhouse
+                else "uploaded wheelhouse matches the local SHA-256 manifest"
+            ),
         )
-        remote_python = find_command(args.remote_python)
-        if remote_python is None:
-            raise ValueError(f"remote Python is not executable: {args.remote_python}")
         sudo_ready = acquire_sudo(report, args.sudo)
         run_isolated_checks(
             report,

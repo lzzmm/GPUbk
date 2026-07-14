@@ -27,6 +27,7 @@ from typing import Any, Sequence
 
 
 ROOT = Path(__file__).resolve().parents[1]
+LOCAL_RUNNER = Path(__file__).resolve()
 REMOTE_RUNNER = ROOT / "tools" / "acceptance_remote.py"
 MANIFEST_SCHEMA = "gpubk.acceptance-bundle.v1"
 REPORT_MEMBER_ROOT = "gpubk-acceptance/"
@@ -36,6 +37,10 @@ SAFE_SSH_TARGET = re.compile(r"(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+")
 
 class AcceptanceError(RuntimeError):
     """An expected setup, transport, or verification failure."""
+
+
+class DownloadUnavailable(AcceptanceError):
+    """The selected package index could not supply the requested wheelhouse."""
 
 
 @dataclass(frozen=True)
@@ -218,10 +223,12 @@ def pypi_digest(name: str, version: str, filename: str) -> str:
         # The URL is assembled from escaped path segments on the fixed public PyPI HTTPS origin.
         with urllib.request.urlopen(request, timeout=30) as response:  # nosec B310
             payload = json.load(response)
-    except (OSError, ValueError) as exc:
-        raise AcceptanceError(
+    except OSError as exc:
+        raise DownloadUnavailable(
             f"could not verify {filename} against PyPI: {exc}"
         ) from exc
+    except ValueError as exc:
+        raise AcceptanceError(f"PyPI returned invalid metadata for {filename}: {exc}") from exc
     for item in payload.get("urls", []):
         if item.get("filename") == filename:
             digest = item.get("digests", {}).get("sha256")
@@ -261,6 +268,7 @@ def prepare_wheelhouse(
     supplied: Path | None,
     *,
     verify_index: bool,
+    python_executable: str = sys.executable,
 ) -> list[Path]:
     destination.mkdir(mode=0o700)
     if supplied is None:
@@ -268,30 +276,33 @@ def prepare_wheelhouse(
             f"Downloading gpubk[gpu]=={version} and wheels from public PyPI...",
             flush=True,
         )
-        run_checked(
-            [
-                sys.executable,
-                "-m",
-                "pip",
-                "download",
-                "--disable-pip-version-check",
-                "--no-cache-dir",
-                "--index-url",
-                "https://pypi.org/simple/",
-                "--only-binary=:all:",
-                "--timeout",
-                "20",
-                "--retries",
-                "2",
-                "--progress-bar",
-                "off",
-                "--dest",
-                str(destination),
-                f"gpubk[gpu]=={version}",
-            ],
-            timeout=180,
-            visible=True,
-        )
+        try:
+            run_checked(
+                [
+                    python_executable,
+                    "-m",
+                    "pip",
+                    "download",
+                    "--disable-pip-version-check",
+                    "--no-cache-dir",
+                    "--index-url",
+                    "https://pypi.org/simple/",
+                    "--only-binary=:all:",
+                    "--timeout",
+                    "20",
+                    "--retries",
+                    "2",
+                    "--progress-bar",
+                    "off",
+                    "--dest",
+                    str(destination),
+                    f"gpubk[gpu]=={version}",
+                ],
+                timeout=180,
+                visible=True,
+            )
+        except AcceptanceError as exc:
+            raise DownloadUnavailable(str(exc)) from exc
     else:
         supplied = supplied.expanduser()
         if supplied.is_symlink():
@@ -436,6 +447,20 @@ def upload_bundle(settings: SshSettings, bundle: Path, relative_stage: str) -> N
         raise AcceptanceError(f"bundle upload failed ({result.returncode})")
 
 
+def upload_bootstrap(
+    settings: SshSettings,
+    runner: Path,
+    downloader: Path,
+    relative_stage: str,
+) -> None:
+    destination = f"{settings.target}:{relative_stage}/"
+    result = subprocess.run(
+        [*settings.scp_argv(), str(runner), str(downloader), destination], check=False
+    )
+    if result.returncode != 0:
+        raise AcceptanceError(f"remote bootstrap upload failed ({result.returncode})")
+
+
 def extraction_command(relative_stage: str, remote_python: str) -> str:
     return (
         'set -eu; stage="$HOME/'
@@ -457,6 +482,8 @@ def runner_command(
     system_bk: str,
     sudo: bool,
     include_journal: bool,
+    download_wheelhouse: bool = False,
+    launcher_python: str = "python3",
 ) -> str:
     options = [
         "--run-id",
@@ -472,12 +499,14 @@ def runner_command(
         options.append("--sudo")
     if include_journal:
         options.append("--include-journal")
+    if download_wheelhouse:
+        options.append("--download-wheelhouse")
     quoted_options = " ".join(shlex.quote(value) for value in options)
     return (
         'set -eu; stage="$HOME/'
         + relative_stage
         + '"; exec '
-        + shlex.quote(remote_python)
+        + shlex.quote(launcher_python)
         + ' "$stage/acceptance_remote.py" --stage "$stage" '
         + quoted_options
     )
@@ -675,6 +704,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"version: {version}")
         print(f"target: {args.target}")
         print(f"remote stage: ~/{relative_stage}")
+        print("download source: local, with automatic remote fallback")
         print(f"local report: {output}")
         print("production changes: none")
         return 0
@@ -691,27 +721,50 @@ def main(argv: list[str] | None = None) -> int:
         work = Path(raw_work)
         wheelhouse = work / "wheelhouse"
         try:
-            wheels = prepare_wheelhouse(
-                wheelhouse,
-                version,
-                args.wheelhouse,
-                verify_index=not args.skip_index_digest_check,
-            )
-            manifest = build_manifest(run_id, version, REMOTE_RUNNER, wheels)
-            bundle = build_bundle(work, manifest, REMOTE_RUNNER, wheels)
-            print(f"Bundle SHA256: {sha256_file(bundle)}", flush=True)
+            remote_download = False
+            bundle: Path | None = None
+            try:
+                wheels = prepare_wheelhouse(
+                    wheelhouse,
+                    version,
+                    args.wheelhouse,
+                    verify_index=not args.skip_index_digest_check,
+                )
+            except DownloadUnavailable as exc:
+                if args.wheelhouse is not None:
+                    raise
+                remote_download = True
+                print(
+                    f"Local PyPI unavailable ({exc}); using {args.target} instead.",
+                    flush=True,
+                )
+            else:
+                manifest = build_manifest(run_id, version, REMOTE_RUNNER, wheels)
+                bundle = build_bundle(work, manifest, REMOTE_RUNNER, wheels)
+                print(f"Bundle SHA256: {sha256_file(bundle)}", flush=True)
 
             setup = run_ssh(settings, remote_setup_command(run_id), capture=True)
             require_ssh_success(setup, "remote stage creation")
             stage_created = True
-            print(f"Uploading private bundle to {args.target}...", flush=True)
-            upload_bundle(settings, bundle, relative_stage)
-            extraction = run_ssh(
-                settings,
-                extraction_command(relative_stage, args.remote_python),
-                capture=True,
-            )
-            require_ssh_success(extraction, "remote bundle extraction")
+            if remote_download:
+                print(
+                    f"Uploading runner; {args.target} will download verified wheels...",
+                    flush=True,
+                )
+                upload_bootstrap(
+                    settings, REMOTE_RUNNER, LOCAL_RUNNER, relative_stage
+                )
+            else:
+                if bundle is None:
+                    raise AcceptanceError("local bundle was not prepared")
+                print(f"Uploading private bundle to {args.target}...", flush=True)
+                upload_bundle(settings, bundle, relative_stage)
+                extraction = run_ssh(
+                    settings,
+                    extraction_command(relative_stage, "python3"),
+                    capture=True,
+                )
+                require_ssh_success(extraction, "remote bundle extraction")
             print(
                 "Running isolated candidate and deployed-service checks...", flush=True
             )
@@ -725,6 +778,8 @@ def main(argv: list[str] | None = None) -> int:
                     system_bk=args.system_bk,
                     sudo=args.sudo,
                     include_journal=args.include_journal,
+                    download_wheelhouse=remote_download,
+                    launcher_python="python3",
                 ),
                 tty=args.sudo,
             )

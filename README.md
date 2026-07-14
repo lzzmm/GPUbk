@@ -649,7 +649,8 @@ python3 tools/remote_acceptance.py USER@GPU-HOST \
   --sudo
 ```
 
-The GPU host does not need internet access. `--sudo` opens a remote password
+The script downloads locally first; if local PyPI access is unavailable, it
+automatically downloads and verifies the same wheels on the GPU host. `--sudo` opens a remote password
 prompt only for read-only service-account, ownership, and systemd checks. The
 runner never restarts services, writes the production ledger, or launches a GPU
 workload. Candidate scheduling uses a private directory under

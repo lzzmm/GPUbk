@@ -557,7 +557,8 @@ python3 tools/remote_acceptance.py USER@GPU-HOST \
   --sudo
 ```
 
-GPU 服务器不需要连接外网。`--sudo` 只会在远端要求输入一次密码，用于只读检查服务
+脚本优先在本机下载；如果本机无法访问 PyPI，会自动改由 GPU 服务器下载并校验相同文件。
+`--sudo` 只会在远端要求输入一次密码，用于只读检查服务
 账号、文件所有权和 systemd；脚本不会重启服务、写正式台账或启动 GPU 任务。候选版本
 的调度测试只使用 `~/.cache/gpubk/acceptance/` 下的私有临时目录，报告取回后自动清理。
 
