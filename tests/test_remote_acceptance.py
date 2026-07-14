@@ -305,6 +305,34 @@ class LocalAcceptanceRunnerTests(unittest.TestCase):
 
 
 class RemoteAcceptanceRunnerTests(unittest.TestCase):
+    def test_doctor_core_allows_capability_warning_but_not_hard_failure(self):
+        payload = {
+            "probes": [
+                {"name": "atomic-replace", "status": "pass"},
+                {"name": "gpu-telemetry", "status": "warn"},
+            ],
+            "storage_issues": [],
+            "privacy_issues": [],
+            "policy_issues": [],
+        }
+        outcome = REMOTE.CommandOutcome(
+            argv=("bk", "doctor"),
+            returncode=2,
+            stdout=json.dumps(payload),
+            stderr="",
+            duration_ms=1,
+        )
+        self.assertTrue(REMOTE.doctor_core_passed(outcome))
+        payload["probes"][0]["status"] = "fail"
+        failed = REMOTE.CommandOutcome(
+            argv=outcome.argv,
+            returncode=2,
+            stdout=json.dumps(payload),
+            stderr="",
+            duration_ms=1,
+        )
+        self.assertFalse(REMOTE.doctor_core_passed(failed))
+
     def test_remote_download_creates_a_verifiable_manifest(self):
         with tempfile.TemporaryDirectory() as raw_directory:
             stage = Path(raw_directory)

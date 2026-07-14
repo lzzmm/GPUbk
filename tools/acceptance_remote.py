@@ -247,6 +247,38 @@ def parse_json_output(outcome: CommandOutcome) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def doctor_core_passed(
+    outcome: CommandOutcome,
+    *,
+    allowed_policy_issues: frozenset[str] = frozenset(),
+    require_broker: bool = False,
+) -> bool:
+    """Accept non-fatal capability warnings while preserving hard probe failures."""
+    payload = parse_json_output(outcome)
+    if payload is None:
+        return False
+    probes = payload.get("probes")
+    if not isinstance(probes, list) or any(
+        not isinstance(item, dict) or item.get("status") == "fail" for item in probes
+    ):
+        return False
+    if payload.get("storage_issues") or payload.get("privacy_issues"):
+        return False
+    policy_issues = payload.get("policy_issues", [])
+    if not isinstance(policy_issues, list) or any(
+        not isinstance(item, dict)
+        or item.get("type") not in allowed_policy_issues
+        for item in policy_issues
+    ):
+        return False
+    if require_broker and (
+        payload.get("storage_transport") != "broker"
+        or not isinstance(payload.get("broker_uid"), int)
+    ):
+        return False
+    return True
+
+
 def add_semantic_check(
     report: AcceptanceReport,
     check_id: str,
@@ -503,7 +535,9 @@ def run_isolated_checks(
         [*staged_bk, "doctor", "--probe", "--json", "--strict"],
         env=hardware_env,
         timeout=120,
-        success="candidate passed strict atomic, locking, NVML, and identity probes",
+        expected_codes=(0, 2),
+        validator=doctor_core_passed,
+        success="candidate passed atomic, locking, NVML, and identity probes",
         failure="candidate strict hardware probe failed",
     )
 
@@ -728,7 +762,13 @@ def run_system_checks(
         "system.user-probe",
         [bk_path, "doctor", "--probe", "--json", "--strict"],
         timeout=120,
-        success="login user passed strict deployment and broker checks",
+        expected_codes=(0, 2),
+        validator=lambda outcome: doctor_core_passed(
+            outcome,
+            allowed_policy_issues=frozenset({"monitor-health", "worker-health"}),
+            require_broker=True,
+        ),
+        success="login user passed storage, identity, and broker checks",
         failure="login user strict deployment probe failed",
     )
     report.command(
