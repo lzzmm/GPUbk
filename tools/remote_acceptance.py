@@ -152,18 +152,28 @@ def require_local_commands() -> None:
 
 
 def run_checked(
-    argv: Sequence[str], *, timeout: float | None = None
+    argv: Sequence[str],
+    *,
+    timeout: float | None = None,
+    visible: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        list(argv),
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        timeout=timeout,
-        check=False,
-    )
+    try:
+        result = subprocess.run(
+            list(argv),
+            text=True,
+            stdout=None if visible else subprocess.PIPE,
+            stderr=None if visible else subprocess.PIPE,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        duration = f" after {timeout:g}s" if timeout is not None else ""
+        raise AcceptanceError(
+            f"command timed out{duration}: {shlex.join(argv)}; "
+            "check local PyPI connectivity and retry"
+        ) from exc
     if result.returncode != 0:
-        detail = (result.stderr or result.stdout).strip()
+        detail = (result.stderr or result.stdout or "").strip()
         if len(detail) > 4000:
             detail = detail[-4000:]
         raise AcceptanceError(
@@ -265,14 +275,22 @@ def prepare_wheelhouse(
                 "pip",
                 "download",
                 "--disable-pip-version-check",
+                "--no-cache-dir",
                 "--index-url",
                 "https://pypi.org/simple/",
                 "--only-binary=:all:",
+                "--timeout",
+                "20",
+                "--retries",
+                "2",
+                "--progress-bar",
+                "off",
                 "--dest",
                 str(destination),
                 f"gpubk[gpu]=={version}",
             ],
             timeout=180,
+            visible=True,
         )
     else:
         supplied = supplied.expanduser()
@@ -752,6 +770,6 @@ def main(argv: list[str] | None = None) -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
-    except (AcceptanceError, OSError) as exc:
+    except (AcceptanceError, OSError, subprocess.SubprocessError) as exc:
         print(f"gpubk acceptance: {exc}", file=sys.stderr)
         raise SystemExit(3) from None
