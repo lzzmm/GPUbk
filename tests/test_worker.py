@@ -76,20 +76,23 @@ class ScheduledJobTests(unittest.TestCase):
                 "0" * 64,
                 "private job",
             )
-        return add_booking(
-            self.store,
-            self.config,
-            BookingRequest(
-                actor=actor,
-                count=1,
-                duration_seconds=10 * 60,
-                start_at=self.start,
-                preferred_gpus=[0],
-                job_spec_id=spec_id,
-                job_digest=digest,
-                job_summary=summary,
-            ),
-        ).reservation
+        # Keep setup and submission in the same booking slice even when CI crosses
+        # a configured slot boundary between two calls to this helper.
+        with mock.patch("bk.scheduler.utc_now", return_value=self.start):
+            return add_booking(
+                self.store,
+                self.config,
+                BookingRequest(
+                    actor=actor,
+                    count=1,
+                    duration_seconds=10 * 60,
+                    start_at=self.start,
+                    preferred_gpus=[0],
+                    job_spec_id=spec_id,
+                    job_digest=digest,
+                    job_summary=summary,
+                ),
+            ).reservation
 
     def test_worker_executes_only_current_uid_and_injects_gpu_environment(self):
         command = [
