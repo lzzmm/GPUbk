@@ -109,6 +109,54 @@ class ClusterTests(unittest.TestCase):
             ):
                 load_cluster_config()
 
+    def test_rejects_duplicate_nodes_and_ambiguous_principal_members(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            duplicate_nodes = self.catalog(
+                root,
+                [
+                    {
+                        "name": "same",
+                        "node_id": "a" * 20,
+                        "transport": "ssh",
+                        "target": "gpu-a",
+                    },
+                    {
+                        "name": "same",
+                        "node_id": "b" * 20,
+                        "transport": "ssh",
+                        "target": "gpu-b",
+                    },
+                ],
+            )
+            with self.assertRaisesRegex(BookingError, "names must be unique"):
+                load_cluster_config(duplicate_nodes)
+
+            document = {
+                "schema_version": CLUSTER_SCHEMA_VERSION,
+                "nodes": [
+                    {
+                        "name": "gpu-a",
+                        "node_id": "a" * 20,
+                        "transport": "ssh",
+                        "target": "gpu-a",
+                    }
+                ],
+                "principals": [
+                    {
+                        "id": "first",
+                        "members": [{"node_id": "a" * 20, "uid": 1001}],
+                    },
+                    {
+                        "id": "second",
+                        "members": [{"node_id": "a" * 20, "uid": 1001}],
+                    },
+                ],
+            }
+            duplicate_nodes.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(BookingError, "multiple cluster principals"):
+                load_cluster_config(duplicate_nodes)
+
     def test_ssh_command_is_noninteractive_and_shell_quotes_remote_arguments(self):
         node = ClusterNode("gpu-b", "b" * 20, "ssh", "user@gpu-b", "/opt/gpubk/bin/bk", 0, 8)
         with mock.patch(
@@ -165,6 +213,90 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(status, 0)
         rows = [line for line in output.getvalue().splitlines() if line.startswith(("preferred", "slow-priority"))]
         self.assertTrue(rows[0].startswith("preferred"))
+
+    def test_unreachable_node_does_not_block_a_healthy_recommendation(self):
+        offline = ClusterNode("offline", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        healthy = ClusterNode("healthy", "b" * 20, "ssh", "b", "/usr/bin/bk", 1, 8)
+        config = ClusterConfig(Path("/cluster.json"), (offline, healthy))
+        replies = [
+            NodeReply(
+                offline,
+                None,
+                "connection failed",
+                error_code="transport",
+            ),
+            NodeReply(
+                healthy,
+                {
+                    "node": {"id": healthy.node_id},
+                    "generated_at": to_iso(utc_now()),
+                    "available": True,
+                    "recommendation": {
+                        "gpus": [0],
+                        "start_at": "2030-01-01T00:00:00Z",
+                        "end_at": "2030-01-01T00:30:00Z",
+                    },
+                },
+                None,
+            ),
+        ]
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel", return_value=replies),
+            redirect_stdout(output),
+        ):
+            status = run_cluster_cli(["recommend", "1", "30m"])
+        self.assertEqual(status, 0)
+        self.assertIn("healthy", output.getvalue())
+
+    def test_stale_preflight_rejection_never_fails_over_to_another_node(self):
+        first = ClusterNode("first", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        second = ClusterNode("second", "b" * 20, "ssh", "b", "/usr/bin/bk", 1, 8)
+        config = ClusterConfig(Path("/cluster.json"), (first, second))
+        capabilities = {
+            "federated_node_identity": True,
+            "idempotent_booking": True,
+            "operation_status": True,
+            "preflight_idempotent_replay": True,
+        }
+        replies = []
+        for node in (first, second):
+            replies.append(
+                NodeReply(
+                    node,
+                    {
+                        "node": {"id": node.node_id},
+                        "generated_at": to_iso(utc_now()),
+                        "available": True,
+                        "capabilities": capabilities,
+                        "recommendation": {
+                            "gpus": [0],
+                            "start_at": "2030-01-01T00:00:00Z",
+                            "end_at": "2030-01-01T00:30:00Z",
+                        },
+                    },
+                    None,
+                )
+            )
+        rejected = NodeReply(
+            first,
+            None,
+            "exclusive conflict",
+            error_code="remote",
+        )
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel", return_value=replies),
+            mock.patch(
+                "bk.cluster._invoke_idempotent_write",
+                return_value=rejected,
+            ) as write,
+            self.assertRaisesRegex(BookingError, "was rejected"),
+        ):
+            run_cluster_cli(["book", "1", "30m"])
+        self.assertEqual(write.call_count, 1)
+        self.assertIs(write.call_args.args[0], first)
 
     def test_implicit_recommendation_tolerates_skew_but_exact_start_rejects_it(self):
         node = ClusterNode("skewed", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)

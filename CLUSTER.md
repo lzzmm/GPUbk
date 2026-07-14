@@ -137,7 +137,8 @@ required idempotency, operation-status, and node-identity capabilities.
 - [x] Gate writes by advertised capabilities and recover ambiguous writes by
       querying the same operation ID on the same node.
 - [ ] Add optional per-node history export/import through the public usage API.
-- [ ] Test unreachable nodes, stale reads, races, duplicate replies, mismatched IDs,
-      hostile config values, mixed versions, and simulated clock skew.
-- [ ] Test two isolated local node processes before any GPU-server rollout.
+- [x] Test unreachable nodes, stale reads, concurrent and replayed writes, mismatched
+      IDs, hostile config values, mixed versions, and simulated clock skew.
+- [x] Test two isolated local node processes with independent ledgers before any
+      GPU-server rollout.
 - [ ] Verify two real GPU hosts manually before marking the release stable.

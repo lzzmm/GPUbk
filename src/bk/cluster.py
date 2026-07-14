@@ -812,7 +812,22 @@ def _parse_cluster_config(path: Path, document: object) -> ClusterConfig:
     principals = document.get("principals", [])
     if not isinstance(principals, list):
         raise BookingError("cluster principals must be a list")
-    return ClusterConfig(path, nodes, tuple(_validate_principal(item, nodes) for item in principals))
+    normalized_principals = tuple(
+        _validate_principal(item, nodes) for item in principals
+    )
+    principal_ids = [str(item["id"]) for item in normalized_principals]
+    if len(set(principal_ids)) != len(principal_ids):
+        raise BookingError("cluster principal IDs must be unique")
+    seen_members: set[tuple[str, int]] = set()
+    for principal in normalized_principals:
+        for member in principal["members"]:
+            key = str(member["node_id"]), int(member["uid"])
+            if key in seen_members:
+                raise BookingError(
+                    "one node UID must not belong to multiple cluster principals"
+                )
+            seen_members.add(key)
+    return ClusterConfig(path, nodes, normalized_principals)
 
 
 def _parse_node(value: object) -> ClusterNode:
