@@ -4,18 +4,21 @@ import argparse
 import json
 import os
 import re
-import shlex
-import shutil
 import stat
-import subprocess
-import sys
 import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 from typing import Optional, Sequence
 
+from .cluster_transport import (
+    ClusterNode,
+    NodeReply,
+    invoke_node as _invoke_once,
+    node_command,
+)
 from .fileio import fsync_directory, open_existing_regular
 from .models import BookingError
 from .node_identity import stable_node_identity
@@ -25,23 +28,14 @@ from .timeparse import parse_iso, utc_now
 CLUSTER_SCHEMA_VERSION = "gpubk.cluster.v1"
 SYSTEM_CLUSTER_FILE = Path("/etc/gpubk/cluster.json")
 MAX_CLUSTER_FILE_BYTES = 1024 * 1024
-MAX_NODE_OUTPUT_BYTES = 8 * 1024 * 1024
 MAX_CLUSTER_NODES = 128
 MAX_CLOCK_SKEW_SECONDS = 30
 _NAME = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$")
 _NODE_ID = re.compile(r"^[0-9a-f]{20}$")
 _SSH_TARGET = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.@:\[\]-]{0,254}$")
 
-
-@dataclass(frozen=True)
-class ClusterNode:
-    name: str
-    node_id: str
-    transport: str
-    target: Optional[str]
-    executable: str
-    priority: int
-    timeout_seconds: float
+# Compatibility for callers and tests that inspect the generated SSH command.
+_node_command = node_command
 
 
 @dataclass(frozen=True)
@@ -55,13 +49,6 @@ class ClusterConfig:
         if not matches:
             raise BookingError(f"unknown cluster node {name!r}")
         return matches[0]
-
-
-@dataclass(frozen=True)
-class NodeReply:
-    node: ClusterNode
-    payload: Optional[dict]
-    error: Optional[str]
 
 
 def cluster_config_path() -> Path:
@@ -570,90 +557,50 @@ def _print_cluster_mutation(reply: NodeReply) -> int:
     return 0
 
 
-def _parallel(nodes: Sequence[ClusterNode], argv: list[str]) -> list[NodeReply]:
+def _parallel(
+    nodes: Sequence[ClusterNode],
+    argv: list[str],
+    cancel_event: Optional[Event] = None,
+) -> list[NodeReply]:
     replies = []
     with ThreadPoolExecutor(max_workers=min(16, len(nodes))) as executor:
-        futures = {executor.submit(_invoke, node, argv): node for node in nodes}
+        futures = {
+            executor.submit(_invoke, node, argv, cancel_event=cancel_event): node
+            for node in nodes
+        }
         for future in as_completed(futures):
             try:
                 replies.append(future.result())
-            except BaseException as exc:
+            except Exception as exc:
                 replies.append(NodeReply(futures[future], None, str(exc)))
     return sorted(replies, key=lambda item: (item.node.priority, item.node.name))
 
 
-def query_cluster_contexts(config: ClusterConfig) -> list[NodeReply]:
-    return _parallel(config.nodes, ["agent", "context", "--compact"])
+def query_cluster_contexts(
+    config: ClusterConfig,
+    cancel_event: Optional[Event] = None,
+) -> list[NodeReply]:
+    return _parallel(
+        config.nodes,
+        ["agent", "context", "--compact"],
+        cancel_event,
+    )
 
 
-def _invoke(node: ClusterNode, argv: list[str], *, retry_timeout: bool = False) -> NodeReply:
+def _invoke(
+    node: ClusterNode,
+    argv: list[str],
+    *,
+    retry_timeout: bool = False,
+    cancel_event: Optional[Event] = None,
+) -> NodeReply:
     attempts = 2 if retry_timeout else 1
-    last_error = None
+    reply = NodeReply(node, None, "request failed")
     for _attempt in range(attempts):
-        command, environment = _node_command(node, argv)
-        try:
-            result = subprocess.run(
-                command,
-                env=environment,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                timeout=node.timeout_seconds,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            last_error = f"timed out after {node.timeout_seconds:g}s"
-            continue
-        if len(result.stdout) > MAX_NODE_OUTPUT_BYTES or len(result.stderr) > MAX_NODE_OUTPUT_BYTES:
-            return NodeReply(node, None, "response exceeds 8 MiB")
-        if result.returncode not in {0, 3}:
-            detail = result.stderr.decode("utf-8", "replace").strip().splitlines()
-            return NodeReply(node, None, detail[-1] if detail else f"exit {result.returncode}")
-        try:
-            payload = json.loads(result.stdout.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            return NodeReply(node, None, "returned invalid JSON")
-        if not isinstance(payload, dict):
-            return NodeReply(node, None, "returned a non-object JSON response")
-        identity = payload.get("node")
-        if not isinstance(identity, dict) or identity.get("id") != node.node_id:
-            return NodeReply(node, None, "stable node identity does not match the catalog")
-        return NodeReply(node, payload, None)
-    return NodeReply(node, None, last_error or "request failed")
-
-
-def _node_command(node: ClusterNode, argv: list[str]) -> tuple[list[str], Optional[dict]]:
-    if node.transport == "local":
-        environment = dict(os.environ)
-        environment["BK_CLUSTER_DISABLE"] = "1"
-        return [sys.executable, "-m", "bk", *argv], environment
-    ssh = shutil.which("ssh")
-    if ssh is None:
-        raise BookingError("OpenSSH client is unavailable")
-    remote = shlex.join([node.executable, *argv])
-    command = [
-        ssh,
-        "-T",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "-o",
-        "NumberOfPasswordPrompts=0",
-        "-o",
-        "ClearAllForwardings=yes",
-        "-o",
-        "PermitLocalCommand=no",
-        "-o",
-        "RequestTTY=no",
-        "-o",
-        f"ConnectTimeout={max(1, int(node.timeout_seconds))}",
-        "-o",
-        "ConnectionAttempts=1",
-        "--",
-        str(node.target),
-        remote,
-    ]
-    return command, None
+        reply = _invoke_once(node, argv, cancel_event=cancel_event)
+        if not reply.timed_out:
+            return reply
+    return reply
 
 
 def _parse_cluster_config(path: Path, document: object) -> ClusterConfig:

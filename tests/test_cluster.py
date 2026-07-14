@@ -1,6 +1,5 @@
 import json
 import os
-import subprocess
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -110,7 +109,10 @@ class ClusterTests(unittest.TestCase):
 
     def test_ssh_command_is_noninteractive_and_shell_quotes_remote_arguments(self):
         node = ClusterNode("gpu-b", "b" * 20, "ssh", "user@gpu-b", "/opt/gpubk/bin/bk", 0, 8)
-        with mock.patch("bk.cluster.shutil.which", return_value="/usr/bin/ssh"):
+        with mock.patch(
+            "bk.cluster_transport.shutil.which",
+            return_value="/usr/bin/ssh",
+        ):
             command, environment = _node_command(
                 node,
                 ["agent", "recommend", "1", "30m", "--mem", "12g; touch /tmp/x"],
@@ -124,13 +126,15 @@ class ClusterTests(unittest.TestCase):
 
     def test_invoke_rejects_response_from_wrong_node(self):
         node = ClusterNode("gpu-b", "b" * 20, "local", None, "/usr/local/bin/bk", 0, 8)
-        completed = subprocess.CompletedProcess(
-            ["bk"],
+        completed = (
             0,
-            stdout=json.dumps({"node": {"id": "c" * 20}}).encode(),
-            stderr=b"",
+            json.dumps({"node": {"id": "c" * 20}}).encode(),
+            b"",
         )
-        with mock.patch("bk.cluster.subprocess.run", return_value=completed):
+        with mock.patch(
+            "bk.cluster_transport._run_node_process",
+            return_value=completed,
+        ):
             reply = _invoke(node, ["agent", "context", "--compact"])
         self.assertIn("does not match", reply.error)
 

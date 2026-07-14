@@ -3,6 +3,7 @@ from __future__ import annotations
 import curses
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
+from threading import Event
 from typing import Sequence
 
 from .cluster import ClusterConfig, NodeReply, query_cluster_contexts
@@ -123,8 +124,13 @@ def _cluster_tui_main(screen, config: ClusterConfig) -> None:
     screen.timeout(100)
     selected = 0
     replies: list[NodeReply] = []
+    stop_event = Event()
     executor = ThreadPoolExecutor(max_workers=1)
-    pending: Future | None = executor.submit(query_cluster_contexts, config)
+    pending: Future | None = executor.submit(
+        query_cluster_contexts,
+        config,
+        stop_event,
+    )
     last_refresh = time.monotonic()
     try:
         while True:
@@ -136,7 +142,11 @@ def _cluster_tui_main(screen, config: ClusterConfig) -> None:
                 pending = None
                 last_refresh = time.monotonic()
             if pending is None and time.monotonic() - last_refresh >= 5:
-                pending = executor.submit(query_cluster_contexts, config)
+                pending = executor.submit(
+                    query_cluster_contexts,
+                    config,
+                    stop_event,
+                )
             height, width = screen.getmaxyx()
             lines = render_cluster_lines(
                 config,
@@ -174,9 +184,14 @@ def _cluster_tui_main(screen, config: ClusterConfig) -> None:
             elif key in {curses.KEY_DOWN, ord("j")}:
                 selected = (selected + 1) % len(config.nodes)
             elif key == ord("r") and pending is None:
-                pending = executor.submit(query_cluster_contexts, config)
+                pending = executor.submit(
+                    query_cluster_contexts,
+                    config,
+                    stop_event,
+                )
     finally:
-        executor.shutdown(wait=False, cancel_futures=True)
+        stop_event.set()
+        executor.shutdown(wait=True, cancel_futures=True)
 
 
 def _fit(value: str, width: int) -> str:
