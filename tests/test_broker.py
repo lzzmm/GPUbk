@@ -41,15 +41,25 @@ class RunningBroker:
     def __enter__(self):
         self.thread.start()
         deadline = time.monotonic() + 3
+        client = BrokerClient(self.server.config)
+        client.timeout = 0.2
+        last_error = None
         while time.monotonic() < deadline:
             if self.socket_path.exists():
-                return self.server
+                try:
+                    response = client.call("ping", {})
+                except BookingError as exc:
+                    last_error = exc
+                else:
+                    if response.get("service_uid") == self.server.config.broker_uid:
+                        return self.server
             if not self.thread.is_alive():
                 break
             time.sleep(0.01)
         self.server.close()
         self.thread.join(timeout=2)
-        raise RuntimeError("broker did not start")
+        detail = f": {last_error}" if last_error is not None else ""
+        raise RuntimeError(f"broker did not start{detail}")
 
     def __exit__(self, exc_type, exc, traceback):
         self.server.close()
