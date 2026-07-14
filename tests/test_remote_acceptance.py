@@ -71,6 +71,39 @@ class LocalAcceptanceRunnerTests(unittest.TestCase):
             with self.assertRaisesRegex(LOCAL.AcceptanceError, "expected 9.9.9"):
                 LOCAL.verify_wheelhouse(wheelhouse, "9.9.9", verify_index=False)
 
+    def test_command_timeout_becomes_a_short_actionable_error(self):
+        expired = LOCAL.subprocess.TimeoutExpired(["python", "-m", "pip"], 3)
+        with mock.patch.object(LOCAL.subprocess, "run", side_effect=expired):
+            with self.assertRaisesRegex(
+                LOCAL.AcceptanceError,
+                "timed out after 3s.*check local PyPI connectivity",
+            ):
+                LOCAL.run_checked(["python", "-m", "pip"], timeout=3, visible=True)
+
+    def test_pypi_download_avoids_cache_and_bounds_network_retries(self):
+        with tempfile.TemporaryDirectory() as raw_directory:
+            destination = Path(raw_directory) / "wheelhouse"
+            with (
+                mock.patch.object(LOCAL, "run_checked") as run_checked,
+                mock.patch.object(
+                    LOCAL, "verify_wheelhouse", return_value=[]
+                ) as verify,
+            ):
+                result = LOCAL.prepare_wheelhouse(
+                    destination,
+                    "1.2.3",
+                    None,
+                    verify_index=True,
+                )
+
+            self.assertEqual(result, [])
+            argv = run_checked.call_args.args[0]
+            self.assertIn("--no-cache-dir", argv)
+            self.assertEqual(argv[argv.index("--timeout") + 1], "20")
+            self.assertEqual(argv[argv.index("--retries") + 1], "2")
+            self.assertTrue(run_checked.call_args.kwargs["visible"])
+            verify.assert_called_once_with(destination, "1.2.3", verify_index=True)
+
     def test_manifest_covers_runner_and_rejects_modified_wheel(self):
         with tempfile.TemporaryDirectory() as raw_directory:
             stage = Path(raw_directory)
