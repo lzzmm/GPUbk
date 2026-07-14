@@ -13,6 +13,10 @@ GPUBK publishes without a stored PyPI API token. Before the first release:
 
 The publish jobs receive `id-token: write` only inside their protected environments. Both jobs also fail closed behind their corresponding release-enabled variable. Do not add `PYPI_API_TOKEN`, `TWINE_PASSWORD`, or a long-lived upload token to repository secrets.
 
+The workflow treats a disabled release gate as an error, not as a successful build-only run.
+If a manual release exits immediately with a `*_RELEASE_ENABLED must be true` message,
+update the named repository variable after re-confirming GitHub access, then start a new run.
+
 ## Release candidates
 
 Use a unique PEP 440 prerelease such as `0.2.0rc1` in `src/bk/__init__.py` and

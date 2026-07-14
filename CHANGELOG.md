@@ -4,6 +4,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Fail release workflows explicitly when a TestPyPI or PyPI publication gate is disabled,
+  instead of reporting a successful run that silently skipped every publish job.
 - Limit the system monitor's writable systemd paths to its telemetry/ledger data directory; the
   broker socket directory remains writable only by the broker service.
 - Keep the monitor compatible with NVIDIA NVML under systemd by avoiding `ProtectClock` and its
