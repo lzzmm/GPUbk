@@ -4,6 +4,11 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Package the self-cleaning live telemetry acceptance workload as `bk usage demo`, with an
+  interactive confirmation, active-environment CUDA detection, idle-GPU admission, and automatic
+  reservation cleanup.
+- Stabilize scheduled-worker tests across configured booking-slice boundaries by fixing their
+  injected scheduler clock.
 - Fail release workflows explicitly when a TestPyPI or PyPI publication gate is disabled,
   instead of reporting a successful run that silently skipped every publish job.
 - Limit the system monitor's writable systemd paths to its telemetry/ledger data directory; the

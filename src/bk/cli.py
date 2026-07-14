@@ -3131,6 +3131,7 @@ JOBS AND USAGE
   bk m [--once]                  monitor GPU processes
   bk u / bk u users --since 30d  own or all-user summaries
   bk u events / bk u samples     audit events or time series
+  bk u demo --yes                verify live accounting on one idle GPU
 
 AGENTS AND ADMIN
   bk agent context               stable machine-readable context
@@ -3190,6 +3191,7 @@ def _print_shell_help() -> None:
   u users --since 30d       summarize visible users
   u events | u samples      audit events or versioned time series
   u storage                 inspect tiers, retention, and migration
+  u demo                    verify live accounting on one idle GPU
   w | worker                execute only this UID's due jobs
   j | jobs                  list scheduled job states
   j --cleanup               prune private job files by policy

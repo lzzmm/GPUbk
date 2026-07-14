@@ -344,8 +344,9 @@ bk u samples --since 2d --resolution 5m --json
 bk u events --user me --since 7d
 ```
 
-真实 GPU 主机已安装 CUDA PyTorch 时，可在源码目录运行
-`python3 tools/live_usage_demo.py --yes`，它会自动预约、产生轻负载、打印统计并取消预约。
+在真实 GPU 主机上激活带 CUDA PyTorch 的环境后运行 `bk usage demo`。它会先检查
+monitor，确认后预约一张当前空闲卡，运行短时低占用负载，打印统计结果，并始终尝试取消
+测试预约。已获准的非交互验收可使用 `bk usage demo --yes`。
 
 NVML 只初始化一次，并复用设备句柄。初始化失败或设备句柄失效后会先短暂退避再重建，
 因此驱动的瞬时故障不会让长驻 monitor 永久降级。监测器保存有限长度的调度负载、稀疏的

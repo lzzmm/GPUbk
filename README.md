@@ -401,8 +401,11 @@ bk u samples --since 2d --resolution 5m --json
 bk u events --user me --since 7d
 ```
 
-On a real GPU host with CUDA PyTorch, run the self-cleaning usage demo from a
-source checkout with `python3 tools/live_usage_demo.py --yes`.
+On a real GPU host, activate a CUDA PyTorch environment and run
+`bk usage demo`. It checks the monitor, asks before booking one currently idle
+GPU, runs a short low-duty workload, prints the resulting statistics, and
+always attempts to cancel its reservation. Use `bk usage demo --yes` in an
+approved non-interactive acceptance run.
 
 NVML is initialized once and device handles are reused. A failed initialization
 or stale device handle enters a short backoff and is rebuilt, so a transient
