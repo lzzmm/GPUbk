@@ -21,6 +21,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional, Sequence
 
+from .admin_command import (
+    apply_command_link_install,
+    apply_command_link_uninstall,
+    inspect_command_link,
+    plan_command_link_install,
+    validate_command_link_document,
+)
 from .admin_services import (
     PHASE_INSTALLED,
     SystemServicesPlan,
@@ -68,6 +75,7 @@ TRANSFER_SCHEMA_VERSION = "gpubk.transfer.v1"
 CONFIG_UPDATE_SCHEMA_VERSION = "gpubk.config-update.v1"
 DEFAULT_SYSTEM_DATA_DIR = Path("/var/lib/gpubk")
 DEFAULT_BROKER_SOCKET = Path("/run/gpubk/broker.sock")
+DEFAULT_COMMAND_LINK = Path("/usr/local/bin/bk")
 CONFIG_DIRECTORY_MODE = 0o755
 CONFIG_FILE_MODE = 0o644
 INSTALL_MANIFEST_NAME = "install.json"
@@ -331,6 +339,22 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     )
     install_parser.set_defaults(require_shared_memory=None)
     install_parser.add_argument("--python-executable", type=Path)
+    install_parser.add_argument(
+        "--command-path",
+        type=Path,
+        default=DEFAULT_COMMAND_LINK,
+        help="system-wide bk link (default: /usr/local/bin/bk)",
+    )
+    install_parser.add_argument(
+        "--command-target",
+        type=Path,
+        help="installed bk executable (default: sibling of the selected Python)",
+    )
+    install_parser.add_argument(
+        "--no-command-link",
+        action="store_true",
+        help="leave the system-wide bk command unchanged",
+    )
     install_parser.add_argument("--login-hook", action="store_true")
     install_parser.add_argument("--no-start", action="store_true")
     install_parser.add_argument("--force", action="store_true")
@@ -867,8 +891,33 @@ def _run_admin_install(args: argparse.Namespace) -> int:
     if interactive and not args.login_hook:
         login_hook = _ask_bool("Install the interactive login reminder", True, enabled=True)
 
+    python_executable = _absolute_path(args.python_executable or Path(sys.executable))
+    command_path = _absolute_path(args.command_path)
+    command_target = _absolute_path(
+        args.command_target or python_executable.with_name("bk")
+    )
+    command_preview = None
+    if not args.no_command_link and (os.geteuid() == 0 or not args.dry_run):
+        command_preview = plan_command_link_install(
+            existing=None,
+            destination=command_path,
+            target=command_target,
+            expected_owner=0,
+        )
+        if command_preview.blockers:
+            raise BookingError("; ".join(command_preview.blockers))
+
     _print_plan(plan, inspection)
-    print(f"  Python:  {_absolute_path(args.python_executable or Path(sys.executable))}")
+    print(f"  Python:  {python_executable}")
+    if args.no_command_link:
+        print("  command: leave system-wide bk unchanged")
+    else:
+        suffix = (
+            f" ({command_preview.status})"
+            if command_preview is not None
+            else " (validate when applied as root)"
+        )
+        print(f"  command: {command_path} -> {command_target}{suffix}")
     print(f"  login:   {'install reminder' if login_hook else 'leave unchanged'}")
     print(f"  services: {'install only' if args.no_start else 'install, enable, and start'}")
     if args.dry_run:
@@ -885,6 +934,12 @@ def _run_admin_install(args: argparse.Namespace) -> int:
         raise BookingError("systemctl is unavailable; use --no-start and supervise services manually")
 
     apply_admin_init(plan, force=args.force)
+    if not args.no_command_link:
+        apply_admin_command_link_install(
+            plan.config_file,
+            destination=command_path,
+            target=command_target,
+        )
     service_plan, service_inspection = inspect_admin_system_services(
         plan.config_file,
         operation="install",
@@ -901,7 +956,7 @@ def _run_admin_install(args: argparse.Namespace) -> int:
     if login_hook:
         from .login_hook import apply_login_hook_install
 
-        apply_login_hook_install()
+        apply_login_hook_install(executable=command_path)
     if systemctl is not None:
         _run_systemctl(systemctl, "daemon-reload")
         _run_systemctl(
@@ -1135,6 +1190,48 @@ def _run_admin_services(args: argparse.Namespace) -> int:
         print("removed: tracked GPUBK system service files")
         print("next: sudo systemctl daemon-reload")
     return 0
+
+
+def apply_admin_command_link_install(
+    config_file: Path,
+    *,
+    destination: Path = DEFAULT_COMMAND_LINK,
+    target: Path,
+    require_root: bool = True,
+) -> dict:
+    if require_root and os.geteuid() != 0:
+        raise BookingError(
+            "administrator command-link installation must run as root"
+        )
+    expected_owner = 0 if require_root else os.geteuid()
+    config_file = _absolute_path(config_file)
+    manifest_path = _manifest_path(config_file)
+    manifest = _read_manifest(manifest_path, expected_owner=expected_owner)
+    plan = plan_command_link_install(
+        existing=manifest.get("command_link"),
+        destination=destination,
+        target=target,
+        expected_owner=expected_owner,
+    )
+    if plan.blockers:
+        raise BookingError("; ".join(plan.blockers))
+    pending = {**manifest, "command_link": plan.document}
+    _write_manifest(manifest_path, pending, replace=True)
+    finalized = apply_command_link_install(
+        plan.document,
+        expected_owner=expected_owner,
+    )
+    _write_manifest(
+        manifest_path,
+        {**pending, "command_link": finalized},
+        replace=True,
+    )
+    return {
+        "status": "installed",
+        "destination": finalized["destination"],
+        "target": finalized["target"],
+        "owned": finalized["owned"],
+    }
 
 
 def inspect_admin_system_services(
@@ -1987,6 +2084,15 @@ def inspect_admin_uninstall(
             expected_owner=expected_owner,
             require_installed=False,
         )
+    command_link_document = manifest.get("command_link")
+    command_link = None
+    if command_link_document is not None:
+        command_link = inspect_command_link(
+            command_link_document,
+            expected_owner=expected_owner,
+            allow_absent=True,
+            require_target=False,
+        )
 
     data_dir = _manifest_absolute_path(manifest, "data_dir")
     broker_socket = _manifest_absolute_path(manifest, "broker_socket")
@@ -2059,7 +2165,16 @@ def inspect_admin_uninstall(
         blockers.append("a ledger transaction is active; retry after it finishes")
     if data_nonempty and not purge_data:
         blockers.append("data exists; pass --purge-data to remove it")
+    if command_link is not None:
+        blockers.extend(command_link["blockers"])
     actions = []
+    if command_link is not None:
+        if command_link["owned"] and command_link["current"] != "absent":
+            actions.append(f"remove managed command link {command_link['destination']}")
+        elif not command_link["owned"]:
+            actions.append(
+                f"preserve pre-existing command link {command_link['destination']}"
+            )
     if socket_state == "stale":
         actions.append(f"remove stale socket {broker_socket}")
     if os.path.lexists(data_dir):
@@ -2107,6 +2222,7 @@ def inspect_admin_uninstall(
         "system_services_present": system_services_present,
         "login_hook_managed": login_hook_managed,
         "login_hook_path": login_hook["path"],
+        "command_link": command_link,
         "actions": actions,
         "blockers": blockers,
     }
@@ -2146,6 +2262,7 @@ def apply_admin_uninstall(
     backup_path = _validated_backup_path(manifest, config_file)
     login_hook_path = login_hook_path or DEFAULT_LOGIN_HOOK_PATH
     login_hook_removed = False
+    command_link_removed = False
 
     if inspection["login_hook_managed"]:
         result = apply_login_hook_uninstall(
@@ -2153,6 +2270,12 @@ def apply_admin_uninstall(
             require_root=require_root,
         )
         login_hook_removed = bool(result["changed"])
+
+    if manifest.get("command_link") is not None:
+        command_link_removed = apply_command_link_uninstall(
+            manifest["command_link"],
+            expected_owner=expected_owner,
+        )
 
     if os.path.lexists(broker_socket):
         broker_socket.unlink()
@@ -2210,6 +2333,7 @@ def apply_admin_uninstall(
         "data_purged": bool(purge_data),
         "manifest_removed": True,
         "login_hook_removed": login_hook_removed,
+        "command_link_removed": command_link_removed,
         "accounts_changed": False,
     }
 
@@ -3743,6 +3867,8 @@ def _read_manifest(path: Path, *, expected_owner: int) -> dict:
     missing = sorted(required - set(manifest))
     if missing:
         raise BookingError(f"install manifest is missing fields: {', '.join(missing)}")
+    if manifest.get("command_link") is not None:
+        validate_command_link_document(manifest["command_link"])
     return manifest
 
 

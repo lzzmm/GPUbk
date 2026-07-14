@@ -33,9 +33,11 @@ new processes and reinstall the recorded version, for example:
 sudo /opt/gpubk/bin/python -m pip install 'gpubk[gpu]==PREVIOUS_VERSION'
 ```
 
-The `/usr/local/bin/bk` symbolic link does not need to be recreated during a
-routine upgrade. If it already resolves to `/opt/gpubk/bin/bk`, leave it in
-place; do not use a force-link command over an unknown existing path.
+The tracked `/usr/local/bin/bk` symbolic link does not need to be recreated during
+a routine upgrade. `sudo /opt/gpubk/bin/bk admin install --no-start` can repair a
+missing GPUBK-owned link while preserving a correct link that predated setup. It
+refuses regular files and links to another target; do not use a force-link command
+over an unknown existing path.
 
 Then restart and verify again. The root-owned install manifest, configuration,
 reservations, audit log, and usage history remain in place throughout. Running

@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Make `sudo bk admin install` safely create and track `/usr/local/bin/bk`, preserve an
+  identical link that predates GPUBK, reject unknown command paths, resume interrupted
+  link creation, and remove only GPUBK-owned links during the tracked uninstall.
 - Add `sudo bk admin install`, a guided one-command shared-server setup that writes the
   trusted configuration, installs tracked boot services, optionally installs the login
   reminder, and keeps preview, unattended, and install-without-start modes.

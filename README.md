@@ -595,20 +595,21 @@ avoids modifying the operating system's Python and gives upgrades one stable pat
 sudo python3 -m venv /opt/gpubk
 sudo /opt/gpubk/bin/python -m pip install --upgrade pip
 sudo /opt/gpubk/bin/python -m pip install 'gpubk[gpu]'
-sudo ln -s /opt/gpubk/bin/bk /usr/local/bin/bk
 sudo /opt/gpubk/bin/bk admin install
 bk doctor --probe --require-monitor --strict
 ```
 
 The guided installer asks one question at a time and shows a final review. Press
 Enter to accept its conservative defaults. It initializes trusted configuration,
-installs the tracked broker and monitor units, optionally installs the colored
-login reminder, and enables both services at boot. Use `--dry-run` to preview,
-`--yes` for unattended defaults, or `--no-start` to install without starting.
-Python package installation itself never invokes `sudo` or changes `/etc`; this
-explicit administrator command owns those system changes.
+installs a tracked `/usr/local/bin/bk` link, installs the broker and monitor units,
+optionally installs the colored login reminder, and enables both services at boot.
+Use `--dry-run` to preview, `--yes` for unattended defaults, `--no-start` to install
+without starting, or `--no-command-link` when another package manager owns the
+global command. Python package installation itself never invokes `sudo` or changes
+`/etc`; this explicit administrator command owns those system changes.
 
-The equivalent step-by-step path remains available for troubleshooting:
+The lower-level path remains available for troubleshooting. It assumes `bk` is
+already available at the path users will run:
 
 ```bash
 sudo bk admin init --yes
@@ -617,18 +618,26 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now gpubk-broker.service gpubk-monitor.service
 ```
 
-If `ln` reports `File exists`, do not force-replace the path. Inspect it first:
+The installer never uses a force-link operation. If `/usr/local/bin/bk` is absent,
+it creates and tracks an absolute link to `/opt/gpubk/bin/bk`. If the same link
+already existed before GPUBK setup, it records that fact and preserves the link on
+uninstall. Any regular file or link to another target stops installation before
+server state is changed. Inspect such a path explicitly:
 
 ```bash
 ls -l /usr/local/bin/bk
 readlink -f /usr/local/bin/bk
 ```
 
-When the second command prints `/opt/gpubk/bin/bk`, the existing link is already
-correct and can be kept; package upgrades update its target in place. Otherwise,
-remove it with `sudo unlink /usr/local/bin/bk` only after confirming that it is a
-stale symbolic link, then create the link again. Never use `ln -sf` over an
-unknown regular file.
+When the second command prints `/opt/gpubk/bin/bk`, rerun the installer; it will
+adopt the correct pre-existing link without taking ownership of it:
+
+```bash
+sudo /opt/gpubk/bin/bk admin install
+```
+
+Otherwise, resolve the conflict deliberately or use `--no-command-link`. Never
+use `ln -sf` over an unknown path.
 
 On Debian or Ubuntu, install `python3-venv` first if `venv` is unavailable. The
 initializer detects the GPUs and uses the account that invoked `sudo` as the
@@ -915,7 +924,6 @@ sudo systemctl daemon-reload
 
 sudo bk admin uninstall --dry-run --purge-data
 sudo bk admin uninstall --purge-data --yes
-sudo unlink /usr/local/bin/bk
 sudo rm -rf /opt/gpubk
 ```
 
@@ -923,11 +931,12 @@ The uninstall manifest restores pre-existing empty-directory metadata and an
 older replaced configuration. It refuses to proceed if the broker is active,
 the managed configuration changed, or an unknown file appears in a directory
 GPUBK would remove. Accounts and groups are left untouched because GPUBK never
-creates them. These commands remove the tracked server state, command link, and
-isolated Python environment; pre-existing files and directories recorded by the
-install manifest are restored. Each user who installed a worker unit can remove
-it in the same way with `systemctl --user disable --now bk-worker.service` and
-`bk service uninstall worker`.
+creates them. `bk admin uninstall` removes a command link it created, but preserves
+an identical link that existed before GPUBK setup. These commands remove the tracked
+server state and isolated Python environment; pre-existing files and directories
+recorded by the install manifest are restored. Each user who installed a worker
+unit can remove it in the same way with `systemctl --user disable --now
+bk-worker.service` and `bk service uninstall worker`.
 
 `sudo bk admin services status` reports the tracked interpreter, UID/GID, unit file
 state, and remaining enable links. GPUBK writes unit files but leaves

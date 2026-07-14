@@ -500,18 +500,18 @@ allocator 进程组再继续抛出中断。完整格式见
 sudo python3 -m venv /opt/gpubk
 sudo /opt/gpubk/bin/python -m pip install --upgrade pip
 sudo /opt/gpubk/bin/python -m pip install 'gpubk[gpu]'
-sudo ln -s /opt/gpubk/bin/bk /usr/local/bin/bk
 sudo /opt/gpubk/bin/bk admin install
 bk doctor --probe --require-monitor --strict
 ```
 
 安装向导每次只问一个设置，所有问题都有稳妥默认值，直接回车即可接受；最后会统一预览再
-确认。它会初始化可信配置、安装受跟踪的 broker/monitor unit、可选安装彩色登录提醒，
-并设置两个服务开机启动。`--dry-run` 只预览，`--yes` 使用无人值守默认值，`--no-start`
-只安装不启动。pip 本身不会调用 sudo，也不会修改 `/etc`；系统级改动只由这条明确的
-管理员命令执行。
+确认。它会初始化可信配置、受跟踪地创建 `/usr/local/bin/bk`、安装 broker/monitor
+unit、可选安装彩色登录提醒，并设置两个服务开机启动。`--dry-run` 只预览，`--yes`
+使用无人值守默认值，`--no-start` 只安装不启动；若全局命令由别的包管理器负责，可用
+`--no-command-link`。pip 本身不会调用 sudo，也不会修改 `/etc`；系统级改动只由这条
+明确的管理员命令执行。
 
-排障或高级部署仍可使用完全等价的分步流程：
+排障或高级部署仍可使用底层分步流程；此时需自行确保用户执行的路径上已有 `bk`：
 
 ```bash
 sudo bk admin init --yes
@@ -520,16 +520,23 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now gpubk-broker.service gpubk-monitor.service
 ```
 
-若 `ln` 提示 `File exists`，不要强制覆盖，先检查：
+安装器绝不使用强制覆盖链接。`/usr/local/bin/bk` 不存在时，它会创建并记录指向
+`/opt/gpubk/bin/bk` 的绝对软链接；安装前若已存在完全相同的链接，则记录为原有链接，
+卸载时保留。普通文件或指向其他目标的链接会让安装在修改服务器状态前停止。此时先检查：
 
 ```bash
 ls -l /usr/local/bin/bk
 readlink -f /usr/local/bin/bk
 ```
 
-如果第二条输出 `/opt/gpubk/bin/bk`，现有链接已经正确，保留即可；以后升级只会更新其
-目标环境。否则，只有在确认它是旧软链接后才执行 `sudo unlink /usr/local/bin/bk`，然后
-重新创建链接。不要对未知普通文件使用 `ln -sf`。
+如果第二条输出 `/opt/gpubk/bin/bk`，直接重新运行安装器；它会采用但不接管这个原有
+链接：
+
+```bash
+sudo /opt/gpubk/bin/bk admin install
+```
+
+否则应明确处理冲突，或使用 `--no-command-link`。不要对未知路径使用 `ln -sf`。
 
 Debian/Ubuntu 若没有 `venv`，先安装 `python3-venv`。初始化会探测真实 GPU，并默认把
 发起 `sudo` 的管理员账号作为 broker 和 monitor 的运行账号。它创建的就是正式部署路径：
@@ -784,14 +791,14 @@ sudo systemctl daemon-reload
 
 sudo bk admin uninstall --dry-run --purge-data
 sudo bk admin uninstall --purge-data --yes
-sudo unlink /usr/local/bin/bk
 sudo rm -rf /opt/gpubk
 ```
 
 卸载清单会恢复安装前已有空目录的权限和被替换的旧配置。如果 broker 仍在运行、配置被
 外部修改，或待删除目录中出现未知文件，卸载会拒绝继续。GPUBK 从不创建账号和用户组，
-所以卸载也不会删除它们。以上命令会删除受跟踪的服务器状态、全局命令链接和独立 Python
-环境；安装清单中记录的原有文件与目录会恢复到安装前状态。安装过 worker unit 的每位
+所以卸载也不会删除它们。`bk admin uninstall` 会删除由它创建的全局命令链接，但保留
+安装前就存在的同目标链接。以上命令会删除受跟踪的服务器状态和独立 Python 环境；安装
+清单中记录的原有文件与目录会恢复到安装前状态。安装过 worker unit 的每位
 用户可同样执行 `systemctl --user disable --now bk-worker.service` 和
 `bk service uninstall worker`。
 

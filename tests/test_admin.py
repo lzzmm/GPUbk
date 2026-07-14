@@ -19,6 +19,7 @@ from bk.admin import (
     INSTALL_MANIFEST_MODE,
     _detected_gpu_count,
     _validate_plan,
+    apply_admin_command_link_install,
     apply_admin_gpu_policy,
     apply_admin_init,
     apply_admin_system_services_install,
@@ -796,7 +797,14 @@ class AdminInitTests(unittest.TestCase):
                 mock.patch("bk.admin._validate_plan"),
                 mock.patch("bk.admin.inspect_admin_init", return_value=mock.Mock()),
                 mock.patch("bk.admin._print_plan"),
+                mock.patch(
+                    "bk.admin.plan_command_link_install",
+                    return_value=mock.Mock(status="absent", blockers=()),
+                ),
                 mock.patch("bk.admin.apply_admin_init") as apply_init,
+                mock.patch(
+                    "bk.admin.apply_admin_command_link_install"
+                ) as apply_command_link,
                 mock.patch(
                     "bk.admin.inspect_admin_system_services",
                     return_value=(mock.Mock(), {"blockers": []}),
@@ -810,6 +818,7 @@ class AdminInitTests(unittest.TestCase):
 
             self.assertEqual(status, 0)
             apply_init.assert_called_once()
+            apply_command_link.assert_called_once()
             apply_services.assert_called_once()
             self.assertEqual(run.call_count, 2)
             self.assertEqual(
@@ -822,6 +831,81 @@ class AdminInitTests(unittest.TestCase):
                     "gpubk-monitor.service",
                 ],
             )
+
+    def test_command_link_is_tracked_by_install_manifest_and_full_uninstall(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.prepare_parents(root)
+            plan = self.plan(root)
+            apply_admin_init(plan, require_root=False)
+            command_dir = root / "usr" / "local" / "bin"
+            command_dir.mkdir(parents=True, mode=0o755)
+            target_dir = root / "opt" / "gpubk" / "bin"
+            target_dir.mkdir(parents=True, mode=0o755)
+            target = target_dir / "bk"
+            target.write_text("#!/bin/sh\n", encoding="utf-8")
+            target.chmod(0o755)
+            destination = command_dir / "bk"
+
+            result = apply_admin_command_link_install(
+                plan.config_file,
+                destination=destination,
+                target=target,
+                require_root=False,
+            )
+            manifest = json.loads(
+                (plan.config_file.parent / "install.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(result["owned"])
+            self.assertEqual(manifest["command_link"]["phase"], "installed")
+            self.assertEqual(os.readlink(destination), str(target))
+
+            preview = inspect_admin_uninstall(
+                plan.config_file,
+                purge_data=True,
+                expected_owner=os.geteuid(),
+            )
+            self.assertEqual(preview["status"], "ready")
+            self.assertTrue(preview["command_link"]["owned"])
+            removed = apply_admin_uninstall(
+                plan.config_file,
+                purge_data=True,
+                require_root=False,
+            )
+            self.assertTrue(removed["command_link_removed"])
+            self.assertFalse(os.path.lexists(destination))
+
+    def test_full_uninstall_preserves_a_preexisting_exact_command_link(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.prepare_parents(root)
+            plan = self.plan(root)
+            apply_admin_init(plan, require_root=False)
+            command_dir = root / "usr" / "local" / "bin"
+            command_dir.mkdir(parents=True, mode=0o755)
+            target_dir = root / "opt" / "gpubk" / "bin"
+            target_dir.mkdir(parents=True, mode=0o755)
+            target = target_dir / "bk"
+            target.write_text("#!/bin/sh\n", encoding="utf-8")
+            target.chmod(0o755)
+            destination = command_dir / "bk"
+            destination.symlink_to(target)
+
+            result = apply_admin_command_link_install(
+                plan.config_file,
+                destination=destination,
+                target=target,
+                require_root=False,
+            )
+            self.assertFalse(result["owned"])
+            removed = apply_admin_uninstall(
+                plan.config_file,
+                purge_data=True,
+                require_root=False,
+            )
+
+            self.assertFalse(removed["command_link_removed"])
+            self.assertEqual(os.readlink(destination), str(target))
 
     def test_gpu_detection_requires_real_telemetry_unless_count_is_explicit(self):
         self.assertEqual(_detected_gpu_count(8), 8)

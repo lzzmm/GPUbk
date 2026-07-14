@@ -101,12 +101,14 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertTrue((ROOT / "tools" / "cluster_acceptance.py").is_file())
         self.assertTrue((ROOT / "CLUSTER.md").is_file())
         self.assertTrue((ROOT / "src" / "bk" / "admin_cluster.py").is_file())
+        self.assertTrue((ROOT / "src" / "bk" / "admin_command.py").is_file())
         self.assertIn(command, english)
         self.assertIn(command, chinese)
         self.assertIn("tools/cluster_acceptance.py", releasing)
         self.assertIn("include CLUSTER.md", manifest)
         workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
         self.assertIn('"bk/admin_cluster.py"', workflow)
+        self.assertIn('"bk/admin_command.py"', workflow)
 
     def test_version_entrypoint_does_not_import_the_full_cli(self):
         code = (

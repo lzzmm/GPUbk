@@ -93,6 +93,7 @@ jobs:
               names = set(archive.namelist())
           required = {
               "bk/tutorial.py",
+              "bk/admin_command.py",
               "bk/admin_cluster.py",
               "bk/cluster.py",
               "bk/cluster_transport.py",
