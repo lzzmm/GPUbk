@@ -40,6 +40,7 @@ from bk.config import (
     load_config,
 )
 from bk.gpu import GpuSnapshot
+from bk.login_hook import apply_login_hook_install
 from bk.models import BookingError
 
 
@@ -743,22 +744,31 @@ class AdminInitTests(unittest.TestCase):
             apply_admin_init(plan, require_root=False)
             (plan.data_dir / "ledger.json").write_text("{}\n", encoding="utf-8")
             (plan.data_dir / "ledger.json").chmod(BROKER_FILE_MODE)
+            profile_dir = root / "etc" / "profile.d"
+            profile_dir.mkdir(mode=0o755)
+            login_hook = profile_dir / "gpubk.sh"
+            apply_login_hook_install(login_hook, require_root=False)
 
             preview = inspect_admin_uninstall(
                 plan.config_file,
                 purge_data=True,
                 expected_owner=os.geteuid(),
+                login_hook_path=login_hook,
             )
             self.assertEqual(preview["status"], "ready")
+            self.assertTrue(preview["login_hook_managed"])
             self.assertTrue(plan.config_file.exists())
 
             result = apply_admin_uninstall(
                 plan.config_file,
                 purge_data=True,
                 require_root=False,
+                login_hook_path=login_hook,
             )
 
             self.assertTrue(result["manifest_removed"])
+            self.assertTrue(result["login_hook_removed"])
+            self.assertFalse(login_hook.exists())
             self.assertFalse(plan.config_file.parent.exists())
             self.assertFalse(plan.data_dir.exists())
             self.assertFalse(plan.broker_socket.parent.exists())

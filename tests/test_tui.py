@@ -1623,8 +1623,48 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertEqual(len(header), width)
         self.assertEqual(header.index("GPU") + len("GPU"), row.index("7") + len("7"))
         self.assertEqual(header.index("Cap") + len("Cap"), row.index("2/4") + len("2/4"))
-        self.assertEqual(header.index("Util") + len("Util"), row.index("72%") + len("72%"))
+        self.assertEqual(header.index("Util"), row.index("72%"))
         self.assertEqual(header.index("Free") + len("Free"), row.index("92.0G") + len("92.0G"))
+        self.assertEqual(header.index("|"), row.index("|"))
+
+    def test_util_width_never_moves_the_free_column(self):
+        width = _timeline_label_width(80)
+        rows = []
+        for utilization in (8, 72, 100):
+            gpu = GpuSnapshot(
+                index=0,
+                name="Sim Pro 6000",
+                memory_used_mb=4096,
+                memory_total_mb=98304,
+                utilization_percent=utilization,
+            )
+            rows.append(_gpu_row_label(gpu, width, peak_shared=1, shared_limit=4))
+
+        separator_columns = {row.index("|") for row in rows}
+        util_columns = {
+            row.index(f"{utilization}%")
+            for row, utilization in zip(rows, (8, 72, 100))
+        }
+        free_columns = {row.index("92.0G") for row in rows}
+        self.assertEqual(separator_columns, {_gpu_metrics_header(width).index("|")})
+        self.assertEqual(util_columns, {_gpu_metrics_header(width).index("Util")})
+        self.assertEqual(len(free_columns), 1)
+        self.assertEqual({len(row) for row in rows}, {width})
+
+    def test_focus_marker_does_not_move_gpu_metric_separator(self):
+        gpu = GpuSnapshot(
+            index=0,
+            name="Sim Pro 6000",
+            memory_used_mb=4096,
+            memory_total_mb=98304,
+            utilization_percent=8,
+        )
+        width = _timeline_label_width(80)
+        idle = _gpu_row_label(gpu, width, focused=False)
+        focused = _gpu_row_label(gpu, width, focused=True)
+
+        self.assertEqual(idle.index("|"), focused.index("|"))
+        self.assertEqual(focused[0], ">")
 
     def test_gpu_label_compacts_three_digit_free_memory(self):
         gpu = GpuSnapshot(

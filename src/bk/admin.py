@@ -454,8 +454,39 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     services_uninstall.add_argument("--yes", action="store_true")
     services_uninstall.add_argument("--dry-run", action="store_true")
     services_uninstall.add_argument("--json", action="store_true")
+    login_hook_parser = commands.add_parser(
+        "login-hook",
+        help="install, inspect, or remove the optional login reservation notice",
+    )
+    login_hook_commands = login_hook_parser.add_subparsers(
+        dest="login_hook_action", required=True
+    )
+    login_hook_install = login_hook_commands.add_parser(
+        "install", help="install the bounded interactive-login notice"
+    )
+    login_hook_install.add_argument(
+        "--executable",
+        type=Path,
+        default=Path("/usr/local/bin/bk"),
+        help="absolute bk executable used by the hook",
+    )
+    login_hook_install.add_argument("--yes", action="store_true")
+    login_hook_install.add_argument("--dry-run", action="store_true")
+    login_hook_install.add_argument("--json", action="store_true")
+    login_hook_status = login_hook_commands.add_parser(
+        "status", help="inspect the optional login notice"
+    )
+    login_hook_status.add_argument("--json", action="store_true")
+    login_hook_uninstall = login_hook_commands.add_parser(
+        "uninstall", help="remove only the managed GPUBK login notice"
+    )
+    login_hook_uninstall.add_argument("--yes", action="store_true")
+    login_hook_uninstall.add_argument("--dry-run", action="store_true")
+    login_hook_uninstall.add_argument("--json", action="store_true")
     args = parser.parse_args(list(argv))
 
+    if args.action == "login-hook":
+        return _run_admin_login_hook(args)
     if args.action == "services":
         return _run_admin_services(args)
     if args.action == "uninstall":
@@ -525,6 +556,63 @@ def run_admin_cli(argv: Sequence[str]) -> int:
             "'sudo bk admin services install --yes', or test in the foreground with "
             f"'bk broker' as {plan.service.username}"
         )
+    return 0
+
+
+def _run_admin_login_hook(args: argparse.Namespace) -> int:
+    from .login_hook import (
+        DEFAULT_LOGIN_EXECUTABLE,
+        apply_login_hook_install,
+        apply_login_hook_uninstall,
+        inspect_login_hook,
+    )
+
+    action = args.login_hook_action
+    executable = getattr(args, "executable", DEFAULT_LOGIN_EXECUTABLE)
+    inspection = inspect_login_hook(executable=executable, expected_owner=0)
+    if action == "status":
+        if args.json:
+            print(json.dumps(inspection, ensure_ascii=False, sort_keys=True))
+        else:
+            print(f"GPUBK login notice: {inspection['status']}")
+            print(f"  path: {inspection['path']}")
+            print(f"  executable: {inspection['executable']}")
+            for blocker in inspection["blockers"]:
+                print(f"  blocked: {blocker}")
+        return 1 if inspection["blockers"] else 0
+
+    verb = "install" if action == "install" else "remove"
+    if args.json and args.dry_run:
+        print(json.dumps({**inspection, "status": "dry-run", "action": verb}, sort_keys=True))
+        return 0
+    if not args.json:
+        print(f"GPUBK login notice: {verb}")
+        print(f"  path: {inspection['path']}")
+        print("  guard: interactive terminal only; 1 second timeout; errors suppressed")
+        for blocker in inspection["blockers"]:
+            print(f"  blocked: {blocker}")
+    if inspection["blockers"]:
+        raise BookingError("; ".join(inspection["blockers"]))
+    if args.dry_run:
+        return 0
+    if not args.yes:
+        if args.json or not sys.stdin.isatty():
+            print(f"bk: pass --yes to {verb} the login notice", file=sys.stderr)
+            return 1
+        answer = input(f"{verb.capitalize()} the login notice? [y/N]: ").strip().lower()
+        if answer not in {"y", "yes"}:
+            print("No changes made.")
+            return 1
+    result = (
+        apply_login_hook_install(executable=executable)
+        if action == "install"
+        else apply_login_hook_uninstall()
+    )
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    else:
+        outcome = "installed" if action == "install" else "removed"
+        print(f"login notice {outcome}: {result['path']}")
     return 0
 
 
@@ -1495,8 +1583,12 @@ def inspect_admin_uninstall(
     *,
     purge_data: bool,
     expected_owner: int = 0,
+    login_hook_path: Optional[Path] = None,
 ) -> dict:
+    from .login_hook import DEFAULT_LOGIN_HOOK_PATH, inspect_login_hook
+
     config_file = _absolute_path(config_file)
+    login_hook_path = login_hook_path or DEFAULT_LOGIN_HOOK_PATH
     _reject_pending_config_update(config_file)
     journal_path = _transfer_journal_path(config_file)
     if os.path.lexists(journal_path):
@@ -1637,6 +1729,14 @@ def inspect_admin_uninstall(
         else f"remove configuration {config_file}"
     )
     actions.append(f"remove install manifest {manifest_path}")
+    login_hook = inspect_login_hook(
+        login_hook_path,
+        expected_owner=expected_owner,
+    )
+    login_hook_managed = login_hook["status"] in {"installed", "update-available"}
+    if login_hook_managed:
+        blockers.extend(login_hook["blockers"])
+        actions.append(f"remove managed login notice {login_hook['path']}")
     if not socket_directory_before["exists"]:
         actions.append(f"remove socket directory {broker_socket.parent}")
     if not config_directory_before["exists"]:
@@ -1654,6 +1754,8 @@ def inspect_admin_uninstall(
         "usage_lock": usage_lock,
         "ledger_lock": ledger_lock,
         "system_services_present": system_services_present,
+        "login_hook_managed": login_hook_managed,
+        "login_hook_path": login_hook["path"],
         "actions": actions,
         "blockers": blockers,
     }
@@ -1664,7 +1766,13 @@ def apply_admin_uninstall(
     *,
     purge_data: bool,
     require_root: bool = True,
+    login_hook_path: Optional[Path] = None,
 ) -> dict:
+    from .login_hook import (
+        DEFAULT_LOGIN_HOOK_PATH,
+        apply_login_hook_uninstall,
+    )
+
     if require_root and os.geteuid() != 0:
         raise BookingError(
             "administrator uninstall must run as root; use sudo bk admin uninstall"
@@ -1674,6 +1782,7 @@ def apply_admin_uninstall(
         config_file,
         purge_data=purge_data,
         expected_owner=expected_owner,
+        login_hook_path=login_hook_path,
     )
     if inspection["blockers"]:
         raise BookingError("; ".join(inspection["blockers"]))
@@ -1684,6 +1793,15 @@ def apply_admin_uninstall(
     data_dir = _manifest_absolute_path(manifest, "data_dir")
     broker_socket = _manifest_absolute_path(manifest, "broker_socket")
     backup_path = _validated_backup_path(manifest, config_file)
+    login_hook_path = login_hook_path or DEFAULT_LOGIN_HOOK_PATH
+    login_hook_removed = False
+
+    if inspection["login_hook_managed"]:
+        result = apply_login_hook_uninstall(
+            login_hook_path,
+            require_root=require_root,
+        )
+        login_hook_removed = bool(result["changed"])
 
     if os.path.lexists(broker_socket):
         broker_socket.unlink()
@@ -1740,6 +1858,7 @@ def apply_admin_uninstall(
         "config_restored": bool(config_before["exists"]),
         "data_purged": bool(purge_data),
         "manifest_removed": True,
+        "login_hook_removed": login_hook_removed,
         "accounts_changed": False,
     }
 

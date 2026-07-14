@@ -167,6 +167,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _job_retry_command(argv[1:], store)
         if head in {"status", "st"}:
             return _status_command(argv[1:], config, store)
+        if head in {"login", "notice"}:
+            return _login_command(argv[1:], store)
         if head in {"info", "contact", "about", "i"}:
             return _info_command(argv[1:], config)
         if head in {"timeline", "tl"}:
@@ -302,6 +304,9 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
         return True
     if head in {"status", "refresh", "r", "st"}:
         _status_command(args[1:], config, store)
+        return True
+    if head in {"login", "notice"}:
+        _login_command(args[1:], store)
         return True
     if head in {"info", "contact", "about", "i"}:
         _info_command(args[1:], config)
@@ -2477,6 +2482,41 @@ def _list_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     return 0
 
 
+def _login_command(argv: List[str], store: LedgerStore) -> int:
+    from .login_notice import build_login_summary, render_login_summary
+
+    parser = argparse.ArgumentParser(
+        prog="bk login",
+        description="Show this UID's current and near-term reservations without writing state.",
+    )
+    parser.add_argument(
+        "--within",
+        default="1d",
+        help="upcoming window (default: 1d; examples: 12h, 3d)",
+    )
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--hook", action="store_true", help=argparse.SUPPRESS)
+    args = parser.parse_args(argv)
+    within_seconds = parse_duration_seconds(args.within)
+    if within_seconds <= 0:
+        raise ValueError("login notice window must be greater than zero")
+    summary = build_login_summary(
+        store.load_read_only(),
+        _current_actor().uid,
+        now=utc_now(),
+        within_seconds=within_seconds,
+    )
+    if args.json:
+        print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+        return 0
+    rendered = render_login_summary(summary)
+    if rendered:
+        print(rendered)
+    elif not args.hook:
+        print(f"No active or upcoming reservations in the next {_duration_detail(within_seconds)}.")
+    return 0
+
+
 def _doctor_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     from .diagnostics import DOCTOR_SCHEMA_VERSION, probes_ready, run_deployment_probes
 
@@ -3110,6 +3150,7 @@ BOOK
 
 VIEW
   bk info                         administrator account and contact
+  bk login                        active and next booking
   bk st                           compact live status
   bk tl [window] [--step auto]   fine-grained aligned timeline
   bk slots 2 1h                  read-only earliest alternatives
@@ -3139,6 +3180,7 @@ AGENTS AND ADMIN
   bk mcp / bk skill install      MCP server or bundled Codex skill
   bk admin init                  initialize a shared server
   bk admin services install      install tracked boot services
+  bk admin login-hook install    optional login booking notice
   bk admin transfer USER         hand operation to another local account
   bk admin uninstall --dry-run   preview a tracked server removal
   bk service uninstall KIND      remove a managed user unit
@@ -3171,6 +3213,7 @@ def _print_shell_help() -> None:
         """Commands:
   tutorial                  replay the safe walkthrough; add --tui for visual tour
   st | status               compact GPU status; add --timeline or -v
+  login                     active/next booking; quiet hook when empty
   tl | timeline [2h]        aligned timeline; --from/--window/--step/--gpu
   slots 2 1h               show read-only earliest booking alternatives
   1 4h [--gpu 0]            shared booking, default mode

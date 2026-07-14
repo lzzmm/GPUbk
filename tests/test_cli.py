@@ -117,6 +117,37 @@ class CliTests(unittest.TestCase):
             self.assertIn("0    unknown", result.stdout)
             self.assertIn("1    unknown", result.stdout)
 
+    def test_login_notice_is_quiet_for_hook_and_explanatory_when_manual(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+
+            hook = self.run_bk(["login", "--hook"], data_dir)
+            manual = self.run_bk(["login"], data_dir)
+            json_result = self.run_bk(["login", "--json"], data_dir)
+
+            self.assertEqual(hook.returncode, 0, hook.stderr)
+            self.assertEqual(hook.stdout, "")
+            self.assertEqual(manual.returncode, 0, manual.stderr)
+            self.assertIn("No active or upcoming reservations", manual.stdout)
+            self.assertEqual(json_result.returncode, 0, json_result.stderr)
+            payload = json.loads(json_result.stdout)
+            self.assertEqual(payload["kind"], "login-notice")
+            self.assertEqual(payload["active"], [])
+            self.assertEqual(payload["upcoming"], [])
+
+    def test_login_notice_reports_a_current_booking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+
+            booking = self.run_bk(["1", "5m"], data_dir)
+            notice = self.run_bk(["login", "--hook"], data_dir)
+
+            self.assertEqual(booking.returncode, 0, booking.stderr)
+            self.assertEqual(notice.returncode, 0, notice.stderr)
+            self.assertIn("GPUBK: 1 active", notice.stdout)
+            self.assertIn("NOW", notice.stdout)
+            self.assertIn("GPU 0", notice.stdout)
+
     def test_info_exposes_the_local_administrator_in_text_and_json(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

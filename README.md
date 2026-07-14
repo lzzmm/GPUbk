@@ -77,6 +77,7 @@ A normal first session is:
 
 ```bash
 bk info              # administrator account and contact
+bk login             # current and next reservation, without GPU probing
 bk slots 1 30m       # preview choices, no write
 bk 1 30m             # book the earliest suitable shared GPU
 bk st                # check live state
@@ -705,6 +706,21 @@ bk doctor --probe --require-monitor --strict
 
 See [UPGRADING.md](https://github.com/lzzmm/gpubk/blob/main/UPGRADING.md) for service restart, rollback, and release-specific
 checks.
+
+An administrator may add a short reservation reminder to interactive login
+shells:
+
+```bash
+sudo bk admin login-hook install --yes
+sudo bk admin login-hook status
+```
+
+The hook runs `bk login --hook` only once per login, only when stdout is a
+terminal, and through a one-second `timeout`. It reads the committed ledger
+without taking a write lock or probing NVML. With no active or next-24-hour
+reservation it prints nothing; failures are suppressed so SSH login cannot be
+blocked. `sudo bk admin login-hook uninstall --yes` removes only the marked
+GPUBK file. A full tracked `bk admin uninstall` also removes that managed hook.
 
 Stop and disable the tracked services before uninstalling. GPUBK verifies each
 unit against its root-only manifest, restores any reviewed pre-existing unit,

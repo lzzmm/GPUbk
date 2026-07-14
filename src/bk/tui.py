@@ -3039,12 +3039,15 @@ def _gpu_label(
         5,
     )
     extras = [f"!{violations}"] if violations else []
-    util = f"{gpu.utilization_percent}%" if gpu.utilization_percent is not None else "-"
+    util = _truncate(
+        f"{gpu.utilization_percent}%" if gpu.utilization_percent is not None else "-",
+        4,
+    )
     memory = "-"
     if gpu.memory_total_mb:
         free_gib = max(0, gpu.memory_total_mb - gpu.memory_used_mb) / 1024
         memory = f"{free_gib:.0f}G" if free_gib >= 99.95 else f"{free_gib:.1f}G"
-    core = f"{gpu_field:>2} {capacity_field:>5} {util:>4} {memory:>5}"
+    core = f"{gpu_field:>2} {capacity_field:>5} {util:<4}|{memory:>5}"
     if gpu.temperature_c is not None:
         extras.append(f"{gpu.temperature_c}C")
     if gpu.processes:
@@ -3100,7 +3103,7 @@ def _timeline_label_width(terminal_width: int) -> int:
 
 
 def _gpu_metrics_header(width: int) -> str:
-    return f"{'GPU':>3} {'Cap':>5} {'Util':>4} {'Free':>5}"[:width].ljust(width)
+    return f"{'GPU':>3} {'Cap':>5} {'Util':>4}|{'Free':>5}"[:width].ljust(width)
 
 
 def _append_complete_metrics(core: str, extras: Sequence[str], width: int) -> str:

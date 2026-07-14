@@ -4,6 +4,11 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.0 - Unreleased
 
+- Add an optional, bounded interactive-login notice for each UID's active and nearest
+  reservation. It is read-only, silent when empty, protected by a one-second shell timeout,
+  refuses unknown profile files, and is removed by the tracked administrator uninstall.
+- Separate compact TUI utilization and free-memory fields with a fixed column boundary so
+  one-, two-, and three-digit utilization values remain visually aligned.
 - Package the self-cleaning live telemetry acceptance workload as `bk usage demo`, with an
   interactive confirmation, active-environment CUDA detection, idle-GPU admission, and automatic
   reservation cleanup.
