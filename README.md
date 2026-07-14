@@ -401,6 +401,9 @@ bk u samples --since 2d --resolution 5m --json
 bk u events --user me --since 7d
 ```
 
+On a real GPU host with CUDA PyTorch, run the self-cleaning usage demo from a
+source checkout with `python3 tools/live_usage_demo.py --yes`.
+
 NVML is initialized once and device handles are reused. A failed initialization
 or stale device handle enters a short backoff and is rebuilt, so a transient
 driver fault does not permanently degrade a long-running monitor. The monitor
