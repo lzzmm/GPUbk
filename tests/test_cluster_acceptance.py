@@ -2,6 +2,7 @@ import argparse
 import importlib.util
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -70,6 +71,27 @@ class ClusterAcceptanceTests(unittest.TestCase):
             other = fake_wheel(directory, name="other")
             with self.assertRaisesRegex(ACCEPTANCE.ClusterAcceptanceError, "not GPUBK"):
                 ACCEPTANCE.wheel_metadata(other)
+
+    def test_remote_install_rejects_digest_mismatch_before_creating_venv(self):
+        with tempfile.TemporaryDirectory() as raw_directory:
+            stage = Path(raw_directory)
+            wheel = fake_wheel(stage)
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    ACCEPTANCE.REMOTE_INSTALL,
+                    str(stage),
+                    wheel.name,
+                    "0" * 64,
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("candidate wheel digest mismatch", result.stderr)
+            self.assertFalse((stage / "venv").exists())
 
     def test_catalog_is_private_and_contains_only_bounded_endpoints(self):
         target = ACCEPTANCE.SshTarget("user@gpu-a", ())
