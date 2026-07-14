@@ -10,7 +10,7 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from bk.cli import main as bk_main
+from bk.cli import _run_with_booking_deadline, main as bk_main
 from bk.collector_status import collector_document
 from bk.fileio import ensure_directory
 from bk.usage_store import UsageAuditStore
@@ -498,9 +498,39 @@ class CliTests(unittest.TestCase):
             ledger = json.loads((Path(tmp) / "ledger.json").read_text(encoding="utf-8"))
             self.assertEqual(len(ledger["reservations"]), 1)
 
-    def test_guided_add_requires_memory_before_review_when_policy_demands_it(self):
+    def test_guided_add_defaults_to_one_gpu_and_thirty_minutes(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
+            user_input = "\n".join(["", "", "", "", "", "", "", "", "", ""])
+
+            result = self.run_bk_with_input(["add"], data_dir, user_input)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("GPU count [1-2 enabled] (1)", result.stdout)
+            self.assertIn("duration=30m", result.stdout)
+            reservation = json.loads(
+                (data_dir / "ledger.json").read_text(encoding="utf-8")
+            )["reservations"][0]
+            self.assertEqual(len(reservation["gpus"]), 1)
+            start = datetime.fromisoformat(reservation["start_at"].replace("Z", "+00:00"))
+            end = datetime.fromisoformat(reservation["end_at"].replace("Z", "+00:00"))
+            self.assertEqual(end - start, timedelta(minutes=30))
+
+    def test_guided_add_accepts_auto_memory_as_a_share_weighted_budget(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            simulation = data_dir / "gpus.json"
+            simulation.write_text(
+                json.dumps(
+                    {
+                        "gpus": [
+                            {"index": 0, "name": "sim", "memory_total_mb": 40960},
+                            {"index": 1, "name": "sim", "memory_total_mb": 40960},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
             user_input = "\n".join(
                 [
                     "",      # shared
@@ -509,8 +539,7 @@ class CliTests(unittest.TestCase):
                     "now",
                     "",      # automatic GPUs
                     "",      # one shared slot
-                    "",      # rejected automatic VRAM
-                    "5g",
+                    "",      # automatic share-weighted VRAM
                     "",      # no command
                     "",      # confirm
                     "",
@@ -521,14 +550,34 @@ class CliTests(unittest.TestCase):
                 ["add"],
                 data_dir,
                 user_input,
-                {"BK_REQUIRE_SHARED_MEMORY": "1"},
+                {
+                    "BK_REQUIRE_SHARED_MEMORY": "1",
+                    "BK_GPU_SIM_FILE": str(simulation),
+                },
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertIn("requires expected VRAM", result.stdout)
+            self.assertNotIn("Invalid input", result.stdout)
+            self.assertIn("expected VRAM/GPU=auto (~", result.stdout)
             self.assertEqual(result.stdout.count("Review"), 1)
             ledger = json.loads((data_dir / "ledger.json").read_text(encoding="utf-8"))
-            self.assertEqual(ledger["reservations"][0]["expected_memory_mb"], 5 * 1024)
+            self.assertGreater(ledger["reservations"][0]["expected_memory_mb"], 0)
+
+    def test_strict_auto_memory_fails_closed_without_capacity_telemetry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            automatic = self.run_bk(
+                ["1", "30m"], data_dir, {"BK_REQUIRE_SHARED_MEMORY": "1"}
+            )
+            explicit = self.run_bk(
+                ["1", "30m", "5g"],
+                data_dir,
+                {"BK_REQUIRE_SHARED_MEMORY": "1"},
+            )
+
+            self.assertEqual(automatic.returncode, 2)
+            self.assertIn("requires GPU memory telemetry", automatic.stderr)
+            self.assertEqual(explicit.returncode, 0, explicit.stderr)
 
     def test_guided_add_can_go_back_and_cancel_without_writing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1186,6 +1235,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual(usage.returncode, 0, usage.stderr)
             self.assertIn("collector: degraded", usage.stdout)
             self.assertIn("gaps=identity:0", usage.stdout)
+            self.assertIn("sampled past only; future reservations excluded", usage.stdout)
+            self.assertIn("Last 7 days", usage.stdout)
+            self.assertIn("Last 8 weeks", usage.stdout)
             issue = next(
                 item
                 for item in payload["policy_issues"]
@@ -2039,6 +2091,100 @@ class CliTests(unittest.TestCase):
             self.assertIn("bk book 2 1h", result.stdout)
             self.assertIn("bk e ID --at 20:00", result.stdout)
             self.assertTrue(all(len(line) <= 72 for line in result.stdout.splitlines()), result.stdout)
+
+    def test_help_hides_administrator_commands_from_ordinary_users(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            config = data_dir / "config.json"
+            config.write_text(
+                json.dumps(
+                    {
+                        "config_version": 1,
+                        "data_dir": str(data_dir / "data"),
+                        "gpu_count": 1,
+                        "monitor_uid": os.getuid() + 1,
+                        "file_mode": "0600",
+                        "dir_mode": "0700",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config.chmod(0o600)
+            result = self.run_bk(
+                ["--help"],
+                data_dir / "unused",
+                {"BK_CONFIG_FILE": str(config)},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("AUTOMATION", result.stdout)
+            self.assertIn("bk agent context", result.stdout)
+            self.assertIn("bk doctor", result.stdout)
+            self.assertNotIn("ADMINISTRATION", result.stdout)
+            self.assertNotIn("bk admin init", result.stdout)
+
+    def test_run_uses_gpus_from_the_current_users_active_booking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            created = self.run_bk(["1", "30m", "--gpu", "0"], data_dir)
+            result = self.run_bk(
+                [
+                    "run",
+                    "--",
+                    sys.executable,
+                    "-c",
+                    "import os; print(os.environ['CUDA_VISIBLE_DEVICES'])",
+                ],
+                data_dir,
+            )
+
+            self.assertEqual(created.returncode, 0, created.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("run: GPU=0", result.stdout)
+            self.assertEqual(result.stdout.splitlines()[-1], "0")
+
+    def test_run_without_active_booking_is_read_only_and_recommends_booking(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            result = self.run_bk(["run"], data_dir)
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("no booking is active now", result.stdout)
+            self.assertIn("bk run 1 30m -- python train.py", result.stdout)
+            self.assertFalse((data_dir / "ledger.json").exists())
+
+    def test_immediate_run_stops_at_the_booking_deadline(self):
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=0.1)
+
+        with redirect_stderr(StringIO()) as stderr:
+            result = _run_with_booking_deadline(
+                [sys.executable, "-c", "import time; time.sleep(10)"],
+                os.environ.copy(),
+                deadline,
+            )
+
+        self.assertEqual(result, 124)
+        self.assertIn("reservation ended", stderr.getvalue())
+
+    def test_booking_run_queues_a_private_command_for_the_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            blocker = self.run_bk(["1", "30m", "--share", "2"], data_dir)
+            result = self.run_bk(
+                ["run", "1", "30m", "--", sys.executable, "-c", "print('later')"],
+                data_dir,
+            )
+
+            self.assertEqual(blocker.returncode, 0, blocker.stderr)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("queued:", result.stdout)
+            self.assertIn("your worker will launch", result.stdout)
+            reservations = json.loads(
+                (data_dir / "ledger.json").read_text(encoding="utf-8")
+            )["reservations"]
+            queued = reservations[-1]
+            self.assertEqual(queued["job"]["status"], "pending")
+            self.assertGreater(queued["start_at"], reservations[0]["start_at"])
 
     def test_contextual_help_never_starts_interactive_or_protocol_entrypoints(self):
         with tempfile.TemporaryDirectory() as tmp:

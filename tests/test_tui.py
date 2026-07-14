@@ -1623,7 +1623,7 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertEqual(len(header), width)
         self.assertEqual(header.index("GPU") + len("GPU"), row.index("7") + len("7"))
         self.assertEqual(header.index("Cap") + len("Cap"), row.index("2/4") + len("2/4"))
-        self.assertEqual(header.index("Util"), row.index("72%"))
+        self.assertEqual(header.index("Util") + len("Util"), row.index("72%") + len("72%"))
         self.assertEqual(header.index("Free") + len("Free"), row.index("92.0G") + len("92.0G"))
         self.assertEqual(header.index("|"), row.index("|"))
 
@@ -1641,13 +1641,16 @@ class TuiAddPreviewTests(unittest.TestCase):
             rows.append(_gpu_row_label(gpu, width, peak_shared=1, shared_limit=4))
 
         separator_columns = {row.index("|") for row in rows}
-        util_columns = {
-            row.index(f"{utilization}%")
+        util_end_columns = {
+            row.index(f"{utilization}%") + len(f"{utilization}%")
             for row, utilization in zip(rows, (8, 72, 100))
         }
         free_columns = {row.index("92.0G") for row in rows}
         self.assertEqual(separator_columns, {_gpu_metrics_header(width).index("|")})
-        self.assertEqual(util_columns, {_gpu_metrics_header(width).index("Util")})
+        self.assertEqual(
+            util_end_columns,
+            {_gpu_metrics_header(width).index("Util") + len("Util")},
+        )
         self.assertEqual(len(free_columns), 1)
         self.assertEqual({len(row) for row in rows}, {width})
 
@@ -1786,10 +1789,10 @@ class TuiAddPreviewTests(unittest.TestCase):
 
         self.assertIn(" GPU      ", header)
         self.assertNotIn("01234567", header)
-        self.assertEqual(gpu_map, "0  3   7")
+        self.assertEqual(gpu_map, "0..3...7")
 
     def test_positioned_gpu_numbers_support_ten_gpus_then_fall_back_to_a_list(self):
-        self.assertEqual(_reservation_gpu_text([0, 9], gpu_count=10, width=10), "0        9")
+        self.assertEqual(_reservation_gpu_text([0, 9], gpu_count=10, width=10), "0........9")
         self.assertEqual(_reservation_gpu_text([0, 10], gpu_count=11, width=12), "0,10")
 
     def test_process_table_line_contains_user_utilization_state_and_command(self):

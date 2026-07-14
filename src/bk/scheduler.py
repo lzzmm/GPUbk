@@ -67,7 +67,7 @@ def add_booking(
     expected_memory_mb = _normalize_expected_memory(request.expected_memory_mb)
     share_units = _request_share_units(request.mode, request.share_units, config.max_shared_users)
     if request.mode == MODE_SHARED and config.require_shared_memory and expected_memory_mb is None:
-        raise BookingError("shared reservations must declare expected memory with --mem")
+        raise BookingError("shared reservations must include a resolved memory budget")
     memory_capacities = _normalize_memory_capacities(request.gpu_memory_capacity_mb, config)
 
     def mutate(ledger: dict):
@@ -248,7 +248,7 @@ def find_applied_create(
         config.max_shared_users,
     )
     if request.mode == MODE_SHARED and config.require_shared_memory and expected_memory_mb is None:
-        raise BookingError("shared reservations must declare expected memory with --mem")
+        raise BookingError("shared reservations must include a resolved memory budget")
     start = _normalize_start(
         request.start_at,
         request.allow_queue,
@@ -385,7 +385,7 @@ def edit_booking(
                 config.max_shared_users,
             )
         if mode == MODE_SHARED and config.require_shared_memory and expected_memory_mb is None:
-            raise BookingError("shared reservations must declare expected memory with --mem")
+            raise BookingError("shared reservations must include a resolved memory budget")
         memory_capacities = _normalize_memory_capacities(request.gpu_memory_capacity_mb, config)
 
         current_start = parse_iso(reservation["start_at"])

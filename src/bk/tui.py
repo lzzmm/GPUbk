@@ -1428,6 +1428,46 @@ def _draw_reservation_panel(
         selected = reservation.get("id") == selected_id
         color = _reservation_color(reservation, color_map)
         _addstr(stdscr, row, 0, line, width, color, curses.A_BOLD if selected else 0)
+        _draw_reservation_gpu_cells(
+            stdscr,
+            row,
+            width,
+            reservation,
+            gpu_count,
+            id_width,
+            color,
+            selected,
+        )
+
+
+def _draw_reservation_gpu_cells(
+    stdscr,
+    row: int,
+    width: int,
+    reservation: dict,
+    gpu_count: int,
+    id_width: int,
+    reservation_color: int,
+    selected: bool,
+) -> None:
+    if gpu_count > GPU_POSITION_MAP_MAX:
+        return
+    user_width = 10 if width < 100 else 16
+    mode_width = 1 if width < 100 else 4
+    start_col = 7 + id_width + user_width + mode_width
+    gpu_text = _reservation_gpu_text(reservation.get("gpus", []), gpu_count, gpu_count)
+    _addstr(stdscr, row, start_col, gpu_text, width, COLOR_MUTED)
+    for gpu in reservation.get("gpus", []):
+        if isinstance(gpu, int) and 0 <= gpu < gpu_count:
+            _addstr(
+                stdscr,
+                row,
+                start_col + gpu,
+                str(gpu),
+                width,
+                reservation_color,
+                curses.A_BOLD if selected else 0,
+            )
 
 
 def _reservation_view_start(total: int, rows: int, selected: int) -> int:
@@ -2745,7 +2785,7 @@ def _reservation_table_line(
 def _reservation_gpu_text(gpus: Sequence[int], gpu_count: int, width: int) -> str:
     if gpu_count <= GPU_POSITION_MAP_MAX:
         selected = {int(gpu) for gpu in gpus if isinstance(gpu, int)}
-        return "".join(str(gpu) if gpu in selected else " " for gpu in range(gpu_count))
+        return "".join(str(gpu) if gpu in selected else FREE_CHAR for gpu in range(gpu_count))
     return _compact_gpus(gpus, width)
 
 
@@ -3047,7 +3087,7 @@ def _gpu_label(
     if gpu.memory_total_mb:
         free_gib = max(0, gpu.memory_total_mb - gpu.memory_used_mb) / 1024
         memory = f"{free_gib:.0f}G" if free_gib >= 99.95 else f"{free_gib:.1f}G"
-    core = f"{gpu_field:>2} {capacity_field:>5} {util:<4}|{memory:>5}"
+    core = f"{gpu_field:>2} {capacity_field:>5} {util:>4}|{memory:>5}"
     if gpu.temperature_c is not None:
         extras.append(f"{gpu.temperature_c}C")
     if gpu.processes:
