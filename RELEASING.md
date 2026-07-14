@@ -112,7 +112,9 @@ for final versions and their immutable release assets.
    ```
 
    Archive the resulting `acceptance-reports/` directory with the release evidence. Complete
-   its four listed manual checks before promoting a release candidate to a final version.
+   its four listed manual checks before promoting a release candidate to a final version. For
+   the approved live-workload check, activate a CUDA PyTorch environment as an ordinary user and
+   run `bk usage demo`; retain its summary, one-minute samples, and process events with the report.
 9. Commit and push the release metadata through a pull request, wait for `CI` to pass, and merge it to `main`. Create the annotated tag from that exact `main` commit:
 
    ```bash

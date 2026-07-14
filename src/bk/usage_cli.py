@@ -25,8 +25,23 @@ def run_usage_cli(argv: List[str], config: Config) -> int:
     legacy_rollups = "--rollups" in args_argv
     if legacy_rollups:
         args_argv.remove("--rollups")
-    actions = {"me", "users", "events", "samples", "storage", "capabilities", "maintain", "migrate"}
+    actions = {
+        "me",
+        "users",
+        "events",
+        "samples",
+        "storage",
+        "capabilities",
+        "maintain",
+        "migrate",
+        "demo",
+    }
     action = args_argv.pop(0) if args_argv and args_argv[0] in actions else ("samples" if legacy_rollups else "me")
+
+    if action == "demo":
+        from .live_usage_demo import main as run_live_usage_demo
+
+        return run_live_usage_demo(args_argv)
 
     if action in {"storage", "capabilities", "maintain", "migrate"}:
         return _admin_command(action, args_argv, config)
@@ -98,6 +113,7 @@ def _usage_help_parser() -> argparse.ArgumentParser:
     commands.add_parser("capabilities", help="show telemetry API capabilities")
     commands.add_parser("maintain", help="preview or apply retention maintenance")
     commands.add_parser("migrate", help="preview or migrate legacy telemetry")
+    commands.add_parser("demo", help="book one idle GPU and verify live usage accounting")
     return parser
 
 
