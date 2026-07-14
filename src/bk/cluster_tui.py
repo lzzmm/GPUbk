@@ -70,7 +70,17 @@ def render_cluster_lines(
     lines.append(_fit("", width))
     node = config.nodes[selected]
     reply = by_name.get(node.name)
-    lines.append(_fit(f"{node.name}  {node.node_id}  priority={node.priority}", width))
+    version = "-"
+    if reply is not None and reply.error is None:
+        software = (reply.payload or {}).get("software", {})
+        if isinstance(software, dict):
+            version = str(software.get("version", "legacy"))
+    lines.append(
+        _fit(
+            f"{node.name}  {node.node_id}  v{version}  priority={node.priority}",
+            width,
+        )
+    )
     if reply is None:
         lines.append(_fit("Waiting for the first response.", width))
     elif reply.error:

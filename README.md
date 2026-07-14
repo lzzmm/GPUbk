@@ -665,8 +665,27 @@ sudo bk admin cluster status
 bk c
 ```
 
+Before enabling a real shared catalog, the repository includes one end-to-end candidate test:
+
+```bash
+python3 tools/cluster_acceptance.py user@gpu-a user@gpu-b
+```
+
+It builds the current checkout as a wheel, installs that exact wheel under each SSH account's
+private temporary cache, uses one simulated GPU and an isolated ledger per host, then exercises
+cluster status, recommendation, placement on two independent nodes, operation replay, and
+cancellation. It needs key-based non-interactive SSH with known host keys, uses no `sudo`, never
+contacts the production broker or NVML, and removes its remote files. Pass `--wheel DIST.whl` to
+test an already-built artifact. The command writes a mode-`0600` JSON report under
+`acceptance-reports/`.
+
+This transport test does not replace the final live checks: run the ordinary single-host
+acceptance on every GPU server, verify a second user's authorization, run one approved live GPU
+workload, and verify service restart/reboot behavior before calling a release stable.
+
 The root-owned catalog contains endpoints, stable node IDs, priorities, and optional
-identity mappings, but no SSH keys. Each user is authenticated independently by SSH
+identity mappings, but no SSH keys. `bk c` also shows each reachable node's GPUBK version,
+which makes mixed-version rollout visible. Each user is authenticated independently by SSH
 and acts as that remote numeric UID. Node priority only breaks ties after earliest
 start. The remote broker revalidates every write; one reservation never spans hosts.
 Local CLI-to-broker IPC remains a Unix socket, while cross-host calls use outbound

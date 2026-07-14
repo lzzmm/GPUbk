@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Sequence
 
+from . import __version__
 from .admin_info import administrator_info
 from .advisor import GpuAdvice, build_gpu_advice
 from .allocator import AllocatorDecision, apply_external_allocator
@@ -579,6 +580,7 @@ def build_agent_context(
         "schema_version": AGENT_SCHEMA_VERSION,
         "kind": "context",
         "generated_at": to_iso(generated_at),
+        "software": {"name": "gpubk", "version": __version__},
         "node": stable_node_identity(),
         "actor": {"uid": actor.uid, "username": actor.username},
         "administrator": administrator_info(config).as_dict(),

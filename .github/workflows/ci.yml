@@ -93,6 +93,10 @@ jobs:
               names = set(archive.namelist())
           required = {
               "bk/tutorial.py",
+              "bk/cluster.py",
+              "bk/cluster_transport.py",
+              "bk/cluster_tui.py",
+              "bk/cluster_history.py",
               "bk/data/codex-skill/gpubk/SKILL.md",
               "bk/data/codex-skill/gpubk/agents/openai.yaml",
               "bk/data/codex-skill/gpubk/references/protocol.md",
@@ -113,6 +117,7 @@ jobs:
           /tmp/bk-wheel-smoke/bin/bk usage demo --help | grep -- "--seconds"
           test ! -e /tmp/bk-wheel-data/ledger.json
           BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk agent context --compact > /tmp/bk-context.json
+          BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk usage capabilities --json > /tmp/bk-usage-capabilities.json
           /tmp/bk-wheel-smoke/bin/bk skill install --target /tmp/bk-wheel-skill
           /tmp/bk-wheel-smoke/bin/bk service show worker | grep -- "-m bk worker"
           mkdir /tmp/bk-wheel-units
@@ -120,8 +125,17 @@ jobs:
           BK_DATA_DIR=/tmp/bk-wheel-data BK_GPU_COUNT=2 /tmp/bk-wheel-smoke/bin/bk service uninstall worker --target-dir /tmp/bk-wheel-units
           test ! -e /tmp/bk-wheel-units/bk-worker.service
           /tmp/bk-wheel-smoke/bin/python - <<'PY'
+          import json
           from pathlib import Path
+          from bk.cluster import CLUSTER_SCHEMA_VERSION
+          from bk.cluster_history import HISTORY_SCHEMA_VERSION
           from bk.systemd import system_unit_text
+
+          context = json.loads(Path("/tmp/bk-context.json").read_text())
+          capabilities = json.loads(Path("/tmp/bk-usage-capabilities.json").read_text())
+          assert context["software"]["name"] == "gpubk"
+          assert capabilities["interfaces"]["cluster_history_schema"] == HISTORY_SCHEMA_VERSION
+          assert CLUSTER_SCHEMA_VERSION == "gpubk.cluster.v1"
 
           unit = system_unit_text(
               "broker",

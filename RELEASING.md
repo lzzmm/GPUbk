@@ -115,6 +115,19 @@ for final versions and their immutable release assets.
    its four listed manual checks before promoting a release candidate to a final version. For
    the approved live-workload check, activate a CUDA PyTorch environment as an ordinary user and
    run `bk usage demo`; retain its summary, one-minute samples, and process events with the report.
+
+   For a cluster-capable release, also test the exact candidate wheel on at least two distinct
+   SSH hosts. This second runner uses simulated GPUs and private temporary ledgers, so it may run
+   before the approved live workload and without `sudo`:
+
+   ```bash
+   python3 tools/cluster_acceptance.py USER@GPU-HOST-A USER@GPU-HOST-B \
+     --wheel dist/gpubk-VERSION-py3-none-any.whl
+   ```
+
+   Require a PASS report, distinct stable node IDs, and successful remote cleanup. This proves
+   package installation, SSH federation, routing, replay, and cancellation; it does not replace
+   the real NVML, second-user authorization, workload, service restart, or reboot checks.
 9. Commit and push the release metadata through a pull request, wait for `CI` to pass, and merge it to `main`. Create the annotated tag from that exact `main` commit:
 
    ```bash

@@ -145,6 +145,28 @@ identity and avoids creating a second writer.
 - Cluster configuration or identity-map errors fail closed for cluster commands and
   never break ordinary local booking.
 
+## Candidate acceptance
+
+From a trusted checkout, test the exact candidate wheel on at least two SSH-reachable
+hosts before creating the production catalog:
+
+```bash
+python3 tools/cluster_acceptance.py user@gpu-a user@gpu-b
+```
+
+The runner installs the wheel below each account's private temporary cache and points
+every candidate process at a simulated GPU file, a private data directory, and a private
+job directory. It verifies distinct stable node identities, parallel context, legal
+recommendation, routing two exclusive reservations to separate hosts, cross-node-safe
+operation replay, and cancellation. It then removes the stages and writes a private local
+JSON report. It never connects to a production broker, ledger, monitor, NVML library, or
+GPU device. Use SSH aliases for non-default ports, jump hosts, or identity files; the
+cluster transport intentionally keeps batch mode and strict host-key checking enabled.
+
+This is a transport and packaging acceptance test. Final production approval still needs
+the single-host acceptance on every node, a second real UID authorization check, one
+approved live workload, and restart/reboot checks.
+
 ## Security boundary
 
 - The system catalog and identity map are root-owned, non-group-writable files.
@@ -187,4 +209,6 @@ required idempotency, operation-status, and node-identity capabilities.
       IDs, hostile config values, mixed versions, and simulated clock skew.
 - [x] Test two isolated local node processes with independent ledgers before any
       GPU-server rollout.
+- [x] Add an exact-wheel, isolated multi-host SSH acceptance runner that cannot touch
+      production state.
 - [ ] Verify two real GPU hosts manually before marking the release stable.

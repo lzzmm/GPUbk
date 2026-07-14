@@ -14,6 +14,7 @@ from bk.cluster import (
     ClusterNode,
     NodeReply,
     _aggregate_cluster_usage,
+    _find_cluster_operation_node,
     _invoke,
     _invoke_idempotent_write,
     _node_command,
@@ -522,6 +523,70 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(invoke.call_count, 2)
         self.assertEqual(reply.payload["status"], "exists")
         self.assertEqual(reply.payload["reservation"]["id"], "reservation-id")
+
+    def test_idempotent_write_rejects_recovered_operation_of_another_kind(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        timed_out = NodeReply(
+            node,
+            None,
+            "timed out",
+            timed_out=True,
+            error_code="timeout",
+        )
+        recovered = NodeReply(
+            node,
+            {
+                "kind": "operation_status",
+                "found": True,
+                "action": "cancel",
+                "reservation": {"id": "reservation-id"},
+            },
+            None,
+        )
+        with mock.patch(
+            "bk.cluster._invoke",
+            side_effect=[timed_out, recovered],
+        ) as invoke:
+            reply = _invoke_idempotent_write(
+                node,
+                ["1", "30m", "--op-id", "operation-1", "--json"],
+                "operation-1",
+                expected_action="create",
+            )
+        self.assertEqual(invoke.call_count, 2)
+        self.assertEqual(reply.error_code, "operation-conflict")
+        self.assertIn("not create", reply.error)
+
+    def test_cluster_operation_preflight_rejects_duplicate_or_unknown_state(self):
+        first = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        second = ClusterNode("gpu-b", "b" * 20, "ssh", "b", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (first, second))
+        found = {
+            "kind": "operation_status",
+            "found": True,
+            "action": "create",
+            "reservation": {"id": "reservation-id"},
+        }
+        with mock.patch(
+            "bk.cluster._parallel",
+            return_value=[
+                NodeReply(first, found, None),
+                NodeReply(second, found, None),
+            ],
+        ):
+            with self.assertRaisesRegex(BookingError, "multiple cluster nodes"):
+                _find_cluster_operation_node(config, "operation-1")
+
+        missing = {"kind": "operation_status", "found": False, "reservation": None}
+        with mock.patch(
+            "bk.cluster._parallel",
+            return_value=[
+                NodeReply(first, missing, None),
+                NodeReply(second, None, "timed out", error_code="timeout"),
+            ],
+        ):
+            with self.assertRaisesRegex(BookingError, "cannot safely route"):
+                _find_cluster_operation_node(config, "operation-1")
 
     def test_usage_merges_only_explicitly_mapped_node_uids(self):
         first = ClusterNode("a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)

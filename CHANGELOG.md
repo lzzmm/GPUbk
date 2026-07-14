@@ -32,6 +32,11 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Add optional per-node cluster history archives with daily public API payloads, gzip,
   checksummed immutable generations, atomic publication, incremental export, full verification,
   and read-only principal aggregation; live ledgers and telemetry writers remain per-host.
+- Pin an explicit cluster operation replay to the node where its operation ID already exists,
+  reject ambiguous cross-node IDs and unknown-node retries, and verify recovered write actions.
+- Add a no-production-state multi-host acceptance runner that installs the candidate wheel in
+  private temporary SSH directories, uses simulated GPUs and isolated ledgers, exercises routing,
+  replay, and cancellation, writes a private report, and cleans every remote stage.
 - Repair the GPU-focused TUI reservation and process tables: align every column, put the row
   number and booking ID first, show expected VRAM and scheduled job summaries, and distinguish
   reservation IDs from live process commands.

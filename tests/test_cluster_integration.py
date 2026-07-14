@@ -16,6 +16,7 @@ from bk.cluster import (
     _invoke_idempotent_write,
     run_cluster_cli,
 )
+from bk.models import BookingError
 from bk.timeparse import parse_iso
 
 
@@ -151,6 +152,84 @@ class ClusterProcessIntegrationTests(unittest.TestCase):
             )
         )
         self.assertEqual(len(ledger["reservations"]), 2)
+
+    def test_explicit_operation_replay_is_pinned_to_its_original_node(self):
+        arguments = [
+            "book",
+            "1",
+            "30m",
+            "--mode",
+            "x",
+            "--op-id",
+            "stable-cluster-operation",
+            "--json",
+        ]
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=self.config),
+            mock.patch(
+                "bk.cluster_transport.node_command",
+                side_effect=self.node_command,
+            ),
+        ):
+            outputs = []
+            for _attempt in range(2):
+                output = StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(run_cluster_cli(arguments), 0)
+                outputs.append(json.loads(output.getvalue()))
+
+        self.assertEqual([item["node"]["name"] for item in outputs], ["gpu-a", "gpu-a"])
+        first_ledger = json.loads(
+            (self.root / self.first.name / "ledger.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(first_ledger["reservations"]), 1)
+        second_path = self.root / self.second.name / "ledger.json"
+        if second_path.exists():
+            second_ledger = json.loads(second_path.read_text(encoding="utf-8"))
+            self.assertEqual(second_ledger["reservations"], [])
+
+    def test_explicit_operation_replay_rejects_a_different_request(self):
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=self.config),
+            mock.patch(
+                "bk.cluster_transport.node_command",
+                side_effect=self.node_command,
+            ),
+        ):
+            with redirect_stdout(StringIO()):
+                self.assertEqual(
+                    run_cluster_cli(
+                        [
+                            "book",
+                            "1",
+                            "30m",
+                            "--mode",
+                            "x",
+                            "--op-id",
+                            "stable-cluster-operation",
+                            "--json",
+                        ]
+                    ),
+                    0,
+                )
+            with self.assertRaisesRegex(BookingError, "different write"):
+                run_cluster_cli(
+                    [
+                        "book",
+                        "1",
+                        "35m",
+                        "--mode",
+                        "x",
+                        "--op-id",
+                        "stable-cluster-operation",
+                        "--json",
+                    ]
+                )
+
+        first_ledger = json.loads(
+            (self.root / self.first.name / "ledger.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(len(first_ledger["reservations"]), 1)
 
 
 if __name__ == "__main__":

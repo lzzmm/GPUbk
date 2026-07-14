@@ -91,6 +91,20 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn(command, chinese)
         self.assertIn("tools/remote_acceptance.py", releasing)
 
+    def test_cluster_acceptance_and_design_are_packaged_and_documented(self):
+        english = (ROOT / "README.md").read_text(encoding="utf-8")
+        chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+        releasing = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
+        manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
+        command = "python3 tools/cluster_acceptance.py user@gpu-a user@gpu-b"
+
+        self.assertTrue((ROOT / "tools" / "cluster_acceptance.py").is_file())
+        self.assertTrue((ROOT / "CLUSTER.md").is_file())
+        self.assertIn(command, english)
+        self.assertIn(command, chinese)
+        self.assertIn("tools/cluster_acceptance.py", releasing)
+        self.assertIn("include CLUSTER.md", manifest)
+
     def test_version_entrypoint_does_not_import_the_full_cli(self):
         code = (
             "import sys\n"

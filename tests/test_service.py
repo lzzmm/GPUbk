@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+from bk import __version__
 from bk.advisor import build_gpu_advice
 from bk.collector_status import collector_document
 from bk.config import Config
@@ -80,6 +81,7 @@ class AgentServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(context["schema_version"], AGENT_SCHEMA_VERSION)
+        self.assertEqual(context["software"], {"name": "gpubk", "version": __version__})
         self.assertEqual(
             context["administrator"]["schema_version"],
             "gpubk.administrator.v1",

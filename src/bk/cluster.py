@@ -232,7 +232,12 @@ def run_node_cli(node_name: str, argv: Sequence[str]) -> int:
         command += ["--op-id", operation_id]
     if not requested_json:
         command.append("--json")
-    reply = _invoke_idempotent_write(node, command, operation_id)
+    reply = _invoke_idempotent_write(
+        node,
+        command,
+        operation_id,
+        expected_action="create",
+    )
     if reply.error:
         raise BookingError(f"node {node.name}: {reply.error}")
     payload = reply.payload or {}
@@ -275,15 +280,23 @@ def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
         )
         return 3 if all(reply.error for reply in replies) else 0
     print(f"GPUBK cluster | {len(config.nodes)} node(s)")
-    print(f"{'Node':<16} {'State':<12} {'GPUs':>5} {'Idle':>5} {'Mine':>5} {'Actor':<18}")
+    print(
+        f"{'Node':<16} {'Version':<10} {'State':<12} "
+        f"{'GPUs':>5} {'Idle':>5} {'Mine':>5} {'Actor':<18}"
+    )
     failed = 0
     reservations = []
     for reply in replies:
         if reply.error:
             failed += 1
-            print(f"{reply.node.name:<16} {'unreachable':<12} {'-':>5} {'-':>5} {'-':>5} {_clip(reply.error, 18):<18}")
+            print(
+                f"{reply.node.name:<16} {'-':<10} {'unreachable':<12} "
+                f"{'-':>5} {'-':>5} {'-':>5} {_clip(reply.error, 18):<18}"
+            )
             continue
         payload = reply.payload or {}
+        software = payload.get("software", {})
+        version = software.get("version", "legacy") if isinstance(software, dict) else "legacy"
         policy = payload.get("policy", {})
         gpus = payload.get("gpu_advice", {}).get("gpus", [])
         idle = sum(1 for gpu in gpus if gpu.get("live", {}).get("status") == "idle")
@@ -297,7 +310,8 @@ def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
         if skew is None or skew > MAX_CLOCK_SKEW_SECONDS:
             state = "clock-skew"
         print(
-            f"{reply.node.name:<16} {_clip(str(state), 12):<12} "
+            f"{reply.node.name:<16} {_clip(str(version), 10):<10} "
+            f"{_clip(str(state), 12):<12} "
             f"{int(policy.get('gpu_count', len(gpus))):>5} {idle:>5} {mine:>5} "
             f"{_clip(actor_text, 18):<18}"
         )
@@ -327,6 +341,10 @@ def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
 def _cluster_recommend(config: ClusterConfig, argv: list[str], *, book: bool) -> int:
     parser = _cluster_booking_parser("bk cluster book" if book else "bk cluster recommend")
     args = parser.parse_args(argv)
+    operation_id = args.op_id or str(uuid.uuid4())
+    replay_node = None
+    if book and args.op_id is not None:
+        replay_node = _find_cluster_operation_node(config, operation_id)
     recommend_args = ["agent", "recommend", str(args.count), args.duration]
     mode = "exclusive" if args.mode in {"x", "exclusive"} else "shared"
     recommend_args += ["--mode", mode]
@@ -340,7 +358,7 @@ def _cluster_recommend(config: ClusterConfig, argv: list[str], *, book: bool) ->
         if value is not None:
             recommend_args += [flag, value]
     recommend_args.append("--compact")
-    replies = _parallel(config.nodes, recommend_args)
+    replies = [] if replay_node is not None else _parallel(config.nodes, recommend_args)
     candidates = []
     rejected: dict[str, str] = {}
     ranking_now = utc_now()
@@ -370,7 +388,7 @@ def _cluster_recommend(config: ClusterConfig, argv: list[str], *, book: bool) ->
             )
         )
     candidates.sort(key=lambda item: item[:4])
-    if not candidates:
+    if replay_node is None and not candidates:
         reasons = "; ".join(
             f"{reply.node.name}: "
             f"{reply.error or rejected.get(reply.node.name) or 'no legal slot'}"
@@ -378,7 +396,7 @@ def _cluster_recommend(config: ClusterConfig, argv: list[str], *, book: bool) ->
         )
         raise BookingError("no cluster node can satisfy this request" + (f" ({reasons})" if reasons else ""))
     selectable = candidates
-    if book:
+    if book and replay_node is None:
         selectable = [
             candidate
             for candidate in candidates
@@ -395,8 +413,12 @@ def _cluster_recommend(config: ClusterConfig, argv: list[str], *, book: bool) ->
                 "no write-compatible cluster node can satisfy this request"
                 + (f" ({reasons})" if reasons else "")
             )
-    _start, _priority, _confidence, _name, selected = selectable[0]
+    selected = None
+    if replay_node is None:
+        _start, _priority, _confidence, _name, selected = selectable[0]
     if not book:
+        if selected is None:
+            raise BookingError("cluster recommendation ended without a selected node")
         if args.json:
             print(
                 json.dumps(
@@ -423,7 +445,12 @@ def _cluster_recommend(config: ClusterConfig, argv: list[str], *, book: bool) ->
         _print_cluster_candidates(candidates)
         return 0
 
-    operation_id = args.op_id or str(uuid.uuid4())
+    if replay_node is not None:
+        context = _invoke(replay_node, ["agent", "context", "--compact"])
+        _require_write_capabilities(context, _BOOK_CAPABILITIES)
+        selected = context
+    if selected is None:
+        raise BookingError("cluster booking ended without a selected node")
     book_args = [] if mode == "shared" else ["x"]
     book_args += [str(args.count), args.duration]
     if args.memory:
@@ -438,7 +465,12 @@ def _cluster_recommend(config: ClusterConfig, argv: list[str], *, book: bool) ->
         if value is not None:
             book_args += [flag, value]
     book_args += ["--op-id", operation_id, "--json"]
-    result = _invoke_idempotent_write(selected.node, book_args, operation_id)
+    result = _invoke_idempotent_write(
+        selected.node,
+        book_args,
+        operation_id,
+        expected_action="create",
+    )
     if result.error:
         if result.error_code != "uncertain":
             raise BookingError(
@@ -694,6 +726,7 @@ def _cluster_edit(config: ClusterConfig, argv: list[str]) -> int:
         node,
         ["agent", "edit", reservation_id, *arguments, "--compact"],
         operation_id,
+        expected_action="edit",
     )
     return _print_cluster_mutation(reply)
 
@@ -716,6 +749,7 @@ def _cluster_cancel(config: ClusterConfig, argv: list[str]) -> int:
             "--compact",
         ],
         operation_id,
+        expected_action="cancel",
     )
     return _print_cluster_mutation(reply)
 
@@ -780,13 +814,17 @@ def _invoke_idempotent_write(
     node: ClusterNode,
     argv: list[str],
     operation_id: str,
+    *,
+    expected_action: Optional[str] = None,
 ) -> NodeReply:
     result = _invoke(node, argv)
     if result.error is None or result.error_code in {"remote", "identity", "cancelled"}:
         return result
 
-    recovered = _probe_operation(node, operation_id)
+    recovered = _probe_operation(node, operation_id, expected_action=expected_action)
     if recovered.error is None and recovered.payload is not None:
+        return recovered
+    if recovered.error_code == "operation-conflict":
         return recovered
     if recovered.error is not None:
         return NodeReply(
@@ -805,8 +843,10 @@ def _invoke_idempotent_write(
         "cancelled",
     }:
         return retried
-    recovered = _probe_operation(node, operation_id)
+    recovered = _probe_operation(node, operation_id, expected_action=expected_action)
     if recovered.error is None and recovered.payload is not None:
+        return recovered
+    if recovered.error_code == "operation-conflict":
         return recovered
     detail = recovered.error or "operation ID was not found"
     return NodeReply(
@@ -819,7 +859,12 @@ def _invoke_idempotent_write(
     )
 
 
-def _probe_operation(node: ClusterNode, operation_id: str) -> NodeReply:
+def _probe_operation(
+    node: ClusterNode,
+    operation_id: str,
+    *,
+    expected_action: Optional[str] = None,
+) -> NodeReply:
     reply = _invoke(
         node,
         ["agent", "operation", operation_id, "--compact"],
@@ -836,6 +881,15 @@ def _probe_operation(node: ClusterNode, operation_id: str) -> NodeReply:
         )
     if not payload.get("found"):
         return NodeReply(node, None, None)
+    action = payload.get("action")
+    if expected_action is not None and action != expected_action:
+        return NodeReply(
+            node,
+            None,
+            f"operation ID is already bound to {action or 'an unknown action'}, "
+            f"not {expected_action}",
+            error_code="operation-conflict",
+        )
     reservation = payload.get("reservation")
     if not isinstance(reservation, dict):
         return NodeReply(
@@ -849,6 +903,44 @@ def _probe_operation(node: ClusterNode, operation_id: str) -> NodeReply:
         {**payload, "status": "exists"},
         None,
     )
+
+
+def _find_cluster_operation_node(
+    config: ClusterConfig,
+    operation_id: str,
+) -> Optional[ClusterNode]:
+    replies = _parallel(
+        config.nodes,
+        ["agent", "operation", operation_id, "--compact"],
+    )
+    found = []
+    failures = []
+    for reply in replies:
+        if reply.error:
+            failures.append(f"{reply.node.name}: {reply.error}")
+            continue
+        payload = reply.payload or {}
+        if payload.get("kind") != "operation_status":
+            failures.append(f"{reply.node.name}: invalid operation response")
+            continue
+        if payload.get("found"):
+            if not isinstance(payload.get("reservation"), dict):
+                failures.append(f"{reply.node.name}: invalid operation reservation")
+                continue
+            found.append(reply.node)
+    if len(found) > 1:
+        names = ",".join(node.name for node in found)
+        raise BookingError(
+            f"operation ID exists on multiple cluster nodes ({names}); refusing to write"
+        )
+    if found:
+        return found[0]
+    if failures:
+        raise BookingError(
+            "cannot safely route this retry because operation status is unavailable "
+            f"on {len(failures)} node(s): {'; '.join(failures)}"
+        )
+    return None
 
 
 def _missing_capabilities(
