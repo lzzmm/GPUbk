@@ -6,7 +6,7 @@ from typing import Optional
 
 from .collector_status import COLLECTOR_STATUS_SCHEMA_VERSION
 from .config import Config, load_config
-from .usage_api import UsageQueryService
+from .usage_api import UsageQueryService, summarize_public_rollups
 from .usage_schema import USAGE_API_VERSION
 from .usage_store import (
     CollectorStatusSink,
@@ -51,4 +51,5 @@ __all__ = [
     "describe_workload",
     "open_usage_query",
     "open_usage_store",
+    "summarize_public_rollups",
 ]

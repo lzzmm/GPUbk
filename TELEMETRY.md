@@ -24,6 +24,10 @@ end = utc_now()
 payload = api.users(start=end - timedelta(days=7), end=end)
 ```
 
+`bk.telemetry.summarize_public_rollups()` can rebuild the same per-user metrics from
+already exported public sample records without reopening GPUBK's internal store. This
+is the supported path for an external archive browser or visualization service.
+
 The public payload uses `schema_version: "gpubk.usage.v1"`. Missing fields mean
 the collector did not provide that metric. `null` means it attempted collection
 but the value was unavailable. A numeric zero is a measured zero.
@@ -166,7 +170,12 @@ one host owns each ledger and telemetry writer. Independent brokers or monitors
 must not share one NFS-backed data directory. Optional federation queries the
 public JSON API on each owning host, while a root-owned catalog maps
 `(node_id, uid)` to a global principal; it never merges users by mutable username.
-Future NFS export uses disjoint immutable node namespaces and the same public API.
+Optional NFS export uses disjoint immutable node namespaces and the same public API.
+`bk admin cluster export-history` publishes compressed daily user summaries and samples;
+`bk admin cluster verify-history` validates their bounded manifests, file modes, sizes,
+record counts, and SHA-256 digests. `bk c history` reads those payloads without importing
+them into this store. The archive is therefore a portable read model, not another
+collector, broker, or telemetry writer. See `CLUSTER.md` for permissions and commands.
 
 Chronological queries stream open partitions and stop as soon as their record
 limit is satisfied. A closed gzip partition is scanned against its SHA-256 and

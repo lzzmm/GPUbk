@@ -233,6 +233,7 @@ class UsageQueryService:
                 "collector_status_protocol": "bk.telemetry.CollectorStatusSink",
                 "json_cli": "bk usage ... --json",
                 "mcp": "get_my_gpu_usage",
+                "cluster_history_schema": "gpubk.cluster-history.v1",
             },
             "topology": {
                 "current_node": stable_node_identity(),
@@ -241,6 +242,7 @@ class UsageQueryService:
                 "multi_node_scheduling": False,
                 "cross_node_identity_mapping": False,
                 "federated_cluster_client": True,
+                "immutable_history_archive": True,
             },
             "writer_policy": {
                 "configured_uid": self.config.monitor_uid,
@@ -323,6 +325,30 @@ def auto_resolution(start: datetime, end: datetime) -> int:
     if seconds <= 1500 * 24 * 60 * 60:
         return RESOLUTIONS["1h"]
     return RESOLUTIONS["1d"]
+
+
+def summarize_public_rollups(
+    records: Sequence[dict],
+    *,
+    redact_labels: bool = False,
+) -> List[dict]:
+    """Build user summaries from public sample records without reading storage."""
+    workloads: Dict[int, dict] = {}
+    normalized = []
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError("public usage sample record must be an object")
+        normalized.append(record)
+        for value in record.get("workloads", []):
+            if not isinstance(value, dict):
+                continue
+            workload_id = value.get("workload_id")
+            if isinstance(workload_id, bool) or not isinstance(workload_id, int):
+                continue
+            descriptor = dict(value)
+            descriptor.pop("workload_id", None)
+            workloads.setdefault(workload_id, descriptor)
+    return _summarize_users(normalized, workloads, redact_labels)
 
 
 def _summarize_users(records: Sequence[dict], workloads: Dict[int, dict], redact_labels: bool) -> List[dict]:

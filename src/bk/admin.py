@@ -51,6 +51,7 @@ from .config import (
     MAX_SHARED_UNITS,
     SYSTEM_CONFIG_FILE,
     Config,
+    load_config,
     validate_gpu_list,
     validate_gpu_priority,
 )
@@ -630,6 +631,34 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     cluster_map.add_argument("uid", type=int)
     cluster_map.add_argument("--cluster-file", type=Path)
     cluster_map.add_argument("--yes", action="store_true")
+    cluster_history_root = cluster_commands.add_parser(
+        "history-root",
+        help="set an optional shared, read-only cluster history root",
+    )
+    cluster_history_root.add_argument("path", help="absolute directory or 'off'")
+    cluster_history_root.add_argument("--cluster-file", type=Path)
+    cluster_history_root.add_argument("--yes", action="store_true")
+    cluster_export = cluster_commands.add_parser(
+        "export-history",
+        help="atomically export this node's public usage history",
+    )
+    cluster_export.add_argument("--since", default="30d")
+    cluster_export.add_argument("--from", dest="start")
+    cluster_export.add_argument("--until")
+    cluster_export.add_argument(
+        "--resolution",
+        choices=["5m", "10m", "1h", "1d"],
+        default="10m",
+    )
+    cluster_export.add_argument("--cluster-file", type=Path)
+    cluster_export.add_argument("--yes", action="store_true")
+    cluster_export.add_argument("--json", action="store_true")
+    cluster_verify = cluster_commands.add_parser(
+        "verify-history",
+        help="verify immutable history manifests and payload checksums",
+    )
+    cluster_verify.add_argument("--cluster-file", type=Path)
+    cluster_verify.add_argument("--json", action="store_true")
     args = parser.parse_args(list(argv))
 
     if args.action == "install":
@@ -835,12 +864,106 @@ def _run_admin_cluster(args: argparse.Namespace) -> int:
     )
     from .node_identity import stable_node_identity
 
-    if os.geteuid() != 0:
-        raise BookingError("cluster catalog administration must run as root; use sudo")
     path = args.cluster_file or cluster_config_path()
     if not path.is_absolute():
         raise BookingError("cluster catalog path must be absolute")
     action = args.cluster_action
+    if action in {"export-history", "verify-history"}:
+        current = load_cluster_config(path)
+        if current.history_root is None:
+            raise BookingError(
+                "cluster history root is not configured; run sudo bk admin cluster "
+                "history-root PATH --yes"
+            )
+        from .cluster_history import (
+            export_cluster_history,
+            resolve_history_window,
+            verify_cluster_history,
+        )
+
+        if action == "verify-history":
+            result = verify_cluster_history(
+                current.history_root,
+                expected_node_ids={node.node_id for node in current.nodes},
+            )
+        else:
+            config = load_config()
+            allowed_uids = {0}
+            if config.monitor_uid is not None:
+                allowed_uids.add(config.monitor_uid)
+            if os.path.lexists(config.data_dir):
+                allowed_uids.add(config.data_dir.stat().st_uid)
+            if os.geteuid() not in allowed_uids:
+                choices = ",".join(str(uid) for uid in sorted(allowed_uids))
+                raise BookingError(
+                    "history export must run as root or the configured telemetry owner "
+                    f"UID ({choices})"
+                )
+            local = next(
+                (node for node in current.nodes if node.transport == "local"),
+                None,
+            )
+            if local is None:
+                raise BookingError("history export requires one local node in this catalog")
+            start, end = resolve_history_window(
+                current.history_root,
+                local.node_id,
+                since=args.since,
+                start=args.start,
+                until=args.until,
+                incremental=args.start is None,
+            )
+            if start == end:
+                result = {
+                    "schema_version": "gpubk.cluster-history.v1",
+                    "status": "up-to-date",
+                    "root": str(current.history_root),
+                    "node_id": local.node_id,
+                    "generations": 0,
+                    "files": 0,
+                    "bytes": 0,
+                }
+                if args.json:
+                    print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+                else:
+                    print(
+                        f"cluster history up-to-date: node={local.name} "
+                        f"through={end:%Y-%m-%d} root={current.history_root}"
+                    )
+                return 0
+            if not args.yes:
+                print(
+                    f"History export: {local.name} {start:%Y-%m-%d} -> "
+                    f"{end:%Y-%m-%d} resolution={args.resolution}"
+                )
+                print(f"Destination: {current.history_root}/{local.node_id}")
+                print("No files written. Pass --yes after reviewing this range.")
+                return 1
+            result = export_cluster_history(
+                current.history_root,
+                config,
+                start=start,
+                end=end,
+                resolution=args.resolution,
+            )
+        if args.json:
+            print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
+        else:
+            generation_detail = (
+                f"generation={result['generation']}"
+                if result.get("generation")
+                else f"generations={result.get('generations', 0)}"
+            )
+            print(
+                f"cluster history {result['status']}: root={result['root']} "
+                f"nodes={len(result.get('nodes', [result.get('node_id')]))} "
+                f"{generation_detail} "
+                f"files={result['files']} bytes={result['bytes']}"
+            )
+        return 0
+
+    if os.geteuid() != 0:
+        raise BookingError("cluster catalog administration must run as root; use sudo")
     desired = None
     if action == "init":
         if os.path.lexists(path):
@@ -865,6 +988,7 @@ def _run_admin_cluster(args: argparse.Namespace) -> int:
         if action == "status":
             return _print_admin_cluster(current, json_output=args.json)
         nodes = list(current.nodes)
+        history_root = current.history_root
         principals = [
             {"id": item["id"], "members": [dict(member) for member in item["members"]]}
             for item in current.principals
@@ -898,7 +1022,7 @@ def _run_admin_cluster(args: argparse.Namespace) -> int:
                 if members:
                     cleaned.append({"id": principal["id"], "members": members})
             principals = cleaned
-        else:
+        elif action == "map":
             node = current.node(args.node)
             pair = (node.node_id, args.uid)
             for principal in principals:
@@ -923,8 +1047,20 @@ def _run_admin_cluster(args: argparse.Namespace) -> int:
                     target = {"id": args.principal, "members": []}
                     principals.append(target)
                 target["members"].append({"node_id": node.node_id, "uid": args.uid})
+        else:
+            if args.path.lower() == "off":
+                history_root = None
+            else:
+                history_root = Path(args.path)
+                if not history_root.is_absolute():
+                    raise BookingError("cluster history root must be an absolute path")
         if desired is None:
-            desired = ClusterConfig(path, tuple(nodes), tuple(principals))
+            desired = ClusterConfig(
+                path,
+                tuple(nodes),
+                tuple(principals),
+                history_root,
+            )
 
     _print_admin_cluster(desired, json_output=False)
     if not args.yes:
@@ -954,6 +1090,7 @@ def _print_admin_cluster(config, *, json_output: bool) -> int:
             for node in config.nodes
         ],
         "principals": list(config.principals),
+        "history_root": str(config.history_root) if config.history_root else None,
     }
     if json_output:
         print(json.dumps(document, ensure_ascii=False, sort_keys=True))
@@ -967,6 +1104,8 @@ def _print_admin_cluster(config, *, json_output: bool) -> int:
         )
     if config.principals:
         print(f"Identity mappings: {len(config.principals)} principal(s)")
+    if config.history_root is not None:
+        print(f"History root: {config.history_root}")
     return 0
 
 

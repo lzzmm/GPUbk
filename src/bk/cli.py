@@ -3535,6 +3535,7 @@ ADMINISTRATION (current administrator only)
   sudo bk admin data clear --yes     backup, then empty reset
   sudo bk admin data restore PATH    restore into empty data
   sudo bk admin cluster status       inspect federated GPU nodes
+  sudo bk admin cluster export-history  publish completed history days
   sudo bk admin transfer USER        hand off administration
   sudo bk admin uninstall --dry-run  preview tracked removal
   bk broker                      service-account ledger writer
@@ -3550,6 +3551,7 @@ CLUSTER (shown only when a catalog is configured)
   bk c tui                       full-screen node browser
   bk @NODE 2 1h                 book one explicit node
   bk c usage --since 7d         personal history from every node
+  bk c history --since 30d      verified offline history, when configured
 """
     help_text = f"""GPUBK - shared GPU booking from the terminal
 

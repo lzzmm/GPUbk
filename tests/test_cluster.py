@@ -83,6 +83,106 @@ class ClusterTests(unittest.TestCase):
             self.assertEqual(loaded.principals, config.principals)
             self.assertEqual(path.stat().st_mode & 0o777, 0o644)
 
+    def test_catalog_round_trips_optional_history_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = self.catalog(
+                root,
+                [
+                    {
+                        "name": "here",
+                        "node_id": stable_node_identity()["id"],
+                        "transport": "local",
+                    }
+                ],
+            )
+            document = json.loads(path.read_text(encoding="utf-8"))
+            document["history_root"] = "/srv/gpubk-cluster-history"
+            path.write_text(json.dumps(document), encoding="utf-8")
+
+            loaded = load_cluster_config(path)
+
+            self.assertEqual(
+                loaded.history_root,
+                Path("/srv/gpubk-cluster-history"),
+            )
+            document["history_root"] = "relative/archive"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(BookingError, "absolute safe path"):
+                load_cluster_config(path)
+
+    def test_cluster_history_aggregates_archived_global_principal(self):
+        from bk.cluster_history import ArchivedUsage
+
+        now = utc_now().replace(hour=0, minute=0, second=0, microsecond=0)
+        local = ClusterNode("gpu-a", "a" * 20, "local", None, "/usr/bin/bk", 0, 8)
+        remote = ClusterNode("gpu-b", "b" * 20, "ssh", "gpu-b", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(
+            Path("/cluster.json"),
+            (local, remote),
+            (
+                {
+                    "id": "alice",
+                    "members": [
+                        {"node_id": local.node_id, "uid": os.getuid()},
+                        {"node_id": remote.node_id, "uid": 2001},
+                    ],
+                },
+            ),
+            Path("/archive"),
+        )
+
+        def payload(uid, seconds):
+            return {
+                "users": [
+                    {
+                        "uid": uid,
+                        "username": "alice",
+                        "active_gpu_seconds": seconds,
+                        "reserved_gpu_seconds": seconds * 2,
+                        "idle_reserved_gpu_seconds": seconds,
+                        "violation_gpu_seconds": 0,
+                        "sampled_gpu_seconds": seconds * 2,
+                        "max_gpu_memory_mb": 1024,
+                        "avg_sm_percent": 50,
+                    }
+                ]
+            }
+
+        archived = [
+            ArchivedUsage(local.node_id, "one", now, now + timedelta(days=1), payload(os.getuid(), 60)),
+            ArchivedUsage(remote.node_id, "two", now, now + timedelta(days=1), payload(2001, 120)),
+        ]
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch(
+                "bk.cluster_history.resolve_history_window",
+                return_value=(now, now + timedelta(days=1)),
+            ),
+            mock.patch(
+                "bk.cluster_history.load_archived_user_usage",
+                return_value=(
+                    archived,
+                    {
+                        "root": "/archive",
+                        "generations": 2,
+                        "chunks": 2,
+                        "start_at": to_iso(now),
+                        "end_at": to_iso(now + timedelta(days=1)),
+                    },
+                ),
+            ),
+            redirect_stdout(output),
+        ):
+            status = run_cluster_cli(["history", "--since", "1d", "--json"])
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(status, 0)
+        self.assertEqual(result["scope"], "alice")
+        self.assertEqual(result["principals"][0]["active_gpu_seconds"], 180)
+        self.assertEqual(len(result["principals"][0]["members"]), 2)
+
     def test_rejects_writable_catalog_and_unsafe_ssh_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

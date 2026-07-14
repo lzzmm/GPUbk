@@ -29,6 +29,9 @@ All notable changes are documented here. The project follows Semantic Versioning
   replaying the same operation ID only on the originally selected node.
 - Make cluster cancellation idempotent, keep its operation record in the existing version-1
   ledger, and compare implicit cross-node starts by relative wait when clocks are skewed.
+- Add optional per-node cluster history archives with daily public API payloads, gzip,
+  checksummed immutable generations, atomic publication, incremental export, full verification,
+  and read-only principal aggregation; live ledgers and telemetry writers remain per-host.
 - Repair the GPU-focused TUI reservation and process tables: align every column, put the row
   number and booking ID first, show expected VRAM and scheduled job summaries, and distinguish
   reservation IDs from live process commands.

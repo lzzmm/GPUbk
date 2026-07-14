@@ -6,7 +6,7 @@ from unittest import mock
 
 from bk.collector_status import COLLECTOR_STATUS_SCHEMA_VERSION, collector_document
 from bk.config import Config
-from bk.usage_api import UsageQueryService, auto_resolution
+from bk.usage_api import UsageQueryService, auto_resolution, summarize_public_rollups
 from bk.usage_store import UsageAuditStore
 from bk.telemetry import (
     CollectorStatusSink,
@@ -70,6 +70,10 @@ class UsageApiTests(unittest.TestCase):
         self.assertEqual(len(payload["records"]), 1)
         self.assertEqual(payload["records"][0]["resolution_seconds"], 300)
         self.assertEqual(payload["records"][0]["workloads"][0]["label"], "train.py")
+        summaries = summarize_public_rollups(payload["records"])
+        self.assertEqual(summaries[0]["uid"], 1001)
+        self.assertEqual(summaries[0]["active_gpu_seconds"], 60)
+        self.assertEqual(summaries[0]["workloads"][0]["label"], "train.py")
 
     def test_event_api_expands_workload_without_exposing_command_arguments(self):
         workload_id = self.store.register_workload(
@@ -112,6 +116,10 @@ class UsageApiTests(unittest.TestCase):
         self.assertEqual(payload["storage_format"], "gpubk.usage/1")
         self.assertEqual(payload["interfaces"]["writer_protocol"], "bk.telemetry.TelemetrySink")
         self.assertEqual(
+            payload["interfaces"]["cluster_history_schema"],
+            "gpubk.cluster-history.v1",
+        )
+        self.assertEqual(
             payload["interfaces"]["collector_status_protocol"],
             "bk.telemetry.CollectorStatusSink",
         )
@@ -120,6 +128,7 @@ class UsageApiTests(unittest.TestCase):
         self.assertEqual(payload["retention"]["minute_days"], 30)
         self.assertEqual(payload["topology"]["record_extension"], "gpubk.node")
         self.assertFalse(payload["topology"]["multi_node_scheduling"])
+        self.assertTrue(payload["topology"]["immutable_history_archive"])
         self.assertEqual(payload["retention"]["daily_days"], 0)
         self.assertEqual(
             payload["writer_policy"],

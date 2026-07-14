@@ -672,6 +672,25 @@ start. The remote broker revalidates every write; one reservation never spans ho
 Local CLI-to-broker IPC remains a Unix socket, while cross-host calls use outbound
 SSH. Never point independent live ledgers at one NFS directory.
 
+An optional NFS archive can keep portable offline statistics without joining the live
+writers. Create a dedicated directory, add it to each catalog, and export completed UTC
+days from every node:
+
+```bash
+sudo install -d -m 0755 /srv/gpubk-cluster-history
+sudo bk admin cluster history-root /srv/gpubk-cluster-history --yes
+sudo bk admin cluster export-history --since 1095d --resolution 10m --yes
+sudo bk admin cluster verify-history
+bk c history --since 30d
+```
+
+Later exports are incremental. Every node writes only its stable-ID namespace; every
+generation is compressed, checksummed, immutable-style, and atomically published.
+Only versioned public usage summaries and samples are exported, never a ledger, command
+arguments, job specs, secrets, or logs. Booking remains available when the archive is
+offline. NFS `root_squash`, multi-owner roots, daily operation, and recovery rules are
+covered in [CLUSTER.md](CLUSTER.md).
+
 Useful non-interactive forms:
 
 ```bash

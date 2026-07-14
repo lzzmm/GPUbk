@@ -568,6 +568,22 @@ root 管理的目录只保存端点、稳定节点 ID、优先级和可选身份
 CLI 与 broker 仍通过 Unix socket 通信，跨主机只使用出站 SSH。不要让多个实时台账共写
 同一个 NFS 目录。
 
+若需要跨机器长期查看历史，可以额外配置 NFS 只读归档；它不会把各主机的实时 writer
+合并。每台机器只导出已经结束的 UTC 日期：
+
+```bash
+sudo install -d -m 0755 /srv/gpubk-cluster-history
+sudo bk admin cluster history-root /srv/gpubk-cluster-history --yes
+sudo bk admin cluster export-history --since 1095d --resolution 10m --yes
+sudo bk admin cluster verify-history
+bk c history --since 30d
+```
+
+后续导出会从最新结束位置增量继续。每个节点只写自己的稳定 ID 命名空间；每一代数据都
+经过 gzip、SHA-256、fsync 和原子发布，发布后按不可修改方式保存。归档只包含带版本的
+公开用户统计与样本，不包含预约台账、命令参数、任务 spec、密钥或日志；即使 NFS 离线，
+预约也完全不受影响。`root_squash`、多节点目录权限和日常操作见 [CLUSTER.md](CLUSTER.md)。
+
 常用的非交互形式：
 
 ```bash

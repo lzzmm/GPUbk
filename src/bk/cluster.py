@@ -60,6 +60,7 @@ class ClusterConfig:
     path: Path
     nodes: tuple[ClusterNode, ...]
     principals: tuple[dict, ...] = ()
+    history_root: Optional[Path] = None
 
     def node(self, name: str) -> ClusterNode:
         matches = [node for node in self.nodes if node.name == name]
@@ -151,6 +152,11 @@ def write_cluster_config(config: ClusterConfig, *, require_root: bool = True) ->
             for node in config.nodes
         ],
         **({"principals": list(config.principals)} if config.principals else {}),
+        **(
+            {"history_root": str(config.history_root)}
+            if config.history_root is not None
+            else {}
+        ),
     }
     _parse_cluster_config(path, document)
     payload = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode()
@@ -187,6 +193,8 @@ def run_cluster_cli(argv: Sequence[str]) -> int:
         return _cluster_recommend(config, args, book=True)
     if action in {"usage", "u"}:
         return _cluster_usage(config, args)
+    if action in {"history", "hist"}:
+        return _cluster_history(config, args)
     if action in {"tui", "t"}:
         if args:
             raise BookingError("cluster tui takes no arguments")
@@ -510,6 +518,90 @@ def _cluster_usage(config: ClusterConfig, argv: list[str]) -> int:
     return 3 if all(reply.error for reply in replies) else 0
 
 
+def _cluster_history(config: ClusterConfig, argv: list[str]) -> int:
+    if config.history_root is None:
+        raise BookingError(
+            "cluster history is not configured; an administrator can set it with "
+            "sudo bk admin cluster history-root PATH --yes"
+        )
+    parser = argparse.ArgumentParser(prog="bk cluster history")
+    parser.add_argument("-s", "--since", default="30d", help="complete UTC-day lookback")
+    parser.add_argument("-f", "--from", dest="start", help="UTC date or ISO start")
+    parser.add_argument("-u", "--until", help="UTC date or ISO end")
+    parser.add_argument("--all", action="store_true", help="show every archived principal")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    from .cluster_history import load_archived_user_usage, resolve_history_window
+
+    start, end = resolve_history_window(
+        config.history_root,
+        config.nodes[0].node_id,
+        since=args.since,
+        start=args.start,
+        until=args.until,
+    )
+    archived, report = load_archived_user_usage(
+        config.history_root,
+        start=start,
+        end=end,
+        node_ids=[node.node_id for node in config.nodes],
+    )
+    by_id = {node.node_id: node for node in config.nodes}
+    replies = [
+        NodeReply(by_id[item.node_id], item.payload, None)
+        for item in archived
+        if item.node_id in by_id
+    ]
+    principals = _aggregate_cluster_usage(config, replies)
+    scope = "all"
+    if not args.all:
+        local = next((node for node in config.nodes if node.transport == "local"), None)
+        if local is None:
+            raise BookingError(
+                "personal archive scope needs one local catalog node; use --all for an "
+                "administrator-wide view"
+            )
+        scope = _principal_for(config, local.node_id, os.getuid()) or (
+            f"{local.node_id}:{os.getuid()}"
+        )
+        principals = [item for item in principals if item["id"] == scope]
+    payload = {
+        "schema_version": CLUSTER_SCHEMA_VERSION,
+        "kind": "cluster-history-usage",
+        "scope": scope,
+        "archive": report,
+        "principals": principals,
+    }
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+        return 0
+    print(
+        "Archived cluster usage | verified complete UTC-day chunks | "
+        f"{start:%Y-%m-%d} -> {end:%Y-%m-%d}"
+    )
+    print(
+        f"archive={config.history_root} generations={report['generations']} "
+        f"chunks={report['chunks']} scope={scope}"
+    )
+    if not principals:
+        print("no archived usage for this scope and interval")
+        return 0
+    print(
+        f"{'Principal':<26} {'Nodes':>5} {'Active':>10} {'Reserved':>10} "
+        f"{'Idle':>10} {'Viol':>10}"
+    )
+    for principal in principals:
+        print(
+            f"{_clip(principal['id'], 26):<26} {len(principal['nodes']):>5} "
+            f"{_duration(principal['active_gpu_seconds']):>10} "
+            f"{_duration(principal['reserved_gpu_seconds']):>10} "
+            f"{_duration(principal['idle_reserved_gpu_seconds']):>10} "
+            f"{_duration(principal['violation_gpu_seconds']):>10}"
+        )
+    return 0
+
+
 def _aggregate_cluster_usage(config: ClusterConfig, replies: Sequence[NodeReply]) -> list[dict]:
     groups: dict[str, dict] = {}
     for reply in replies:
@@ -528,6 +620,7 @@ def _aggregate_cluster_usage(config: ClusterConfig, replies: Sequence[NodeReply]
                     "mapped": principal_id is not None,
                     "nodes": set(),
                     "members": [],
+                    "_member_keys": set(),
                     "active_gpu_seconds": 0.0,
                     "reserved_gpu_seconds": 0.0,
                     "idle_reserved_gpu_seconds": 0.0,
@@ -538,14 +631,17 @@ def _aggregate_cluster_usage(config: ClusterConfig, replies: Sequence[NodeReply]
                 },
             )
             group["nodes"].add(reply.node.name)
-            group["members"].append(
-                {
-                    "node": reply.node.name,
-                    "node_id": reply.node.node_id,
-                    "uid": uid,
-                    "username": user.get("username"),
-                }
-            )
+            member_key = (reply.node.node_id, uid)
+            if member_key not in group["_member_keys"]:
+                group["_member_keys"].add(member_key)
+                group["members"].append(
+                    {
+                        "node": reply.node.name,
+                        "node_id": reply.node.node_id,
+                        "uid": uid,
+                        "username": user.get("username"),
+                    }
+                )
             for key in (
                 "active_gpu_seconds",
                 "reserved_gpu_seconds",
@@ -565,6 +661,7 @@ def _aggregate_cluster_usage(config: ClusterConfig, replies: Sequence[NodeReply]
     result = []
     for identity in sorted(groups):
         group = groups[identity]
+        group.pop("_member_keys")
         sampled = group["sampled_gpu_seconds"]
         group["avg_sm_percent"] = (
             round(group.pop("_sm_weighted") / sampled, 3) if sampled else None
@@ -793,7 +890,12 @@ def _argument_value(argv: Sequence[str], option: str) -> Optional[str]:
 def _parse_cluster_config(path: Path, document: object) -> ClusterConfig:
     if not isinstance(document, dict) or document.get("schema_version") != CLUSTER_SCHEMA_VERSION:
         raise BookingError(f"unsupported or invalid cluster catalog: {path}")
-    unknown = set(document) - {"schema_version", "nodes", "principals"}
+    unknown = set(document) - {
+        "schema_version",
+        "nodes",
+        "principals",
+        "history_root",
+    }
     if unknown:
         raise BookingError(f"unknown cluster catalog field: {sorted(unknown)[0]}")
     raw_nodes = document.get("nodes")
@@ -827,7 +929,17 @@ def _parse_cluster_config(path: Path, document: object) -> ClusterConfig:
                     "one node UID must not belong to multiple cluster principals"
                 )
             seen_members.add(key)
-    return ClusterConfig(path, nodes, normalized_principals)
+    history_root_value = document.get("history_root")
+    history_root = None
+    if history_root_value is not None:
+        if (
+            not isinstance(history_root_value, str)
+            or not Path(history_root_value).is_absolute()
+            or any(ord(character) < 32 for character in history_root_value)
+        ):
+            raise BookingError("cluster history_root must be an absolute safe path")
+        history_root = Path(history_root_value)
+    return ClusterConfig(path, nodes, normalized_principals, history_root)
 
 
 def _parse_node(value: object) -> ClusterNode:
@@ -922,6 +1034,7 @@ def _print_cluster_help() -> None:
   bk cluster recommend 2 1h  compare earliest legal placements
   bk cluster book 2 1h       book the best single node
   bk cluster usage --since 7d  aggregate this SSH identity's history
+  bk cluster history --since 30d  read verified offline history when configured
   bk cluster tui              browse nodes in a full-screen view
   bk @NODE 2 1h --json       run a normal command on one explicit node
   bk cluster edit NODE/ID --duration 2h

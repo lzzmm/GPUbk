@@ -81,6 +81,51 @@ records, not internal JSON files. Reservations still travel through the owning
 node's broker. This supports backup, offline reporting, and later migration without
 making NFS availability part of the booking commit path.
 
+The optional archive is implemented. Configure the same absolute mount path in the
+catalog on every client that should read it:
+
+```bash
+sudo install -d -m 0755 /srv/gpubk-cluster-history
+sudo bk admin cluster history-root /srv/gpubk-cluster-history --yes
+sudo bk admin cluster status
+```
+
+Export only completed UTC days. The first command below keeps 10-minute samples and
+per-user summaries for the previous three years; later runs start at the newest
+published end and therefore write only new days:
+
+```bash
+sudo bk admin cluster export-history --since 1095d --resolution 10m --yes
+sudo bk admin cluster verify-history
+bk c history --since 30d
+bk c history --since 365d --all
+```
+
+Each generation is deterministic for its range, gzip compressed, checksummed, fsynced,
+published by one same-directory rename, and then mode `0555` with `0444` payloads.
+Repeating an identical export verifies and returns the existing generation. A new
+generation that overlaps published data is rejected. Daily `usage-users` and
+`usage-samples` payloads remain `gpubk.usage.v1`; raw ledgers, process arguments,
+environment variables, job specs, logs, secrets, and internal storage files are never
+copied. `bk c history` verifies a payload before reading it and aggregates identities
+through the catalog's `(node_id, UID)` mappings. It reads complete UTC-day chunks only.
+
+The exporter may run as root or as the configured monitor/data owner. On a normal
+local filesystem, root creates the node namespace for that service UID. With NFS
+`root_squash`, have the NFS administrator pre-create exactly
+`ROOT/<20-character-node-id>` as mode `0755`, owned by that node's service UID, then run:
+
+```bash
+sudo -u SERVICE_USER /usr/local/bin/bk admin cluster export-history --yes
+```
+
+Use a dedicated archive root. If its top level must be writable by several node
+owners, it must have the sticky bit (for example `1777`); each node namespace itself
+must stay owner-writable only. A missing or unavailable archive never blocks booking,
+monitoring, or live `bk c usage`. There is deliberately no import into a live usage
+store: portable readers consume the public payloads in place, which preserves node
+identity and avoids creating a second writer.
+
 ## Failure rules
 
 - An unreachable node is shown as unavailable; healthy nodes remain usable.
@@ -136,7 +181,8 @@ required idempotency, operation-status, and node-identity capabilities.
 - [x] Add administrator catalog/identity inspection and safe update commands.
 - [x] Gate writes by advertised capabilities and recover ambiguous writes by
       querying the same operation ID on the same node.
-- [ ] Add optional per-node history export/import through the public usage API.
+- [x] Add optional per-node history export, verification, and read-only aggregation
+      through the public usage API; never import into a live writer.
 - [x] Test unreachable nodes, stale reads, concurrent and replayed writes, mismatched
       IDs, hostile config values, mixed versions, and simulated clock skew.
 - [x] Test two isolated local node processes with independent ledgers before any

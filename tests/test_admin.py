@@ -7,6 +7,7 @@ import stat
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from unittest import mock
@@ -37,6 +38,7 @@ from bk.config import (
     BROKER_DIR_MODE,
     BROKER_FILE_MODE,
     BROKER_GROUP_SOCKET_MODE,
+    Config,
     load_config,
 )
 from bk.gpu import GpuSnapshot
@@ -111,6 +113,84 @@ class AdminInitTests(unittest.TestCase):
             self.assertEqual(configured.nodes[0].name, "gpu-a")
             self.assertEqual(configured.nodes[0].transport, "local")
             self.assertIn("cluster catalog updated", output.getvalue())
+
+    def test_cluster_history_root_and_export_are_explicit_and_reviewable(self):
+        from bk.cluster import ClusterConfig, ClusterNode
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            catalog = root / "cluster.json"
+            node = ClusterNode(
+                "gpu-a",
+                "a" * 20,
+                "local",
+                None,
+                "/usr/local/bin/bk",
+                0,
+                8,
+            )
+            current = ClusterConfig(catalog, (node,))
+            archive = root / "archive"
+            output = StringIO()
+            with (
+                mock.patch("bk.admin.os.geteuid", return_value=0),
+                mock.patch("bk.cluster.load_cluster_config", return_value=current),
+                mock.patch("bk.cluster.write_cluster_config") as write_config,
+                redirect_stdout(output),
+            ):
+                status = run_admin_cli(
+                    [
+                        "cluster",
+                        "history-root",
+                        str(archive),
+                        "--cluster-file",
+                        str(catalog),
+                        "--yes",
+                    ]
+                )
+
+            self.assertEqual(status, 0)
+            configured = write_config.call_args.args[0]
+            self.assertEqual(configured.history_root, archive)
+
+            start = datetime(2030, 1, 1, tzinfo=timezone.utc)
+            configured = ClusterConfig(catalog, (node,), history_root=archive)
+            fake_runtime = Config(data_dir=root / "data", gpu_count=1, monitor_uid=1003)
+            output = StringIO()
+            with (
+                mock.patch("bk.admin.os.geteuid", return_value=0),
+                mock.patch("bk.cluster.load_cluster_config", return_value=configured),
+                mock.patch("bk.admin.load_config", return_value=fake_runtime),
+                mock.patch(
+                    "bk.cluster_history.resolve_history_window",
+                    return_value=(start, start + timedelta(days=1)),
+                ),
+                mock.patch(
+                    "bk.cluster_history.export_cluster_history",
+                    return_value={
+                        "status": "exported",
+                        "root": str(archive),
+                        "node_id": node.node_id,
+                        "generation": "generation",
+                        "files": 2,
+                        "bytes": 100,
+                    },
+                ) as export_history,
+                redirect_stdout(output),
+            ):
+                status = run_admin_cli(
+                    [
+                        "cluster",
+                        "export-history",
+                        "--cluster-file",
+                        str(catalog),
+                        "--yes",
+                    ]
+                )
+
+            self.assertEqual(status, 0)
+            export_history.assert_called_once()
+            self.assertIn("cluster history exported", output.getvalue())
 
     def test_all_user_initialization_is_atomic_idempotent_and_service_owned(self):
         with tempfile.TemporaryDirectory() as tmp:
