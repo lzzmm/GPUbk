@@ -1024,6 +1024,31 @@ def _run_admin_install(args: argparse.Namespace) -> int:
     if os.path.lexists(_manifest_path(config_file)):
         return _run_existing_admin_install(args, config_file)
 
+    python_executable = _absolute_path(args.python_executable or Path(sys.executable))
+    command_path = _absolute_path(args.command_path or DEFAULT_COMMAND_LINK)
+    command_target = _absolute_path(
+        args.command_target or python_executable.with_name("bk")
+    )
+    command_preview = None
+    if not args.no_command_link and (os.geteuid() == 0 or not args.dry_run):
+        try:
+            command_preview = plan_command_link_install(
+                existing=None,
+                destination=command_path,
+                target=command_target,
+                expected_owner=0,
+            )
+        except BookingError as exc:
+            if command_path == DEFAULT_COMMAND_LINK:
+                raise BookingError(
+                    f"{exc}; do not change that directory's ownership. "
+                    "After verifying /usr/bin/bk is absent, rerun with "
+                    "--command-path /usr/bin/bk, or use --no-command-link"
+                ) from exc
+            raise
+        if command_preview.blockers:
+            raise BookingError("; ".join(command_preview.blockers))
+
     interactive = sys.stdin.isatty() and not args.yes
     detected_gpu_count = _detected_gpu_count(args.gpu_count)
     default_service = _default_service_identity(args.service_user)
@@ -1038,22 +1063,6 @@ def _run_admin_install(args: argparse.Namespace) -> int:
     login_hook = bool(args.login_hook)
     if interactive and not args.login_hook:
         login_hook = _ask_bool("Install the interactive login reminder", True, enabled=True)
-
-    python_executable = _absolute_path(args.python_executable or Path(sys.executable))
-    command_path = _absolute_path(args.command_path or DEFAULT_COMMAND_LINK)
-    command_target = _absolute_path(
-        args.command_target or python_executable.with_name("bk")
-    )
-    command_preview = None
-    if not args.no_command_link and (os.geteuid() == 0 or not args.dry_run):
-        command_preview = plan_command_link_install(
-            existing=None,
-            destination=command_path,
-            target=command_target,
-            expected_owner=0,
-        )
-        if command_preview.blockers:
-            raise BookingError("; ".join(command_preview.blockers))
 
     _print_plan(plan, inspection)
     print(f"  Python:  {python_executable}")

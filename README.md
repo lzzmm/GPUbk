@@ -61,6 +61,10 @@ sudo /opt/gpubk/bin/bk admin install
 bk doctor --probe --require-monitor --strict
 ```
 
+The installer normally creates `/usr/local/bin/bk`. If that directory is not
+root-owned, do not change its ownership: first verify `/usr/bin/bk` is absent,
+then run `sudo /opt/gpubk/bin/bk admin install --command-path /usr/bin/bk`.
+
 The guided installer creates the system command, data directories, and boot
 services. Ordinary users run `bk` without `sudo` and cannot edit another UID's
 reservations or administrator policy.

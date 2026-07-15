@@ -57,6 +57,10 @@ sudo /opt/gpubk/bin/bk admin install
 bk doctor --probe --require-monitor --strict
 ```
 
+安装器默认创建 `/usr/local/bin/bk`。如果 `/usr/local/bin` 不是 root 持有，不要修改
+这个目录的所有权；先确认 `/usr/bin/bk` 不存在，再运行
+`sudo /opt/gpubk/bin/bk admin install --command-path /usr/bin/bk`。
+
 引导程序会创建全局命令、数据目录和开机服务。之后普通用户直接运行 `bk`，无需
 `sudo`，也不能修改其他 UID 的预约或管理员配置。
 
