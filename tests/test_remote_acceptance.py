@@ -212,8 +212,20 @@ class LocalAcceptanceRunnerTests(unittest.TestCase):
             )
 
     def test_dry_run_does_not_require_ssh_or_network(self):
-        result = LOCAL.main(["chenyuhan@5090-2", "--dry-run"])
+        with mock.patch.object(LOCAL, "source_revision", return_value="a" * 40):
+            result = LOCAL.main(["chenyuhan@5090-2", "--dry-run"])
         self.assertEqual(result, 0)
+
+    def test_full_dry_run_selects_bounded_production_workload(self):
+        with (
+            mock.patch.object(LOCAL, "source_revision", return_value="a" * 40),
+            mock.patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            result = LOCAL.main(["host", "--full", "--dry-run"])
+
+        self.assertEqual(result, 0)
+        self.assertIn("one short booking", output.getvalue())
+        self.assertIn("deployed GPUBK is not upgraded", output.getvalue())
 
     def test_transport_has_bounded_connection_and_keepalive_defaults(self):
         settings = LOCAL.SshSettings("host", None, None, ())
@@ -254,7 +266,9 @@ class LocalAcceptanceRunnerTests(unittest.TestCase):
                     return_value=(output / "report.tar.gz", payload),
                 ) as download_report,
             ):
-                result = LOCAL.main(["host", "--output-dir", str(output)])
+                result = LOCAL.main(
+                    ["host", "--release", "--output-dir", str(output)]
+                )
 
             self.assertEqual(result, 2)
             self.assertEqual(run_ssh.call_count, 4)
@@ -289,7 +303,9 @@ class LocalAcceptanceRunnerTests(unittest.TestCase):
                     return_value=(output / "report.tar.gz", payload),
                 ),
             ):
-                result = LOCAL.main(["host", "--output-dir", str(output)])
+                result = LOCAL.main(
+                    ["host", "--release", "--output-dir", str(output)]
+                )
 
             self.assertEqual(result, 0)
             upload.assert_called_once()
@@ -321,9 +337,7 @@ class LocalAcceptanceRunnerTests(unittest.TestCase):
                     return_value=(output / "report.tar.gz", payload),
                 ),
             ):
-                result = LOCAL.main(
-                    ["host", "--source", "--output-dir", str(output)]
-                )
+                result = LOCAL.main(["host", "--output-dir", str(output)])
 
         self.assertEqual(result, 0)
         upload_bundle.assert_not_called()
@@ -356,7 +370,12 @@ class LocalAcceptanceRunnerTests(unittest.TestCase):
                     LOCAL.AcceptanceError, "upload interrupted"
                 ):
                     LOCAL.main(
-                        ["host", "--output-dir", str(Path(raw_directory) / "reports")]
+                        [
+                            "host",
+                            "--release",
+                            "--output-dir",
+                            str(Path(raw_directory) / "reports"),
+                        ]
                     )
 
             self.assertEqual(run_ssh.call_count, 2)
@@ -374,6 +393,11 @@ class RemoteAcceptanceRunnerTests(unittest.TestCase):
             with (
                 mock.patch.object(
                     REMOTE, "system_bk_command", return_value="/usr/bin/bk"
+                ),
+                mock.patch.object(
+                    REMOTE,
+                    "select_cuda_python",
+                    return_value="/home/user/venv/bin/python",
                 ),
                 mock.patch.object(report, "command") as command,
             ):
@@ -407,6 +431,37 @@ class RemoteAcceptanceRunnerTests(unittest.TestCase):
             ),
         )
         self.assertEqual(command.call_args.kwargs["timeout"], 245)
+
+    def test_auto_live_python_selects_a_cuda_enabled_environment(self):
+        report = REMOTE.AcceptanceReport(
+            run_id="run-1", version="1.2.3", live_workload_requested=True
+        )
+        outcome = REMOTE.CommandOutcome(
+            argv=("/cuda/python", "-c", "probe"),
+            returncode=0,
+            stdout=json.dumps({"cuda": True}),
+            stderr="",
+            duration_ms=1,
+        )
+        with (
+            mock.patch.object(
+                REMOTE,
+                "find_command",
+                side_effect=lambda value: "/cuda/python"
+                if value == "python3"
+                else None,
+            ),
+            mock.patch.object(REMOTE, "execute", return_value=outcome),
+        ):
+            selected = REMOTE.select_cuda_python(
+                report,
+                requested="auto",
+                remote_python="/opt/gpubk/bin/python",
+            )
+
+        self.assertEqual(selected, "/cuda/python")
+        self.assertEqual(report.checks[-1]["id"], "live.cuda-python")
+        self.assertEqual(report.checks[-1]["status"], "pass")
 
     def test_live_manual_check_is_only_completed_after_a_pass(self):
         report = REMOTE.AcceptanceReport(

@@ -796,27 +796,27 @@ bk t
 
 ### 一条命令完成远端实机验收
 
-在可信的本地仓库中执行下面一条命令，即可自动下载指定的 PyPI 正式文件、逐个核对
-PyPI SHA-256、通过 SSH 上传私有测试包、在真实 GPU 拓扑上运行隔离调度测试、检查已
-部署服务，并把经过 SHA-256 校验的报告下载回本机：
+在可信且工作树干净的本地仓库中执行下面一条命令，GPU 服务器会从 GitHub 拉取当前
+精确 commit，在私有目录构建，并在真实 GPU 拓扑上运行隔离调度测试、检查已部署服务，
+最后把经过 SHA-256 校验的报告下载回本机：
 
 ```bash
 python3 tools/remote_acceptance.py USER@GPU-HOST \
   --remote-python /opt/gpubk/bin/python \
   --system-bk /usr/local/bin/bk \
-  --sudo
+  --full
 ```
 
-脚本优先在本机下载；如果本机无法访问 PyPI，会自动改由 GPU 服务器下载并校验相同文件。
-`--sudo` 只会在远端要求输入一次密码，用于只读检查服务
-账号、文件所有权和 systemd；脚本不会重启服务、写正式台账或启动 GPU 任务。候选版本
-的调度测试只使用 `~/.cache/gpubk/acceptance/` 下的私有临时目录，报告取回后自动清理。
+`--full` 同时启用 sudo 只读检查、GPUBK 日志检查和一次有边界的实机 GPU 测试，远端
+可能要求输入一次 sudo 密码。脚本不会升级或重启正式服务。候选调度使用
+`~/.cache/gpubk/acceptance/` 下的私有临时目录，报告取回后自动清理。唯一的正式数据
+变更是一条空闲 GPU 上的短预约；脚本运行限时 CUDA 任务后会在 `finally` 中取消它，
+追加式审计与用量记录按设计保留。
 
-需要把正式用量链路也纳入验收时，必须显式增加 `--live-gpu`。该检查通过正式调度器只
-预约一张 GPU；只有调度结果同时确认该卡实时空闲时才会运行限时 CUDA 任务，随后验证
-用户归属统计，并在 `finally` 清理中取消自己创建的预约。它不会停止其他进程或重启服务。
-活动预约会删除，但追加式审计和用量历史会按设计保留。`--live-python` 应指向服务器上
-带 CUDA PyTorch 的 Python 环境：
+只做只读验收时去掉 `--full`，按需只加 `--sudo`。需要更细地控制实机测试时，可用
+`--sudo --live-gpu` 代替 `--full`。实机检查只预约一张 GPU，遇到忙卡会拒绝运行，也
+不会停止其他进程。`--live-python auto` 会在预约前检查常见 Python/Conda 环境；只有
+自动发现失败时才需指定带 CUDA PyTorch 的 Python：
 
 ```bash
 python3 tools/remote_acceptance.py USER@GPU-HOST \
@@ -826,21 +826,20 @@ python3 tools/remote_acceptance.py USER@GPU-HOST \
   --live-python /home/USER/miniconda3/envs/torch/bin/python
 ```
 
-正式发布前可增加 `--source`：GPU 服务器会从 GitHub 拉取当前已提交版本，核对精确
-commit SHA，并在远端私有目录构建；本机不再上传源码或 wheel，也不要求该版本已经存在
-于 PyPI。候选程序通过当前正式 broker/monitor 验证兼容性，不会替换或重启服务：
+如果要验收已经发布的制品，改用 `--release`。脚本会先尝试在本机从公共 PyPI 获取，
+失败后自动改由 GPU 服务器下载并校验 wheel：
 
 ```bash
 python3 tools/remote_acceptance.py USER@GPU-HOST \
-  --source --sudo --live-gpu \
+  --release --full \
   --remote-python /opt/gpubk/bin/python \
   --system-bk /usr/local/bin/bk
 ```
 
 报告保存在本地 `acceptance-reports/`，包含 JSON 结果、文字摘要、上传清单、原始压缩包
 和校验值。即使自动检查失败，脚本仍会尽量下载报告并返回非零状态。只有排错时才使用
-`--keep-remote`；`--include-journal` 会额外收集两个 GPUBK unit 最近 80 行日志，必须
-显式开启。TUI 观感、第二个真实用户的越权测试和重启后自启动仍需人工确认；
+`--keep-remote`；`--include-journal`（`--full` 也会启用）会收集两个 GPUBK unit 最近
+80 行日志。TUI 观感、第二个真实用户的越权测试和重启后自启动仍需人工确认；
 `--live-gpu` 成功后，报告会把小型 GPU 任务标记为已完成。
 
 需要把运行职责交给另一个已有本机账号时，先停止 broker 和 monitor，再预览、执行、

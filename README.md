@@ -933,32 +933,31 @@ bk t
 
 ### One-command remote acceptance
 
-From a trusted local checkout, one command downloads the exact public PyPI
-release, verifies every wheel against PyPI, uploads a private bundle over SSH,
-runs isolated scheduler checks against the real GPU topology, inspects the
-deployed services, and downloads a SHA-256-verified report:
+From a trusted, clean checkout, one command tells the GPU host to fetch the
+exact current commit from GitHub, builds it in a private directory, runs
+isolated scheduler checks against the real GPU topology, inspects the deployed
+services, and downloads a SHA-256-verified report:
 
 ```bash
 python3 tools/remote_acceptance.py USER@GPU-HOST \
   --remote-python /opt/gpubk/bin/python \
   --system-bk /usr/local/bin/bk \
-  --sudo
+  --full
 ```
 
-The script downloads locally first; if local PyPI access is unavailable, it
-automatically downloads and verifies the same wheels on the GPU host. `--sudo` opens a remote password
-prompt only for read-only service-account, ownership, and systemd checks. The
-runner never restarts services, writes the production ledger, or launches a GPU
-workload. Candidate scheduling uses a private directory under
-`~/.cache/gpubk/acceptance/`, which is removed after the report is retrieved.
+`--full` combines read-only sudo and journal inspection with one bounded live
+GPU check. It may open one remote sudo prompt. The runner never upgrades or
+restarts the deployed services. Candidate scheduling uses a private directory
+under `~/.cache/gpubk/acceptance/`, which is removed after the report is
+retrieved. The live check is the only production mutation: it creates one short
+reservation on an idle GPU, runs a bounded CUDA workload, and cancels that
+reservation in `finally`; append-only audit and usage records remain.
 
-To include the production usage path, explicitly add `--live-gpu`. The live
-check uses the deployed scheduler to book exactly one GPU, refuses to run unless
-that GPU is reported idle, runs a bounded CUDA workload, verifies user-attributed
-usage, and removes its reservation in a `finally` cleanup. It does not stop other
-processes or restart services. The active reservation is removed, while its
-append-only audit and usage records intentionally remain. `--live-python` must
-point to a remote Python environment with CUDA PyTorch:
+For a read-only run, omit `--full` and optionally add only `--sudo`. For a more
+selective live run, use `--sudo --live-gpu` instead of `--full`. The live check
+uses the deployed scheduler, refuses a busy GPU, and does not stop other
+processes. `--live-python auto` checks common Python and Conda environments
+before booking. Use an explicit path only if discovery fails:
 
 ```bash
 python3 tools/remote_acceptance.py USER@GPU-HOST \
@@ -968,15 +967,13 @@ python3 tools/remote_acceptance.py USER@GPU-HOST \
   --live-python /home/USER/miniconda3/envs/torch/bin/python
 ```
 
-Before publishing a release, add `--source`. The GPU host fetches the current
-committed revision from GitHub, verifies the exact commit SHA, and builds it in a
-private remote stage instead of downloading GPUBK from PyPI. No source or wheel
-is uploaded from the local machine. The candidate exercises the deployed broker
-and monitor without replacing or restarting them:
+To test an already published artifact instead, select `--release`. Public PyPI
+is tried on the local machine and then on the GPU host, so either side may supply
+the verified wheelhouse:
 
 ```bash
 python3 tools/remote_acceptance.py USER@GPU-HOST \
-  --source --sudo --live-gpu \
+  --release --full \
   --remote-python /opt/gpubk/bin/python \
   --system-bk /usr/local/bin/bk
 ```
@@ -984,8 +981,8 @@ python3 tools/remote_acceptance.py USER@GPU-HOST \
 Reports are written below `acceptance-reports/` and include the JSON result,
 human-readable summary, bundle manifest, original archive, and checksum. A
 failed automated check still downloads its report and returns a nonzero status.
-Use `--keep-remote` only while debugging. `--include-journal` explicitly opts in
-to the last 80 lines from the two GPUBK units. TUI appearance, cross-user
+Use `--keep-remote` only while debugging. `--include-journal` (also enabled by
+`--full`) includes the last 80 lines from the two GPUBK units. TUI appearance, cross-user
 authorization, and reboot persistence remain manual checks; the live workload is
 marked complete in the report when `--live-gpu` succeeds.
 

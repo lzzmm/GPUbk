@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Download, transfer, run, and retrieve a GPUBK GPU-host acceptance test."""
+"""Fetch, run, and retrieve a GPUBK GPU-host acceptance test."""
 
 from __future__ import annotations
 
@@ -672,16 +672,19 @@ def extract_report(archive: Path, output: Path) -> dict[str, Any]:
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(
         description=(
-            "Download an exact GPUBK release locally, test it on a GPU host over SSH, "
-            "and retrieve a verified report. Production stays read-only unless "
-            "--live-gpu is explicitly selected."
+            "Fetch the current committed GPUBK revision from GitHub on a GPU host, "
+            "test it in an isolated directory, inspect the deployed services, and "
+            "retrieve a verified report. Production stays read-only unless "
+            "--live-gpu or --full is explicitly selected."
         )
     )
     result.add_argument(
         "target", type=validate_target, help="SSH target, such as user@gpu-host"
     )
     result.add_argument(
-        "--version", default=source_version(), help="exact PyPI version to test"
+        "--version",
+        default=source_version(),
+        help="expected package version (default: version declared by this checkout)",
     )
     result.add_argument("--output-dir", type=Path, default=ROOT / "acceptance-reports")
     result.add_argument("--remote-python", type=validate_executable, default="python3")
@@ -693,6 +696,14 @@ def parser() -> argparse.ArgumentParser:
     )
     result.add_argument(
         "--sudo", action="store_true", help="prompt for remote sudo read-only checks"
+    )
+    result.add_argument(
+        "--full",
+        action="store_true",
+        help=(
+            "run sudo inspection, GPUBK-only journal checks, and one bounded "
+            "workload on an idle booked GPU"
+        ),
     )
     result.add_argument(
         "--include-journal",
@@ -716,14 +727,26 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument(
         "--live-python",
         type=validate_executable,
-        default="python3",
-        help="remote CUDA Python containing PyTorch (default: python3)",
+        default="auto",
+        help=(
+            "remote CUDA Python containing PyTorch; auto checks common user "
+            "environments before booking (default: auto)"
+        ),
     )
-    result.add_argument(
+    candidate = result.add_mutually_exclusive_group()
+    candidate.add_argument(
         "--source",
+        dest="source",
         action="store_true",
-        help="fetch and test the current committed checkout from GitHub",
+        help="fetch and test the current committed checkout from GitHub (default)",
     )
+    candidate.add_argument(
+        "--release",
+        dest="source",
+        action="store_false",
+        help="test the exact public PyPI release selected by --version",
+    )
+    result.set_defaults(source=None)
     result.add_argument(
         "--repository",
         default=DEFAULT_REPOSITORY,
@@ -757,6 +780,21 @@ def print_summary(payload: dict[str, Any], output: Path) -> None:
         flush=True,
     )
     print(f"Local report: {output}", flush=True)
+    checks = payload.get("checks")
+    if isinstance(checks, list):
+        notable = [
+            item
+            for item in checks
+            if isinstance(item, dict) and item.get("status") in {"fail", "warn"}
+        ]
+        if notable:
+            print("Review these checks:", flush=True)
+            for item in notable:
+                print(
+                    f"  {str(item.get('status')).upper():4} "
+                    f"{item.get('id')}: {item.get('summary')}",
+                    flush=True,
+                )
     manual_checks = payload.get("manual_checks")
     if not isinstance(manual_checks, list):
         print("Manual check status is unavailable in this report.")
@@ -774,12 +812,18 @@ def print_summary(payload: dict[str, Any], output: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = parser().parse_args(argv)
+    if args.source is None:
+        args.source = args.wheelhouse is None
+    if args.full:
+        args.sudo = True
+        args.include_journal = True
+        args.live_gpu = True
     if args.include_journal and not args.sudo:
         parser().error("--include-journal requires --sudo")
     if args.skip_index_digest_check and args.wheelhouse is None:
         parser().error("--skip-index-digest-check requires --wheelhouse")
     if args.source and args.wheelhouse is not None:
-        parser().error("--source cannot be combined with --wheelhouse")
+        parser().error("Git source mode cannot be combined with --wheelhouse")
     if args.port is not None and not 1 <= args.port <= 65535:
         parser().error("--port must be between 1 and 65535")
     if not 20 <= args.live_seconds <= 180:
@@ -807,16 +851,17 @@ def main(argv: list[str] | None = None) -> int:
         args.output_dir.expanduser().resolve()
         / f"{args.target.replace('@', '_')}-{run_id}"
     )
+    print(f"version: {version}")
+    print(f"target: {args.target}")
+    print(f"remote stage: ~/{relative_stage}")
+    print(
+        f"candidate source: {args.repository}@{revision} (fetched on GPU host)"
+        if args.source
+        else "release source: public PyPI, with automatic remote-host fallback"
+    )
+    print(f"local report: {output}")
+    print("candidate install: isolated remote cache; deployed GPUBK is not upgraded")
     if args.dry_run:
-        print(f"version: {version}")
-        print(f"target: {args.target}")
-        print(f"remote stage: ~/{relative_stage}")
-        print(
-            f"candidate source: {args.repository}@{revision}"
-            if args.source
-            else "download source: local, with automatic remote fallback"
-        )
-        print(f"local report: {output}")
         if args.live_gpu:
             print(
                 "production changes: one short booking plus append-only audit and "

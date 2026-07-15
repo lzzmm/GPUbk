@@ -19,7 +19,7 @@ import sys
 import tarfile
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
@@ -675,7 +675,7 @@ def run_isolated_checks(
 
     first = report.command(
         "scheduler.shared-first",
-        [*staged_bk, "1", "10m", "--start", start_text, "--json"],
+        [*staged_bk, "1", "30m", "--start", start_text, "--json"],
         env=scheduler_env,
         success="first shared reservation was created in the isolated ledger",
         failure="first isolated shared reservation failed",
@@ -766,6 +766,9 @@ def run_isolated_checks(
         and first_reservation.get("mode") == "shared"
         and second_reservation.get("mode") == "shared"
         and queued_reservation.get("mode") == "exclusive"
+        and isinstance(first_payload, dict)
+        and isinstance(second_payload, dict)
+        and isinstance(queued_payload, dict)
         and first_payload.get("status") == "created"
         and second_payload.get("status") == "created"
         and queued_payload.get("status") == "queued"
@@ -779,6 +782,106 @@ def run_isolated_checks(
         "shared overlap and exclusive queue semantics match policy"
         if semantics_ok
         else "isolated reservation payloads violate expected scheduling semantics",
+    )
+
+    first_id = (
+        str(first_reservation["id"])
+        if isinstance(first_reservation, dict)
+        and isinstance(first_reservation.get("id"), str)
+        else None
+    )
+    if first_id is not None:
+        edited = report.command(
+            "lifecycle.started-edit",
+            [
+                *staged_bk,
+                "agent",
+                "edit",
+                first_id,
+                "--duration",
+                "20m",
+                "--op-id",
+                "acceptance-started-edit",
+                "--compact",
+            ],
+            env=scheduler_env,
+            success="started reservation changed only its future end",
+            failure="started reservation future-end edit failed",
+        )
+        history = report.command(
+            "lifecycle.edit-history",
+            [*staged_bk, "history", first_id, "--json"],
+            env=scheduler_env,
+            success="structured edit history is readable by its owner",
+            failure="structured edit history is missing or unreadable",
+        )
+        edited_payload = parse_json_output(edited)
+        history_payload = parse_json_output(history)
+        edit_rows = (
+            history_payload.get("edits")
+            if isinstance(history_payload, dict)
+            else None
+        )
+        add_semantic_check(
+            report,
+            "lifecycle.edit-semantics",
+            (
+                isinstance(edited_payload, dict)
+                and edited_payload.get("status") == "updated"
+                and isinstance(edit_rows, list)
+                and len(edit_rows) == 1
+                and isinstance(edit_rows[0], dict)
+                and isinstance(edit_rows[0].get("before"), dict)
+                and isinstance(edit_rows[0].get("after"), dict)
+            ),
+            "edit retained one structured before/after record"
+            if isinstance(edit_rows, list) and len(edit_rows) == 1
+            else "edit history does not contain one structured before/after record",
+        )
+
+    far_start = (start + timedelta(days=31)).isoformat().replace("+00:00", "Z")
+    report.command(
+        "policy.booking-horizon",
+        [*staged_bk, "1", "5m", "--start", far_start, "--json"],
+        env=scheduler_env,
+        expected_codes=range(1, 256),
+        validator=lambda result: "30-day booking horizon"
+        in (result.stdout + result.stderr),
+        success="default 30-day booking horizon rejected a farther exact request",
+        failure="default booking horizon was not enforced clearly",
+    )
+
+    blackout_start = start + timedelta(hours=1)
+    blackout_end = blackout_start + timedelta(hours=1)
+    blackout_env = dict(scheduler_env)
+    blackout_env["BK_DATA_DIR"] = str(stage / "blackout-data")
+    blackout_env["BK_BOOKING_BLACKOUTS"] = json.dumps(
+        [
+            {
+                "start_at": blackout_start.isoformat().replace("+00:00", "Z"),
+                "end_at": blackout_end.isoformat().replace("+00:00", "Z"),
+                "reason": "acceptance maintenance",
+            }
+        ]
+    )
+    report.command(
+        "policy.booking-blackout",
+        [
+            *staged_bk,
+            "1",
+            "5m",
+            "--start",
+            blackout_start.isoformat().replace("+00:00", "Z"),
+            "--json",
+        ],
+        env=blackout_env,
+        expected_codes=range(1, 256),
+        validator=lambda result: (
+            "administrator blackout" in (result.stdout + result.stderr)
+            and "acceptance maintenance" in (result.stdout + result.stderr)
+        ),
+        success="administrator blackout rejected an overlapping exact request",
+        failure="administrator blackout was not enforced clearly",
     )
 
     report.command(
@@ -796,6 +899,84 @@ def run_isolated_checks(
             critical=False,
             success="isolated reservation removed",
             failure="isolated reservation cleanup failed",
+        )
+    if first_id is not None:
+        cancelled_history = report.command(
+            "lifecycle.cancel-history",
+            [*staged_bk, "history", first_id, "--json"],
+            env=scheduler_env,
+            success="cancelled reservation remains visible in owner history",
+            failure="cancelled reservation disappeared from owner history",
+        )
+        cancelled_payload = parse_json_output(cancelled_history)
+        retained = (
+            cancelled_payload.get("reservation")
+            if isinstance(cancelled_payload, dict)
+            else None
+        )
+        cancellation = (
+            cancelled_payload.get("cancellation")
+            if isinstance(cancelled_payload, dict)
+            else None
+        )
+        add_semantic_check(
+            report,
+            "lifecycle.cancel-semantics",
+            (
+                isinstance(retained, dict)
+                and retained.get("status") == "cancelled"
+                and isinstance(cancellation, dict)
+                and cancellation.get("kind") == "owner"
+                and bool(cancellation.get("reason"))
+            ),
+            "owner cancellation retained status, actor kind, and reason"
+            if isinstance(cancellation, dict)
+            else "owner cancellation metadata is incomplete",
+        )
+
+    preset_env = isolated_environment(stage, site, gpu_count=gpu_count)
+    preset_env["BK_DATA_DIR"] = str(stage / "preset-data")
+    report.command(
+        "preset.save",
+        [*staged_bk, "preset", "save", "acceptance", "1", "10m", "1g"],
+        env=preset_env,
+        success="private per-user preset was saved",
+        failure="private per-user preset could not be saved",
+    )
+    preset_booking = report.command(
+        "preset.book",
+        [*staged_bk, "p", "acceptance", "--json"],
+        env=preset_env,
+        success="saved preset created an isolated reservation",
+        failure="saved preset could not create an isolated reservation",
+    )
+    preset_payload = parse_json_output(preset_booking)
+    preset_reservation = (
+        preset_payload.get("reservation") if isinstance(preset_payload, dict) else None
+    )
+    add_semantic_check(
+        report,
+        "preset.semantics",
+        (
+            isinstance(preset_reservation, dict)
+            and preset_reservation.get("mode") == "shared"
+            and len(preset_reservation.get("gpus", [])) == 1
+            and preset_reservation.get("expected_memory_mb_per_gpu") == 1024
+        ),
+        "preset preserved mode, count, and per-GPU VRAM"
+        if isinstance(preset_reservation, dict)
+        else "preset reservation payload is invalid",
+    )
+    if isinstance(preset_reservation, dict) and isinstance(
+        preset_reservation.get("id"), str
+    ):
+        report.command(
+            "preset.cleanup",
+            [*staged_bk, "d", preset_reservation["id"]],
+            env=preset_env,
+            critical=False,
+            success="preset-created isolated reservation removed",
+            failure="preset-created isolated reservation cleanup failed",
         )
 
 
@@ -1075,6 +1256,22 @@ def run_live_gpu_workload(
             summary="live workload duration is outside the 20-180 second safety bound",
         )
         return
+    selected_python = select_cuda_python(
+        report,
+        requested=live_python,
+        remote_python=remote_python,
+    )
+    if selected_python is None:
+        report.add(
+            "live-gpu-workload",
+            status="fail",
+            critical=True,
+            summary=(
+                "no CUDA-enabled PyTorch Python was found; rerun with "
+                "--live-python /path/to/python"
+            ),
+        )
+        return
     site = stage / "site"
     if not site.is_dir():
         report.add(
@@ -1110,7 +1307,7 @@ def run_live_gpu_workload(
             "--bk",
             str(wrapper),
             "--python",
-            live_python,
+            selected_python,
             "--seconds",
             str(seconds),
             "--yes",
@@ -1126,6 +1323,58 @@ def run_live_gpu_workload(
             "selected by the demo"
         ),
     )
+
+
+def select_cuda_python(
+    report: AcceptanceReport,
+    *,
+    requested: str,
+    remote_python: str,
+) -> str | None:
+    if requested != "auto":
+        candidates = [requested]
+    else:
+        candidates = [
+            remote_python,
+            "python3",
+            "python",
+            str(Path.home() / "miniconda3" / "bin" / "python"),
+            str(Path.home() / "anaconda3" / "bin" / "python"),
+            "/opt/conda/bin/python",
+        ]
+        for variable in ("CONDA_PREFIX", "VIRTUAL_ENV"):
+            prefix = os.environ.get(variable)
+            if prefix:
+                candidates.insert(0, str(Path(prefix) / "bin" / "python"))
+    resolved: list[str] = []
+    for candidate in candidates:
+        executable = find_command(candidate)
+        if executable is not None and executable not in resolved:
+            resolved.append(executable)
+    probe = (
+        "import json,torch; "
+        "print(json.dumps({'cuda': bool(torch.cuda.is_available())}))"
+    )
+    for executable in resolved:
+        outcome = execute([executable, "-c", probe], timeout=30)
+        payload = parse_json_output(outcome)
+        if outcome.returncode == 0 and payload is not None and payload.get("cuda") is True:
+            report.add(
+                "live.cuda-python",
+                status="pass",
+                critical=True,
+                summary="CUDA-enabled PyTorch Python is available",
+                details={"path": executable},
+            )
+            return executable
+    report.add(
+        "live.cuda-python",
+        status="fail",
+        critical=True,
+        summary="no tested Python environment provides CUDA-enabled PyTorch",
+        details={"tested": resolved},
+    )
+    return None
 
 
 def acquire_sudo(report: AcceptanceReport, requested: bool) -> bool:
@@ -1226,7 +1475,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--include-journal", action="store_true")
     result.add_argument("--live-gpu", action="store_true")
     result.add_argument("--live-seconds", type=int, default=65)
-    result.add_argument("--live-python", default="python3")
+    result.add_argument("--live-python", default="auto")
     result.add_argument("--build-source", action="store_true")
     result.add_argument("--source-revision")
     result.add_argument("--download-wheelhouse", action="store_true")
