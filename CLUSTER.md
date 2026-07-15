@@ -263,7 +263,9 @@ identity and avoids creating a second writer.
   differs from the submitted intent; one malformed node does not hide healthy nodes.
 - Explicit `@NODE` requests never fail over to another host.
 - Automatic cluster booking chooses one write-compatible node after read-only
-  comparison. Once a write is attempted, it never switches to another node.
+  comparison. Read-only recommendations remain visible during a rolling upgrade, but
+  cannot displace a write-compatible `best` node. Once a write is attempted, it never
+  switches to another node.
 - Every federated write has a stable operation ID. After a transport or protocol
   failure, the client queries that ID on the same node. It may replay the same write
   once on that node only when the query confirms that no operation is visible.

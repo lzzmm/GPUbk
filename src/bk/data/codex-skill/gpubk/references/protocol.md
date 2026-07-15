@@ -150,6 +150,10 @@ closed. `cluster-context` returns each node's ordinary `bk.agent.v1` context wit
 flattening node-local GPU indexes. `cluster-recommendation` ranks by start, node
 priority, and node name after validating duration, exact start, and any echoed request
 fields. Each node entry includes `rejected_reason` and `write_compatible`.
+When at least one candidate is write-compatible, `selected_node` is the same first
+safe destination that an immediate cluster booking would use; read-only rolling-upgrade
+candidates remain visible but cannot displace it. `selected_write_compatible` states
+whether the selection can currently accept a federated write.
 `cluster-booking-result` contains one destination node, one
 stable operation ID, and the unchanged destination `bk.agent.v1` result. Automation must
 inspect `result.warnings`; human cluster output prints the same distinct warnings with the

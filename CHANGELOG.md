@@ -4,6 +4,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Keep `bk c rec` and `bk c` destination selection consistent during rolling upgrades:
+  read-only legacy candidates remain visible, while the reported best node is the first
+  candidate that can accept the retry-safe write.
 - Let the first reviewed `bk admin cluster add` atomically bootstrap a remote-only
   catalog, so login nodes and clients without local GPUs can federate servers without
   inventing a local schedulable node. Initial catalog writes are create-only and never

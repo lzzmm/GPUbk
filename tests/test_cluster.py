@@ -1751,6 +1751,56 @@ class ClusterTests(unittest.TestCase):
         self.assertIs(write.call_args.args[0], current)
         self.assertIn("created on current", output.getvalue())
 
+    def test_recommendation_selects_the_node_that_booking_can_safely_write(self):
+        legacy = ClusterNode("legacy", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        current = ClusterNode("current", "b" * 20, "ssh", "b", "/usr/bin/bk", 1, 8)
+        config = ClusterConfig(Path("/cluster.json"), (legacy, current))
+        generated = to_iso(utc_now())
+        replies = [
+            NodeReply(
+                legacy,
+                {
+                    "generated_at": generated,
+                    "recommendation": {
+                        "gpus": [0],
+                        "start_at": "2030-01-01T00:00:00Z",
+                        "end_at": "2030-01-01T00:30:00Z",
+                    },
+                },
+                None,
+            ),
+            NodeReply(
+                current,
+                {
+                    "generated_at": generated,
+                    "capabilities": {
+                        "federated_node_identity": True,
+                        "idempotent_booking": True,
+                        "operation_status": True,
+                        "preflight_idempotent_replay": True,
+                    },
+                    "recommendation": {
+                        "gpus": [0],
+                        "start_at": "2030-01-01T00:30:00Z",
+                        "end_at": "2030-01-01T01:00:00Z",
+                    },
+                },
+                None,
+            ),
+        ]
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel", return_value=replies),
+            redirect_stdout(output),
+        ):
+            status = run_cluster_cli(["recommend", "1", "30m", "--json"])
+
+        self.assertEqual(status, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["selected_node"], "current")
+        self.assertTrue(payload["selected_write_compatible"])
+
     def test_cluster_request_options_are_normalized_once_for_read_and_write(self):
         node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
         config = ClusterConfig(Path("/cluster.json"), (node,))

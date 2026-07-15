@@ -1253,8 +1253,18 @@ def _emit_cluster_recommendation(
     candidates: Sequence[ClusterCandidate],
     rejected: dict[str, str],
 ) -> int:
-    selected = candidates[0].reply
     required_capabilities = _booking_capabilities(intent.command_argv)
+    writable = [
+        candidate
+        for candidate in candidates
+        if not _missing_capabilities(
+            candidate.reply.payload,
+            required_capabilities,
+        )
+    ]
+    selected_candidate = writable[0] if writable else candidates[0]
+    selected = selected_candidate.reply
+    selected_write_compatible = bool(writable)
     if intent.json_output:
         print(
             json.dumps(
@@ -1262,6 +1272,7 @@ def _emit_cluster_recommendation(
                     "schema_version": CLUSTER_SCHEMA_VERSION,
                     "kind": "cluster-recommendation",
                     "selected_node": selected.node.name,
+                    "selected_write_compatible": selected_write_compatible,
                     "nodes": [
                         {
                             "name": reply.node.name,
@@ -1288,6 +1299,8 @@ def _emit_cluster_recommendation(
             replies,
             rejected,
             required_capabilities,
+            selected_node=selected.node.name,
+            selected_write_compatible=selected_write_compatible,
         )
     return 0
 
@@ -2313,20 +2326,33 @@ def _print_cluster_candidates(
     replies: Sequence[NodeReply],
     rejected: dict[str, str],
     required_capabilities: Sequence[str] = _BOOK_CAPABILITIES,
+    *,
+    selected_node: Optional[str] = None,
+    selected_write_compatible: bool = False,
 ) -> None:
     print(
-        f"{'Node':<16} {'Choice':<8} {'Write':<6} {'GPUs':<12} "
+        f"{'Node':<16} {'Choice':<9} {'Write':<6} {'GPUs':<12} "
         f"{'Start':<27} {'End':<27}"
     )
     shown = set()
-    for index, candidate in enumerate(candidates):
+    for candidate in candidates:
         reply = candidate.reply
         recommendation = reply.payload["recommendation"]
+        write_compatible = not _missing_capabilities(
+            reply.payload,
+            required_capabilities,
+        )
+        if reply.node.name == selected_node:
+            choice = "best" if selected_write_compatible else "view"
+        elif write_compatible:
+            choice = "ready"
+        else:
+            choice = "read-only"
         shown.add(reply.node.name)
         print(
             f"{reply.node.name:<16} "
-            f"{('best' if index == 0 else 'ready'):<8} "
-            f"{('yes' if not _missing_capabilities(reply.payload, required_capabilities) else 'no'):<6} "
+            f"{choice:<9} "
+            f"{('yes' if write_compatible else 'no'):<6} "
             f"{_gpu_text(recommendation.get('gpus')):<12} "
             f"{_local_time(recommendation.get('start_at')):<27} "
             f"{_local_time(recommendation.get('end_at')):<27}"
@@ -2337,7 +2363,7 @@ def _print_cluster_candidates(
         reason = reply.error or rejected.get(reply.node.name) or "unavailable"
         state = "offline" if reply.error else "rejected"
         print(
-            f"{reply.node.name:<16} {state:<8} {'-':<6} {'-':<12} "
+            f"{reply.node.name:<16} {state:<9} {'-':<6} {'-':<12} "
             f"{_clip(reason, 55):<55}"
         )
 

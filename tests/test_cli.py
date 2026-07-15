@@ -83,6 +83,9 @@ class CliTests(unittest.TestCase):
             config_path.write_text("{broken", encoding="utf-8")
             config_path.chmod(0o600)
             skill_dir = data_dir / "installed-skill"
+            cluster_env = {
+                "BK_CLUSTER_CONFIG": str(data_dir / "missing-cluster.json")
+            }
 
             version = self.run_bk(["--version"], data_dir)
             help_result = self.run_bk(["--help"], data_dir)
@@ -91,6 +94,11 @@ class CliTests(unittest.TestCase):
                 ["skill", "install", "--target", str(skill_dir)],
                 data_dir,
             )
+            cluster_help = self.run_bk(["c", "-h"], data_dir, cluster_env)
+            admin_cluster_help = self.run_bk(
+                ["admin", "cluster", "-h"], data_dir, cluster_env
+            )
+            cluster_status = self.run_bk(["c"], data_dir, cluster_env)
 
             self.assertEqual(version.returncode, 0, version.stderr)
             self.assertRegex(version.stdout, r"^bk \d+\.\d+\.\d+")
@@ -100,6 +108,15 @@ class CliTests(unittest.TestCase):
             self.assertIn("name: gpubk", skill_show.stdout)
             self.assertEqual(skill_install.returncode, 0, skill_install.stderr)
             self.assertTrue((skill_dir / "SKILL.md").is_file())
+            self.assertEqual(cluster_help.returncode, 0, cluster_help.stderr)
+            self.assertIn("GPUBK cluster federation", cluster_help.stdout)
+            self.assertEqual(
+                admin_cluster_help.returncode, 0, admin_cluster_help.stderr
+            )
+            self.assertIn("remote-only catalog", admin_cluster_help.stdout)
+            self.assertEqual(cluster_status.returncode, 2)
+            self.assertIn("cluster mode is not configured", cluster_status.stderr)
+            self.assertNotIn("JSONDecodeError", cluster_status.stderr)
 
             ordinary = self.run_bk(["doctor", "--json"], data_dir)
             self.assertEqual(ordinary.returncode, 2)
