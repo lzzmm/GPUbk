@@ -57,6 +57,10 @@ def _full_name(payload: dict[str, Any], key: str) -> object:
     return value.get("full_name") if isinstance(value, dict) else None
 
 
+def _same_repository(value: object, expected: str) -> bool:
+    return isinstance(value, str) and value.casefold() == expected.casefold()
+
+
 def validate_source_run(
     run: dict[str, Any],
     jobs_payload: dict[str, Any],
@@ -64,8 +68,8 @@ def validate_source_run(
     repository: str,
 ) -> str:
     checks = {
-        "repository": _full_name(run, "repository") == repository,
-        "head repository": _full_name(run, "head_repository") == repository,
+        "repository": _same_repository(_full_name(run, "repository"), repository),
+        "head repository": _same_repository(_full_name(run, "head_repository"), repository),
         "workflow": run.get("path") == EXPECTED_WORKFLOW,
         "event": run.get("event") == "workflow_dispatch",
         "branch": run.get("head_branch") == "main",

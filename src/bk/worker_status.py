@@ -3,6 +3,8 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import stat
+import sys
 from datetime import datetime
 from typing import Iterable, Optional
 
@@ -71,6 +73,7 @@ def inspect_worker_status(
     """Inspect this UID's worker lease without creating or modifying storage."""
 
     checked_at = to_iso(at or utc_now())
+    persistence = inspect_worker_persistence(actor)
     if actor.uid != os.getuid():
         return _status(
             "unavailable",
@@ -78,11 +81,12 @@ def inspect_worker_status(
             running=None,
             lease_present=None,
             warning="worker status is available only for the current process UID",
+            persistence=persistence,
         )
 
     root = job_log_root(config)
     if not root.is_absolute():
-        return _invalid(checked_at, f"job log directory must be absolute: {root}")
+        return _invalid(checked_at, f"job log directory must be absolute: {root}", persistence=persistence)
     try:
         root.lstat()
     except FileNotFoundError:
@@ -92,14 +96,15 @@ def inspect_worker_status(
             running=False,
             lease_present=False,
             lease_held=False,
+            persistence=persistence,
         )
     except OSError as exc:
-        return _invalid(checked_at, f"cannot inspect private job directory {root}: {exc}")
+        return _invalid(checked_at, f"cannot inspect private job directory {root}: {exc}", persistence=persistence)
 
     try:
         validate_private_directory(root, actor)
     except (BookingError, OSError) as exc:
-        return _invalid(checked_at, str(exc))
+        return _invalid(checked_at, str(exc), persistence=persistence)
 
     path = root / WORKER_LEASE_FILENAME
     try:
@@ -111,9 +116,10 @@ def inspect_worker_status(
             running=False,
             lease_present=False,
             lease_held=False,
+            persistence=persistence,
         )
     except OSError as exc:
-        return _invalid(checked_at, f"cannot safely inspect worker lease: {exc}", lease_present=True)
+        return _invalid(checked_at, f"cannot safely inspect worker lease: {exc}", lease_present=True, persistence=persistence)
 
     try:
         try:
@@ -123,12 +129,14 @@ def inspect_worker_status(
                 checked_at,
                 f"cannot inspect worker lease: {exc}",
                 lease_present=True,
+                persistence=persistence,
             )
         if metadata.st_uid != actor.uid:
             return _invalid(
                 checked_at,
                 f"worker lease is not owned by UID {actor.uid}",
                 lease_present=True,
+                persistence=persistence,
             )
         raw, read_warning = _read_lease_bytes(fd)
         try:
@@ -141,6 +149,7 @@ def inspect_worker_status(
                 checked_at,
                 f"cannot probe worker lease lock: {exc}",
                 lease_present=True,
+                persistence=persistence,
             )
     finally:
         os.close(fd)
@@ -188,7 +197,53 @@ def inspect_worker_status(
         instance_match=instance_match,
         warning=warning,
         evidence="kernel-flock",
+        persistence=persistence,
     )
+
+
+def inspect_worker_persistence(actor: Actor) -> dict:
+    """Report whether systemd will keep this user's manager alive after logout."""
+
+    command = ["sudo", "loginctl", "enable-linger", actor.username]
+    result = {
+        "kind": "systemd-linger",
+        "state": "not-applicable",
+        "logout_safe": None,
+        "admin_argv": command,
+    }
+    if not actor.username or "/" in actor.username or actor.username in {".", ".."}:
+        return {
+            **result,
+            "state": "unknown",
+            "warning": "Linux account name is unsafe for linger inspection",
+        }
+    if not sys.platform.startswith("linux") or not os.path.isdir("/run/systemd/system"):
+        return result
+    path = os.path.join("/var/lib/systemd/linger", actor.username)
+    try:
+        metadata = os.lstat(path)
+    except FileNotFoundError:
+        return {**result, "state": "disabled", "logout_safe": False}
+    except OSError as exc:
+        return {**result, "state": "unknown", "warning": str(exc)}
+    if not stat.S_ISREG(metadata.st_mode):
+        return {
+            **result,
+            "state": "unknown",
+            "warning": "linger marker is not a regular file",
+        }
+    if metadata.st_uid != 0:
+        return {
+            **result,
+            "state": "unknown",
+            "warning": "linger marker is not owned by root",
+        }
+    return {
+        **result,
+        "state": "enabled",
+        "logout_safe": True,
+        "marker_uid": metadata.st_uid,
+    }
 
 
 def _inspect_instance_lease(
@@ -321,13 +376,20 @@ def _bounded_instance_id(value: object) -> str:
     return value
 
 
-def _invalid(checked_at: str, warning: str, *, lease_present: Optional[bool] = None) -> dict:
+def _invalid(
+    checked_at: str,
+    warning: str,
+    *,
+    lease_present: Optional[bool] = None,
+    persistence: Optional[dict] = None,
+) -> dict:
     return _status(
         "invalid",
         checked_at,
         running=None,
         lease_present=lease_present,
         warning=warning,
+        persistence=persistence,
     )
 
 
@@ -344,6 +406,7 @@ def _status(
     instance_match: Optional[bool] = None,
     warning: Optional[str] = None,
     evidence: Optional[str] = None,
+    persistence: Optional[dict] = None,
 ) -> dict:
     return {
         "schema_version": WORKER_STATUS_SCHEMA_VERSION,
@@ -358,4 +421,5 @@ def _status(
         "checked_at": checked_at,
         "lease": lease,
         "warning": warning,
+        "persistence": persistence,
     }

@@ -51,7 +51,7 @@ for final versions and their immutable release assets.
 ## Every release
 
 1. Confirm the owner-approved Apache-2.0 `LICENSE` is included in both wheel and sdist metadata.
-2. Confirm the `lzzmm` author/maintainer metadata and `https://github.com/lzzmm/gpubk` URLs in `pyproject.toml`.
+2. Confirm the `lzzmm` author/maintainer metadata and `https://github.com/lzzmm/GPUbk` URLs in `pyproject.toml`.
 3. Replace the candidate version in `src/bk/__init__.py` with the final version and replace `Unreleased` in the matching `CHANGELOG.md` heading with the release date. Package metadata reads the version from `bk.__version__`.
 4. Run core tests:
 

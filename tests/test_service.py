@@ -22,6 +22,7 @@ from bk.service import (
     booking_result_payload,
     build_agent_context,
     recommend_booking,
+    scheduled_job_worker_warning,
     submit_booking,
     submit_cancellation,
     submit_edit,
@@ -75,6 +76,23 @@ class AgentServiceTests(unittest.TestCase):
     def tearDown(self):
         self.scheduler_now_patch.stop()
         self.tmp.cleanup()
+
+    def test_running_worker_warns_when_logout_persistence_is_disabled(self):
+        warning = scheduled_job_worker_warning(
+            {
+                "running": True,
+                "state": "running",
+                "persistence": {
+                    "state": "disabled",
+                    "logout_safe": False,
+                    "admin_argv": ["sudo", "loginctl", "enable-linger", "alice"],
+                },
+            }
+        )
+
+        self.assertIn("may stop after logout", warning)
+        self.assertIn("tmux", warning)
+        self.assertIn("bk info", warning)
 
     def test_context_has_stable_schema_and_no_process_arguments(self):
         self.assertNotEqual(self.actor.uid, os.getuid())
@@ -592,18 +610,26 @@ class AgentServiceTests(unittest.TestCase):
         )
         lease = acquire_job_worker_lease(config, actor, "service-worker", "gpu-host")
         try:
-            submission = submit_booking(
-                config,
-                self.store,
-                actor,
-                count=1,
-                duration_seconds=30 * 60,
-                start_at=self.start,
-                command_argv=[sys.executable, "-c", "print('private')"],
-                working_directory=self.tmp.name,
-                allow_queue=False,
-                advice=self.advice,
-            )
+            with mock.patch(
+                "bk.worker_status.inspect_worker_persistence",
+                return_value={
+                    "kind": "systemd-linger",
+                    "state": "enabled",
+                    "logout_safe": True,
+                },
+            ):
+                submission = submit_booking(
+                    config,
+                    self.store,
+                    actor,
+                    count=1,
+                    duration_seconds=30 * 60,
+                    start_at=self.start,
+                    command_argv=[sys.executable, "-c", "print('private')"],
+                    working_directory=self.tmp.name,
+                    allow_queue=False,
+                    advice=self.advice,
+                )
         finally:
             lease.release()
 

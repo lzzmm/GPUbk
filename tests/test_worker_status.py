@@ -1,9 +1,11 @@
 import fcntl
 import json
 import os
+import stat
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from bk.config import Config
 from bk.joblogs import acquire_job_worker_lease, worker_instance_id
@@ -23,6 +25,7 @@ from bk.models import (
 from bk.worker_status import (
     MAX_WORKER_LEASE_BYTES,
     inspect_worker_status,
+    inspect_worker_persistence,
     reservations_need_worker,
 )
 
@@ -58,6 +61,26 @@ class WorkerStatusTests(unittest.TestCase):
         self.assertFalse(status["lease_held"])
         self.assertIsNone(status["instance_match"])
         self.assertFalse(self.root.exists())
+
+    def test_systemd_linger_persistence_is_structured_for_agents(self):
+        marker = mock.Mock(st_uid=0, st_mode=stat.S_IFREG | 0o644)
+        with mock.patch("bk.worker_status.sys.platform", "linux"), \
+             mock.patch("bk.worker_status.os.path.isdir", return_value=True), \
+             mock.patch("bk.worker_status.os.lstat", return_value=marker):
+            status = inspect_worker_persistence(self.actor)
+
+        self.assertEqual(status["state"], "enabled")
+        self.assertTrue(status["logout_safe"])
+        self.assertEqual(status["admin_argv"][-1], self.actor.username)
+
+    def test_missing_linger_marker_reports_logout_risk(self):
+        with mock.patch("bk.worker_status.sys.platform", "linux"), \
+             mock.patch("bk.worker_status.os.path.isdir", return_value=True), \
+             mock.patch("bk.worker_status.os.lstat", side_effect=FileNotFoundError):
+            status = inspect_worker_persistence(self.actor)
+
+        self.assertEqual(status["state"], "disabled")
+        self.assertFalse(status["logout_safe"])
 
     def test_kernel_lock_reports_running_then_stopped_with_diagnostic_metadata(self):
         lease = acquire_job_worker_lease(self.config, self.actor, "worker-1", "host-a")

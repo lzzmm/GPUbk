@@ -79,6 +79,26 @@ class LoginNoticeTests(unittest.TestCase):
 
         self.assertEqual(render_login_summary(summary), "")
 
+    def test_scheduled_job_login_notice_explains_worker_and_logout_risk(self):
+        now = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
+        summary = build_login_summary(
+            {"reservations": [reservation("job", 1001, now, now + timedelta(hours=1))]},
+            1001,
+            now=now,
+            within_seconds=86400,
+            worker={
+                "state": "stopped",
+                "running": False,
+                "persistence": {"state": "disabled", "logout_safe": False},
+            },
+        )
+
+        rendered = render_login_summary(summary)
+        self.assertIn("AUTO-RUN worker is not running", rendered)
+        self.assertIn("tmux", rendered)
+        self.assertIn("may stop after logout", rendered)
+        self.assertIn("bk info", rendered)
+
     def test_recent_administrator_cancellation_is_visible_at_login(self):
         now = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
         cancelled = reservation(

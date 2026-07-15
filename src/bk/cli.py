@@ -1816,25 +1816,40 @@ def _service_command(argv: List[str], config: Config) -> int:
     else:
         print("after starting it, verify: bk doctor --require-worker --strict")
     username = shlex.quote(_current_actor().username)
-    print(
-        "Linux boot/logout persistence (optional, admin): "
-        f"sudo loginctl enable-linger {username}"
-    )
+    if args.kind == "worker":
+        print("temporary after SSH disconnect: keep `bk w start` running in tmux")
+        print(
+            "Linux boot/logout persistence (admin): "
+            f"sudo bk admin worker-persistence enable {username}"
+        )
+    else:
+        print(
+            "Linux boot/logout persistence (admin): "
+            f"sudo loginctl enable-linger {username}"
+        )
     return 0
 
 
 def _worker_status_line(status: dict) -> str:
     state = str(status.get("state", "invalid"))
     lease = status.get("lease")
+    persistence = status.get("persistence")
+    persistence_suffix = ""
+    if isinstance(persistence, dict):
+        persistence_state = persistence.get("state")
+        if persistence_state == "enabled":
+            persistence_suffix = "; logout-persistence=enabled"
+        elif persistence_state == "disabled":
+            persistence_suffix = "; logout-persistence=disabled"
     if state == "running" and isinstance(lease, dict):
         return (
             f"worker: running (lease held) recorded-pid={lease.get('pid')} "
             f"host={lease.get('hostname')} "
-            f"since={format_local(str(lease.get('acquired_at')))}"
+            f"since={format_local(str(lease.get('acquired_at')))}{persistence_suffix}"
         )
     if state == "running":
         suffix = f"; {status['warning']}" if status.get("warning") else ""
-        return f"worker: running (kernel lease held; metadata unavailable{suffix})"
+        return f"worker: running (kernel lease held; metadata unavailable{suffix}){persistence_suffix}"
     if state == "other-instance":
         return (
             "worker: other instance (lease held for another data directory; "
@@ -1850,9 +1865,9 @@ def _worker_status_line(status: dict) -> str:
         )
     if state == "stopped":
         suffix = f": {status['warning']}" if status.get("warning") else ""
-        return f"worker: stopped{suffix}"
+        return f"worker: stopped{suffix}{persistence_suffix}"
     if state == "not-seen":
-        return "worker: not seen (`bk w` checks status; `bk w start` launches it)"
+        return f"worker: not seen (`bk w` checks status; `bk w start` launches it){persistence_suffix}"
     warning = str(status.get("warning") or "status unavailable")
     return f"worker: {state}: {warning}"
 
@@ -3513,13 +3528,28 @@ def _login_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             if int(device["gpu"]) not in gaps
         ]
         process_state = audit_store.load_state_read_only()
+    ledger = store.load_read_only()
+    actor = _current_actor()
+    worker_relevant = [
+        item
+        for item in ledger.get("reservations", [])
+        if int(item.get("uid", -1)) == actor.uid
+        and parse_iso(item["end_at"]) > now
+        and parse_iso(item["start_at"]) <= now + timedelta(seconds=within_seconds)
+    ]
+    worker = (
+        inspect_worker_status(config, actor, at=now)
+        if reservations_need_worker(worker_relevant, actor.uid)
+        else None
+    )
     summary = build_login_summary(
-        store.load_read_only(),
-        _current_actor().uid,
+        ledger,
+        actor.uid,
         now=now,
         within_seconds=within_seconds,
         process_state=process_state,
         reliable_gpus=reliable_gpus,
+        worker=worker,
     )
     if args.json:
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True))

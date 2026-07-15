@@ -1018,13 +1018,24 @@ def booking_result_payload(
 
 
 def scheduled_job_worker_warning(status: Optional[dict]) -> Optional[str]:
-    if status is None or status.get("running") is True:
+    if status is None:
+        return None
+    persistence = status.get("persistence")
+    if status.get("running") is True:
+        if isinstance(persistence, dict) and persistence.get("logout_safe") is False:
+            return (
+                "worker is running but may stop after logout; for temporary use keep "
+                "`bk w start` in tmux, or ask the GPUBK administrator (`bk info`) to run "
+                "`sudo bk admin worker-persistence enable USER`"
+            )
         return None
     state = str(status.get("state", "invalid"))
     if state in {"not-seen", "stopped"}:
         return (
             f"scheduled command worker is {state}; start `bk w start` now or enable "
-            "bk-worker.service, otherwise the command cannot launch"
+            "bk-worker.service, otherwise the command cannot launch. For temporary use "
+            "keep `bk w start` in tmux; for logout/reboot persistence contact the GPUBK "
+            "administrator shown by `bk info`"
         )
     if state == "invalid":
         return (

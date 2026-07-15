@@ -64,6 +64,28 @@ class TtyInput(StringIO):
 
 
 class AdminInitTests(unittest.TestCase):
+    def test_admin_can_enable_worker_logout_persistence_for_one_user(self):
+        account = mock.Mock(pw_uid=1003, pw_name="alice")
+        states = [
+            {"kind": "systemd-linger", "state": "disabled", "logout_safe": False},
+            {"kind": "systemd-linger", "state": "enabled", "logout_safe": True},
+        ]
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        with mock.patch("bk.admin.os.geteuid", return_value=0), \
+             mock.patch("bk.admin.pwd.getpwnam", return_value=account), \
+             mock.patch("bk.admin.inspect_worker_persistence", side_effect=states), \
+             mock.patch("bk.admin.shutil.which", return_value="/usr/bin/loginctl"), \
+             mock.patch("bk.admin.subprocess.run", return_value=completed) as run:
+            result = run_admin_cli(
+                ["worker-persistence", "enable", "alice", "--yes"]
+            )
+
+        self.assertEqual(result, 0)
+        self.assertEqual(
+            run.call_args.args[0],
+            ["/usr/bin/loginctl", "enable-linger", "alice"],
+        )
+
     def test_python_uninstall_hint_for_isolated_environment(self):
         with mock.patch.object(admin_module.sys, "prefix", "/opt/gpubk"), mock.patch.object(
             admin_module.sys, "base_prefix", "/usr"

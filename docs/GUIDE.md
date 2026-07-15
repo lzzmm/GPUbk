@@ -1,6 +1,6 @@
 # GPUBK Administrator and User Guide
 
-**English** | [简体中文](https://github.com/lzzmm/gpubk/blob/main/README.zh-CN.md)
+**English** | [简体中文](https://github.com/lzzmm/GPUbk/blob/main/README.zh-CN.md)
 
 GPUBK is a GPU booking tool for shared Linux servers. The package is named
 `gpubk`; the command is the shorter `bk`.
@@ -415,11 +415,19 @@ bk doctor --require-worker --strict
 ```
 
 On systemd Linux, the user manager may stop at logout and may not start at boot.
-For genuinely unattended jobs, an administrator can selectively enable linger:
+For a temporary session without administrator changes, keep `bk w start` inside
+`tmux`; it survives SSH disconnects but not a host reboot. For genuinely
+unattended jobs, an administrator can selectively enable persistence:
 
 ```bash
-sudo loginctl enable-linger <worker-user>
+sudo bk admin worker-persistence enable <worker-user>
+sudo bk admin worker-persistence status <worker-user>
 ```
+
+Installation deliberately does not enable every account: that would include
+system, LDAP, and non-GPU users and would miss accounts created later. GPUBK
+checks the actual user whenever a scheduled command is submitted. CLI warnings,
+`bk w`, login notices, booking JSON, and Agent context expose the same state.
 
 The generated unit captures the absolute `BK_DATA_DIR`, private
 `BK_JOB_LOG_DIR`, an explicit `BK_CONFIG_FILE`, and any explicitly active
@@ -514,7 +522,7 @@ parameters are not collected.
 History is stored in checksummed daily partitions with 1-minute, 5-minute,
 10-minute, hourly, and daily levels. The public `gpubk.usage.v1` query model is
 available through Python, JSON CLI, and MCP; visualizers should not parse storage
-files. See [Telemetry](https://github.com/lzzmm/gpubk/blob/main/docs/TELEMETRY.md).
+files. See [Telemetry](https://github.com/lzzmm/GPUbk/blob/main/docs/TELEMETRY.md).
 `usage_load_window_minutes` controls how much recent device history is retained
 and considered by automatic GPU placement.
 
@@ -531,6 +539,13 @@ host through non-interactive SSH and its versioned Agent JSON, then submits to e
 one destination broker. Stable `(node_id, numeric UID)` pairs can be mapped by an
 administrator to one global principal; usernames alone are never trusted as identity.
 Existing history needs no rewrite.
+
+On one host, reservation ownership currently follows the numeric UID. Renaming an
+account without changing its UID is safe. Changing or recycling a UID does not
+silently transfer old reservations, even when the username matches. Preserve the
+old account binding until an administrator has reviewed the history; a future
+versioned principal registry will provide an audited rebind operation rather than
+guessing from account names.
 
 Cluster controls remain hidden when no catalog exists. With a catalog, `bk c` shows
 all nodes and active reservations, `bk c rec 2 1h` compares legal starts,
@@ -550,7 +565,7 @@ In the browser, `Tab` changes focus and `Enter` opens complete reservation detai
 Older nodes remain visible during
 rolling upgrades but are read-only until they advertise the required safe-write
 capabilities.
-See [CLUSTER.md](https://github.com/lzzmm/gpubk/blob/main/docs/CLUSTER.md) for transport,
+See [CLUSTER.md](https://github.com/lzzmm/GPUbk/blob/main/docs/CLUSTER.md) for transport,
 failure, NFS export, and rollout boundaries.
 
 The monitor also has a user service:
@@ -640,7 +655,7 @@ transaction checks. GPUBK validates the ledger-bound policy before invoking the
 allocator for create, recommend, or edit operations. Timeout, invalid output,
 and ordinary allocator failures fall back to built-in ordering; an interrupt
 terminates the allocator process group before propagating. See the
-[Agent protocol](https://github.com/lzzmm/gpubk/blob/main/src/bk/data/codex-skill/gpubk/references/protocol.md).
+[Agent protocol](https://github.com/lzzmm/GPUbk/blob/main/src/bk/data/codex-skill/gpubk/references/protocol.md).
 
 ## Shared Server Setup
 
@@ -1032,7 +1047,7 @@ bk broker --check
 bk doctor --probe --require-monitor --strict
 ```
 
-See [UPGRADING.md](https://github.com/lzzmm/gpubk/blob/main/docs/UPGRADING.md) for service restart, rollback, and release-specific
+See [UPGRADING.md](https://github.com/lzzmm/GPUbk/blob/main/docs/UPGRADING.md) for service restart, rollback, and release-specific
 checks.
 
 ### Backup, clear, and restore
@@ -1311,7 +1326,7 @@ For NFS/FUSE used by multiple hosts, additionally verify locking from a second
 host because one machine cannot prove cross-host lock propagation. Every writer
 must use GPUBK.
 
-See [SECURITY.md](https://github.com/lzzmm/gpubk/blob/main/SECURITY.md) for the supported boundary, file safety, WAL
+See [SECURITY.md](https://github.com/lzzmm/GPUbk/blob/main/SECURITY.md) for the supported boundary, file safety, WAL
 recovery, private job specs, MCP isolation, and administrator responsibilities.
 
 ## Try It Without a GPU
@@ -1339,8 +1354,8 @@ PYTHONPATH=src python3 benchmarks/scheduler_queue.py
 PYTHONPATH=src python3 benchmarks/usage_store.py
 ```
 
-Project documents: [Security](https://github.com/lzzmm/gpubk/blob/main/SECURITY.md) ·
-[Upgrading](https://github.com/lzzmm/gpubk/blob/main/docs/UPGRADING.md) ·
-[Release process](https://github.com/lzzmm/gpubk/blob/main/docs/RELEASING.md) ·
-[Changelog](https://github.com/lzzmm/gpubk/blob/main/CHANGELOG.md) ·
-[Apache-2.0 license](https://github.com/lzzmm/gpubk/blob/main/LICENSE)
+Project documents: [Security](https://github.com/lzzmm/GPUbk/blob/main/SECURITY.md) ·
+[Upgrading](https://github.com/lzzmm/GPUbk/blob/main/docs/UPGRADING.md) ·
+[Release process](https://github.com/lzzmm/GPUbk/blob/main/docs/RELEASING.md) ·
+[Changelog](https://github.com/lzzmm/GPUbk/blob/main/CHANGELOG.md) ·
+[Apache-2.0 license](https://github.com/lzzmm/GPUbk/blob/main/LICENSE)

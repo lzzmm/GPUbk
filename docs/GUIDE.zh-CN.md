@@ -358,11 +358,17 @@ bk doctor --require-worker --strict
 ```
 
 在 systemd Linux 上，用户退出后 user manager 可能停止，开机时也不一定自动启动。
-确需无人值守任务时，由管理员按用户选择性开启 linger：
+临时使用且不改系统设置时，可以在 `tmux` 中运行 `bk w start`；SSH 断开后仍继续，但
+机器重启后不会自动恢复。确需无人值守任务时，由管理员按实际用户开启持久运行：
 
 ```bash
-sudo loginctl enable-linger <worker用户>
+sudo bk admin worker-persistence enable <worker用户>
+sudo bk admin worker-persistence status <worker用户>
 ```
+
+安装时不会粗暴地为所有账号开启：账号来源可能包括系统账号、LDAP 和从不使用 GPU 的
+用户，而且之后新增的账号仍会漏掉。GPUBK 会在实际用户提交定时脚本时即时检查；CLI
+警告、`bk w`、登录提示、预约 JSON 和 Agent context 都暴露同一状态。
 
 生成的 unit 会固化安装时生效的绝对 `BK_DATA_DIR`、私有 `BK_JOB_LOG_DIR`、显式
 `BK_CONFIG_FILE`，以及 `BK_WORKER_MAX_PARALLEL` 等明确启用的非敏感配置覆盖。写入
@@ -446,6 +452,10 @@ Python、JSON CLI 和 MCP 统一返回 `gpubk.usage.v1` 公共模型；可视化
 NFS 目录。可选集群联邦通过非交互 SSH 和版本化 Agent JSON 查询各主机，并把预约提交给
 唯一一台目标机器的 broker。管理员可以把稳定的 `(node_id, 数字 UID)` 映射成统一人员；
 不能只凭用户名合并，已有历史数据无需重写。
+
+单机预约所有权目前跟随数字 UID：只改用户名、不改 UID 没有问题；改变或复用 UID 时，
+即使用户名相同也不会静默继承旧预约。管理员完成审查前应保留旧账号绑定。后续版本化
+principal 目录会提供带审计的显式 rebind，而不是根据名字猜测身份。
 
 没有集群目录时，所有节点入口都会隐藏。配置后，`bk c` 查看所有节点和活动预约，
 `bk c rec 2 1h` 比较合法开始时间，`bk c 2 1h` 在最佳单节点预约，`bk c x 2 1h`

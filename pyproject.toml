@@ -32,10 +32,10 @@ classifiers = [
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/lzzmm/gpubk"
-Repository = "https://github.com/lzzmm/gpubk"
-Issues = "https://github.com/lzzmm/gpubk/issues"
-Changelog = "https://github.com/lzzmm/gpubk/blob/main/CHANGELOG.md"
+Homepage = "https://github.com/lzzmm/GPUbk"
+Repository = "https://github.com/lzzmm/GPUbk"
+Issues = "https://github.com/lzzmm/GPUbk/issues"
+Changelog = "https://github.com/lzzmm/GPUbk/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 gpu = ["nvidia-ml-py>=12"]

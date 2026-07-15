@@ -19,6 +19,7 @@ def build_login_summary(
     within_seconds: int,
     process_state: Optional[Mapping[str, dict]] = None,
     reliable_gpus: Sequence[int] = (),
+    worker: Optional[dict] = None,
 ) -> dict:
     current = now.astimezone(timezone.utc).replace(microsecond=0)
     horizon = current + timedelta(seconds=within_seconds)
@@ -74,6 +75,7 @@ def build_login_summary(
         "upcoming": [_public_item(item) for item in upcoming],
         "overdue": overdue,
         "notifications": notifications[:5],
+        "worker": worker,
     }
 
 
@@ -82,7 +84,8 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
     upcoming = summary.get("upcoming", [])
     overdue = summary.get("overdue", [])
     notifications = summary.get("notifications", [])
-    if not active and not upcoming and not overdue and not notifications:
+    worker = summary.get("worker")
+    if not active and not upcoming and not overdue and not notifications and not worker:
         return ""
 
     labels = []
@@ -116,6 +119,26 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
         )
         if len(notifications) > 1:
             lines[-1] += f"  (+{len(notifications) - 1} more; run `bk n`)"
+    if isinstance(worker, dict):
+        if worker.get("running") is not True:
+            lines.append(
+                style(
+                    "  AUTO-RUN worker is not running; use tmux with `bk w start`, "
+                    "or enable the user service",
+                    "warning",
+                    enabled=color,
+                )
+            )
+        persistence = worker.get("persistence")
+        if isinstance(persistence, dict) and persistence.get("logout_safe") is False:
+            lines.append(
+                style(
+                    "  AUTO-RUN may stop after logout; contact the administrator (`bk info`) "
+                    "for persistent launch",
+                    "warning",
+                    enabled=color,
+                )
+            )
     return "\n".join(lines)
 
 

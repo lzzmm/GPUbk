@@ -2657,7 +2657,8 @@ class CliTests(unittest.TestCase):
             self.assertIn(f"captured data directory: {data_dir}", installed.stdout)
             self.assertNotIn("captured config file:", installed.stdout)
             self.assertIn("bk doctor --require-worker --strict", installed.stdout)
-            self.assertIn("sudo loginctl enable-linger", installed.stdout)
+            self.assertIn("sudo bk admin worker-persistence enable", installed.stdout)
+            self.assertIn("tmux", installed.stdout)
 
     def test_service_unit_captures_an_external_trusted_config(self):
         with tempfile.TemporaryDirectory() as tmp:

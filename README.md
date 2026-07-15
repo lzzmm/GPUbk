@@ -1,6 +1,6 @@
 # GPUBK
 
-**English** | [简体中文](https://github.com/lzzmm/gpubk/blob/main/README.zh-CN.md)
+**English** | [简体中文](https://github.com/lzzmm/GPUbk/blob/main/README.zh-CN.md)
 
 <p align="center">
   <img src="docs/assets/gpubk-terminal-logo.svg" alt="GPUBK terminal logo" width="860">
@@ -157,8 +157,8 @@ UID mapping, failure behavior, NFS history export, and scheduled jobs.
 
 ## Documentation
 
-- [Complete administrator and user guide](https://github.com/lzzmm/gpubk/blob/main/docs/GUIDE.md)
-- [中文完整手册](https://github.com/lzzmm/gpubk/blob/main/docs/GUIDE.zh-CN.md)
+- [Complete administrator and user guide](https://github.com/lzzmm/GPUbk/blob/main/docs/GUIDE.md)
+- [中文完整手册](https://github.com/lzzmm/GPUbk/blob/main/docs/GUIDE.zh-CN.md)
 - [Upgrading](docs/UPGRADING.md)
 - [Security model](SECURITY.md)
 - [Cluster deployment](docs/CLUSTER.md)

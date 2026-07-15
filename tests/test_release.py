@@ -45,7 +45,10 @@ class ReleaseConfigurationTests(unittest.TestCase):
         offenders = [
             str(path.relative_to(ROOT))
             for path in files
-            if legacy in path.read_text(encoding="utf-8")
+            if legacy
+            in path.read_text(encoding="utf-8").replace(
+                "github.com/lzzmm/GPUbk", "github.com/lzzmm/GPUBK"
+            )
         ]
         self.assertEqual(offenders, [])
 
@@ -144,7 +147,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
 
         self.assertIn('readme = "README.md"', pyproject)
         self.assertIn(
-            "**English** | [简体中文](https://github.com/lzzmm/gpubk/blob/main/README.zh-CN.md)",
+            "**English** | [简体中文](https://github.com/lzzmm/GPUbk/blob/main/README.zh-CN.md)",
             english,
         )
         self.assertIn("[English](README.md) | **简体中文**", chinese)
@@ -401,8 +404,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn('maintainers = [{ name = "lzzmm", email = "cortexcyh@gmail.com" }]', pyproject)
         self.assertRegex(pyproject, r'(?m)^license = "Apache-2\.0"$')
         self.assertRegex(pyproject, r'(?m)^license-files = \["LICENSE"\]$')
-        self.assertIn('Repository = "https://github.com/lzzmm/gpubk"', pyproject)
-        self.assertIn('Issues = "https://github.com/lzzmm/gpubk/issues"', pyproject)
+        self.assertIn('Repository = "https://github.com/lzzmm/GPUbk"', pyproject)
+        self.assertIn('Issues = "https://github.com/lzzmm/GPUbk/issues"', pyproject)
 
         license_digest = hashlib.sha256((ROOT / "LICENSE").read_bytes()).hexdigest()
         self.assertEqual(license_digest, APACHE_2_NORMALIZED_SHA256)

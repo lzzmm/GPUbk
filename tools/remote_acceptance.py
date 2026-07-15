@@ -34,7 +34,7 @@ REPORT_MEMBER_ROOT = "gpubk-acceptance/"
 SAFE_RUN_ID = re.compile(r"[0-9]{8}T[0-9]{6}Z-[0-9a-f]{12}")
 SAFE_SSH_TARGET = re.compile(r"(?:[A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+")
 SAFE_GIT_REVISION = re.compile(r"[0-9a-f]{40}")
-DEFAULT_REPOSITORY = "https://github.com/lzzmm/gpubk.git"
+DEFAULT_REPOSITORY = "https://github.com/lzzmm/GPUbk.git"
 
 
 class AcceptanceError(RuntimeError):

@@ -69,8 +69,9 @@ from .config import (
 from .fileio import fsync_directory, open_existing_regular
 from .gpu import detect_gpu_count, snapshot
 from .granularity import DEFAULT_SLOT_MINUTES, validate_slot_minutes
-from .models import BookingError
+from .models import Actor, BookingError
 from .systemd import DEFAULT_SYSTEM_UNIT_DIR, system_unit_names
+from .worker_status import inspect_worker_persistence
 
 
 ADMIN_SCHEMA_VERSION = "gpubk.admin.v1"
@@ -697,6 +698,14 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     login_hook_uninstall.add_argument("--yes", action="store_true")
     login_hook_uninstall.add_argument("--dry-run", action="store_true")
     login_hook_uninstall.add_argument("--json", action="store_true")
+    persistence_parser = commands.add_parser(
+        "worker-persistence",
+        help="inspect or manage logout/reboot persistence for one user's worker",
+    )
+    persistence_parser.add_argument("persistence_action", choices=("status", "enable", "disable"))
+    persistence_parser.add_argument("username")
+    persistence_parser.add_argument("--yes", action="store_true")
+    persistence_parser.add_argument("--json", action="store_true")
     add_admin_cluster_parser(commands)
     args = parser.parse_args(list(argv))
 
@@ -708,6 +717,8 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         return run_admin_cluster(args)
     if args.action == "login-hook":
         return _run_admin_login_hook(args)
+    if args.action == "worker-persistence":
+        return _run_admin_worker_persistence(args)
     if args.action == "services":
         return _run_admin_services(args)
     if args.action == "uninstall":
@@ -1017,6 +1028,69 @@ def _run_admin_login_hook(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_admin_worker_persistence(args: argparse.Namespace) -> int:
+    try:
+        account = pwd.getpwnam(args.username)
+    except KeyError as exc:
+        raise BookingError(f"Linux account does not exist: {args.username}") from exc
+    actor = Actor(account.pw_uid, account.pw_name)
+    before = inspect_worker_persistence(actor)
+    action = args.persistence_action
+    if action == "status":
+        if args.json:
+            print(json.dumps(before, ensure_ascii=False, sort_keys=True))
+        else:
+            print(
+                f"worker persistence: user={actor.username} uid={actor.uid} "
+                f"state={before['state']}"
+            )
+            if before.get("logout_safe") is False:
+                print(f"enable: sudo bk admin worker-persistence enable {actor.username}")
+        return 0 if before.get("state") != "unknown" else 2
+
+    if os.geteuid() != 0:
+        raise BookingError("worker persistence changes require sudo")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise BookingError("pass --yes for a non-interactive persistence change")
+        verb = "Enable" if action == "enable" else "Disable"
+        answer = input(f"{verb} logout/reboot persistence for {actor.username}? [Y/n]: ").strip().lower()
+        if answer in {"n", "no"}:
+            print("No changes made.")
+            return 1
+    loginctl = shutil.which("loginctl")
+    if loginctl is None:
+        raise BookingError("loginctl is unavailable; this host may not use systemd-logind")
+    try:
+        result = subprocess.run(
+            [loginctl, f"{action}-linger", actor.username],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BookingError(f"loginctl {action}-linger timed out") from exc
+    if result.returncode:
+        detail = (result.stderr or result.stdout).strip().splitlines()
+        raise BookingError(
+            f"loginctl {action}-linger failed"
+            + (f": {detail[-1]}" if detail else "")
+        )
+    after = inspect_worker_persistence(actor)
+    if args.json:
+        print(json.dumps(after, ensure_ascii=False, sort_keys=True))
+    else:
+        print(
+            f"worker persistence {action}d: user={actor.username} "
+            f"state={after['state']}"
+        )
+        if action == "enable":
+            print("user next: bk service install worker; systemctl --user enable --now bk-worker.service")
+    return 0
+
+
 def _run_admin_install(args: argparse.Namespace) -> int:
     if os.geteuid() != 0 and not args.dry_run:
         raise BookingError("administrator install must run as root; use sudo bk admin install")
@@ -1077,6 +1151,7 @@ def _run_admin_install(args: argparse.Namespace) -> int:
         print(f"  command: {command_path} -> {command_target}{suffix}")
     print(f"  login:   {'install reminder' if login_hook else 'leave unchanged'}")
     print(f"  services: {'install only' if args.no_start else 'install, enable, and start'}")
+    print("  jobs:    per-user workers; logout persistence is enabled only when needed")
     if args.dry_run:
         print("Dry run: no files or services changed.")
         return 0
@@ -1129,6 +1204,11 @@ def _run_admin_install(args: argparse.Namespace) -> int:
     else:
         print("next: start the broker and monitor using your service supervisor")
     print("verify as an ordinary user: bk doctor --probe --require-monitor --strict")
+    print("scheduled commands need one worker per user; users can run `bk w start` in tmux")
+    print(
+        "for logout/reboot launch, enable each actual user with: "
+        "sudo bk admin worker-persistence enable USER"
+    )
     return 0
 
 

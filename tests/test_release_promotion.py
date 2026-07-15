@@ -17,8 +17,8 @@ SPEC.loader.exec_module(PROMOTION)
 class ReleasePromotionTests(unittest.TestCase):
     def valid_run(self):
         return {
-            "repository": {"full_name": "lzzmm/gpubk"},
-            "head_repository": {"full_name": "lzzmm/gpubk"},
+            "repository": {"full_name": "lzzmm/GPUbk"},
+            "head_repository": {"full_name": "lzzmm/GPUbk"},
             "path": ".github/workflows/release.yml",
             "event": "workflow_dispatch",
             "head_branch": "main",
@@ -55,7 +55,7 @@ class ReleasePromotionTests(unittest.TestCase):
             PROMOTION.validate_source_run(
                 self.valid_run(),
                 self.valid_jobs(),
-                repository="lzzmm/gpubk",
+                repository="lzzmm/GPUbk",
             ),
             "a" * 40,
         )
@@ -73,13 +73,13 @@ class ReleasePromotionTests(unittest.TestCase):
                 run = self.valid_run()
                 run[field] = value
                 with self.assertRaisesRegex(ValueError, "source run failed validation"):
-                    PROMOTION.validate_source_run(run, self.valid_jobs(), repository="lzzmm/gpubk")
+                    PROMOTION.validate_source_run(run, self.valid_jobs(), repository="lzzmm/GPUbk")
 
         with self.assertRaisesRegex(ValueError, "one successful verify-testpypi"):
             PROMOTION.validate_source_run(
                 self.valid_run(),
                 {"jobs": [{"name": "verify-testpypi", "conclusion": "skipped"}]},
-                repository="lzzmm/gpubk",
+                repository="lzzmm/GPUbk",
             )
 
     def test_validates_exact_artifact_files_hashes_and_wheel_metadata(self):
