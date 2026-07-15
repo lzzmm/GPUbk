@@ -2,6 +2,20 @@
 
 All notable changes are documented here. The project follows Semantic Versioning once a public release is published.
 
+## 0.2.3 - 2026-07-16
+
+- Align CLI reservation tables and TUI GPU detail rows, add bounded list views, and
+  make repeated booking patterns saveable as presets with a single Enter press.
+- Make scheduled commands persistence-aware across CLI, login notices, Agent JSON,
+  and administrator workflows, with explicit tmux and systemd-linger guidance.
+- Add safe per-user worker persistence administration without running user commands
+  through a privileged global worker.
+- Clarify isolated installation and uninstall steps, and fail early when a requested
+  system command-link directory has unsafe ownership.
+- Centralize worker guidance and public schema facts, with architecture contract tests
+  preventing command, metadata, and schema mirrors from drifting.
+- Update project links and release validation for the renamed GitHub repository.
+
 ## 0.2.2 - 2026-07-16
 
 - Improve the README terminal preview, alignment, palette, and anonymized demo data.
