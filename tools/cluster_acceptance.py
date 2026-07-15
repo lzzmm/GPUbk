@@ -193,7 +193,9 @@ def target_value(value: str) -> str:
 
 def ssh_option(value: str) -> str:
     if not value or any(character in value for character in "\r\n\x00"):
-        raise argparse.ArgumentTypeError("SSH options cannot contain control characters")
+        raise argparse.ArgumentTypeError(
+            "SSH options cannot contain control characters"
+        )
     key = re.split(r"[ =]", value.strip(), maxsplit=1)[0].lower()
     if key in PROTECTED_SSH_OPTIONS:
         raise argparse.ArgumentTypeError(
@@ -266,9 +268,15 @@ def wheel_metadata(path: Path) -> tuple[str, str]:
         raise ClusterAcceptanceError("candidate wheel has an unsafe filename")
     try:
         with zipfile.ZipFile(path) as archive:
-            names = [name for name in archive.namelist() if name.endswith(".dist-info/METADATA")]
+            names = [
+                name
+                for name in archive.namelist()
+                if name.endswith(".dist-info/METADATA")
+            ]
             if len(names) != 1:
-                raise ClusterAcceptanceError("candidate wheel must contain one METADATA file")
+                raise ClusterAcceptanceError(
+                    "candidate wheel must contain one METADATA file"
+                )
             message = email.parser.Parser().parsestr(
                 archive.read(names[0]).decode("utf-8")
             )
@@ -317,7 +325,9 @@ def candidate_wheel(work: Path, supplied: Path | None) -> Path:
     )
     wheels = list(output.glob("gpubk-*.whl"))
     if len(wheels) != 1:
-        raise ClusterAcceptanceError("candidate build did not produce exactly one GPUBK wheel")
+        raise ClusterAcceptanceError(
+            "candidate build did not produce exactly one GPUBK wheel"
+        )
     wheel_metadata(wheels[0])
     return wheels[0]
 
@@ -367,8 +377,12 @@ def setup_remote_node(
         wrapper = str(
             parse_object(installed.stdout, f"{target.value} install").get("wrapper", "")
         )
-        if SAFE_REMOTE_PATH.fullmatch(wrapper) is None or not wrapper.startswith(stage + "/"):
-            raise ClusterAcceptanceError(f"{target.value} returned an unsafe wrapper path")
+        if SAFE_REMOTE_PATH.fullmatch(wrapper) is None or not wrapper.startswith(
+            stage + "/"
+        ):
+            raise ClusterAcceptanceError(
+                f"{target.value} returned an unsafe wrapper path"
+            )
         context = parse_object(
             run_remote(target, [wrapper, "agent", "context", "--compact"]).stdout,
             f"{target.value} context",
@@ -379,9 +393,13 @@ def setup_remote_node(
         node_id = node.get("id") if isinstance(node, dict) else None
         version = software.get("version") if isinstance(software, dict) else None
         if not isinstance(node_id, str) or SAFE_NODE_ID.fullmatch(node_id) is None:
-            raise ClusterAcceptanceError(f"{target.value} returned an invalid stable node ID")
+            raise ClusterAcceptanceError(
+                f"{target.value} returned an invalid stable node ID"
+            )
         if not isinstance(version, str) or not version:
-            raise ClusterAcceptanceError(f"{target.value} candidate did not report its version")
+            raise ClusterAcceptanceError(
+                f"{target.value} candidate did not report its version"
+            )
         if (
             not isinstance(actor, dict)
             or isinstance(actor.get("uid"), bool)
@@ -430,7 +448,9 @@ def write_catalog(path: Path, nodes: Sequence[RemoteNode]) -> None:
             for node in nodes
         ],
     }
-    path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
     path.chmod(0o600)
 
 
@@ -444,10 +464,16 @@ def run_client(bk: Path, catalog: Path, *arguments: str) -> dict[str, Any] | str
         }
     )
     result = run_checked([str(bk), *arguments], environment=environment, timeout=90)
-    return parse_object(result.stdout, "cluster client") if "--json" in arguments else result.stdout
+    return (
+        parse_object(result.stdout, "cluster client")
+        if "--json" in arguments
+        else result.stdout
+    )
 
 
-def exercise_cluster(bk: Path, catalog: Path, nodes: Sequence[RemoteNode]) -> dict[str, Any]:
+def exercise_cluster(
+    bk: Path, catalog: Path, nodes: Sequence[RemoteNode]
+) -> dict[str, Any]:
     status = run_client(bk, catalog, "cluster", "status", "--json")
     if not isinstance(status, dict):
         raise ClusterAcceptanceError("cluster status was not structured")
@@ -474,20 +500,29 @@ def exercise_cluster(bk: Path, catalog: Path, nodes: Sequence[RemoteNode]) -> di
     )
     operation_a = "cluster-acceptance-a-" + secrets.token_hex(8)
     operation_b = "cluster-acceptance-b-" + secrets.token_hex(8)
-    booking_args = ("cluster", "book", "1", "10m", "--mode", "x")
+    booking_args = ("cluster", "x", "1", "10m")
     first = run_client(bk, catalog, *booking_args, "--op-id", operation_a, "--json")
     second = run_client(bk, catalog, *booking_args, "--op-id", operation_b, "--json")
     replay = run_client(bk, catalog, *booking_args, "--op-id", operation_a, "--json")
-    if not all(isinstance(item, dict) for item in (recommendation, first, second, replay)):
+    if not all(
+        isinstance(item, dict) for item in (recommendation, first, second, replay)
+    ):
         raise ClusterAcceptanceError("cluster operation returned non-structured output")
     first_node = first["node"]["name"]
     second_node = second["node"]["name"]
     if first_node == second_node:
-        raise ClusterAcceptanceError("two exclusive bookings did not use independent nodes")
+        raise ClusterAcceptanceError(
+            "two exclusive bookings did not use independent nodes"
+        )
     first_reservation = first["result"]["reservation"]
     replay_reservation = replay["result"]["reservation"]
-    if replay["node"]["name"] != first_node or replay_reservation["id"] != first_reservation["id"]:
-        raise ClusterAcceptanceError("operation replay was not pinned to its original node")
+    if (
+        replay["node"]["name"] != first_node
+        or replay_reservation["id"] != first_reservation["id"]
+    ):
+        raise ClusterAcceptanceError(
+            "operation replay was not pinned to its original node"
+        )
 
     reservations = [
         (first_node, first_reservation),
@@ -508,7 +543,9 @@ def exercise_cluster(bk: Path, catalog: Path, nodes: Sequence[RemoteNode]) -> di
         if isinstance(item, dict)
     )
     if active:
-        raise ClusterAcceptanceError("isolated reservations remained active after cleanup")
+        raise ClusterAcceptanceError(
+            "isolated reservations remained active after cleanup"
+        )
     return {
         "status": status,
         "health": health,
@@ -527,9 +564,13 @@ def parser() -> argparse.ArgumentParser:
         )
     )
     result.add_argument("targets", nargs="+", type=target_value, metavar="USER@HOST")
-    result.add_argument("--wheel", type=Path, help="test this wheel instead of building the checkout")
+    result.add_argument(
+        "--wheel", type=Path, help="test this wheel instead of building the checkout"
+    )
     result.add_argument("--remote-python", default="python3")
-    result.add_argument("-o", "--ssh-option", type=ssh_option, action="append", default=[])
+    result.add_argument(
+        "-o", "--ssh-option", type=ssh_option, action="append", default=[]
+    )
     result.add_argument("--output-dir", type=Path, default=ROOT / "acceptance-reports")
     result.add_argument("--keep-remote", action="store_true")
     result.add_argument("--dry-run", action="store_true")
@@ -561,10 +602,16 @@ def main(argv: list[str] | None = None) -> int:
         parser().error("--remote-python contains a control character")
     if shutil.which("ssh") is None or shutil.which("scp") is None:
         raise ClusterAcceptanceError("OpenSSH ssh and scp are required")
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + secrets.token_hex(6)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ-") + secrets.token_hex(
+        6
+    )
     if args.dry_run:
         print(f"targets: {', '.join(args.targets)}")
-        print("candidate: supplied wheel" if args.wheel else "candidate: wheel built from checkout")
+        print(
+            "candidate: supplied wheel"
+            if args.wheel
+            else "candidate: wheel built from checkout"
+        )
         print("remote state: private temporary directories only")
         print("GPU access: simulated file; production NVML and ledgers are not used")
         return 0
@@ -588,7 +635,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"Candidate wheel: {wheel.name}", flush=True)
             client = prepare_local_client(work, wheel)
             for index, target in enumerate(settings, start=1):
-                print(f"Preparing isolated node-{index} on {target.value}...", flush=True)
+                print(
+                    f"Preparing isolated node-{index} on {target.value}...", flush=True
+                )
                 remote_nodes.append(
                     setup_remote_node(
                         target,
@@ -666,7 +715,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Report: {output}")
     if cleanup_warnings:
         print("Warning: " + "; ".join(cleanup_warnings))
-    print("Still manual: approved live-GPU workload, second-user authorization, and reboot checks.")
+    print(
+        "Still manual: approved live-GPU workload, second-user authorization, and reboot checks."
+    )
     return 0 if not cleanup_warnings else 1
 
 

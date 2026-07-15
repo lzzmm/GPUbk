@@ -34,7 +34,7 @@ sudo bk admin cluster add gpu-b user@gpu-b NODE_ID_FROM_CONTEXT --yes
 sudo bk admin cluster status
 bk cluster
 bk cluster check
-bk cluster recommend 1 30m
+bk c rec 1 30m
 ```
 
 Run the catalog commands on each machine from which users need a cluster view. The
@@ -68,13 +68,16 @@ node as enabled.
   columns, cluster commands in general help, and cluster TUI controls are hidden;
   explicit `bk cluster -h` remains available for setup.
 - `bk cluster` shows reachable nodes, current reservations, and GPU availability.
-- `bk cluster recommend 2 1h` compares legal placements on every enabled node.
-- `bk cluster book 2 1h` submits to the node with the earliest legal start. A
+- `bk c rec 2 1h` compares legal placements on every enabled node.
+- `bk c 2 1h` submits to the node with the earliest legal start; `bk c x 2 1h`
+  requests exclusive mode. The longer `bk cluster book ...` form remains valid. A
   reservation never spans hosts.
 - `bk @NODE 2 1h` explicitly books one node using the ordinary booking syntax.
 - Node-qualified IDs use `NODE/SHORT_ID`; the stored booking UUID is unchanged.
 - Ties are resolved by start time, configured node priority, live-load confidence,
   then node name. A remote broker performs the final locked validation.
+- `bk c tui` pages large node lists; `Tab` focuses reservations and `Enter` shows
+  ownership, capacity, VRAM, job, and node-qualified edit/cancel commands.
 
 `recommend`, `book`, `status`, `usage`, `history`, `edit`, and `cancel` accept
 `-h` without requiring an installed catalog. Structured commands accept `-j`; cluster
@@ -185,6 +188,8 @@ identity and avoids creating a second writer.
   metadata until an administrator enables or removes it.
 - Read-only comparison may become stale. The destination broker always revalidates
   under its local transaction lock before committing.
+- The client rejects a recommendation whose duration, exact start, or echoed request
+  differs from the submitted intent; one malformed node does not hide healthy nodes.
 - Explicit `@NODE` requests never fail over to another host.
 - Automatic cluster booking chooses one write-compatible node after read-only
   comparison. Once a write is attempted, it never switches to another node.

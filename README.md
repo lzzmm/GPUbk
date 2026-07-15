@@ -494,9 +494,11 @@ administrator to one global principal; usernames alone are never trusted as iden
 Existing history needs no rewrite.
 
 Cluster controls remain hidden when no catalog exists. With a catalog, `bk c` shows
-all nodes and active reservations, `bk c recommend 2 1h` compares legal starts,
-`bk c book 2 1h` books the best single node, `bk c tui` opens the node browser,
-and `bk @NODE 2 1h` targets one node for booking. Older nodes remain visible during
+all nodes and active reservations, `bk c rec 2 1h` compares legal starts,
+`bk c 2 1h` books the best single node, `bk c x 2 1h` does the same exclusively,
+`bk c tui` opens the node/reservation browser, and `bk @NODE 2 1h` targets one node.
+In the browser, `Tab` changes focus and `Enter` opens complete reservation details.
+Older nodes remain visible during
 rolling upgrades but are read-only until they advertise the required safe-write
 capabilities.
 See [CLUSTER.md](https://github.com/lzzmm/gpubk/blob/main/CLUSTER.md) for transport,
@@ -680,8 +682,9 @@ sudo bk admin cluster map lab-user gpu-b 2042 --yes
 sudo bk admin cluster status
 bk c
 bk c check
-bk c recommend 1 30m
-bk c book 1 30m -j
+bk c rec 1 30m
+bk c 1 30m -j
+bk c x 1 30m          # exclusive, earliest node
 ```
 
 `bk cluster -h` and every subcommand's `-h` work before this catalog exists. For

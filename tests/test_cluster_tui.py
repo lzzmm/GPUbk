@@ -2,7 +2,11 @@ import unittest
 from pathlib import Path
 
 from bk.cluster import ClusterConfig, ClusterNode, NodeReply
-from bk.cluster_tui import render_cluster_lines
+from bk.cluster_tui import (
+    FOCUS_RESERVATIONS,
+    _reservation_detail_lines,
+    render_cluster_lines,
+)
 
 
 class ClusterTuiTests(unittest.TestCase):
@@ -12,7 +16,10 @@ class ClusterTuiTests(unittest.TestCase):
         config = ClusterConfig(Path("/cluster.json"), (first, second))
         payload = {
             "actor": {"uid": 1003, "username": "user"},
-            "policy": {"gpu_count": 1, "monitoring": {"collector": {"state": "running"}}},
+            "policy": {
+                "gpu_count": 1,
+                "monitoring": {"collector": {"state": "running"}},
+            },
             "gpu_advice": {
                 "gpus": [
                     {
@@ -91,6 +98,68 @@ class ClusterTuiTests(unittest.TestCase):
         )
         self.assertEqual(len(lines), 14)
         self.assertTrue(any("gpu-a" in line for line in lines))
+
+    def test_reservation_focus_shows_capacity_memory_and_selected_marker(self):
+        node = ClusterNode("gpu-a", "a" * 20, "local", None, "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        reservation = {
+            "id": "12345678-1234-1234-1234-123456789abc",
+            "short_id": "12345678",
+            "uid": 1003,
+            "username": "user",
+            "mine": True,
+            "mode": "shared",
+            "share_units_per_gpu": 3,
+            "share_capacity_units_per_gpu": 4,
+            "expected_memory_mb_per_gpu": 12288,
+            "gpus": [0],
+            "start_at": "2030-01-01T00:00:00Z",
+            "end_at": "2030-01-01T01:00:00Z",
+        }
+        payload = {
+            "generated_at": "2030-01-01T00:00:00Z",
+            "policy": {"gpu_count": 1},
+            "reservations": [reservation],
+        }
+        lines = render_cluster_lines(
+            config,
+            [NodeReply(node, payload, None)],
+            0,
+            100,
+            16,
+            focus=FOCUS_RESERVATIONS,
+            selected_reservation=0,
+        )
+        selected = next(line for line in lines if line.startswith("> "))
+        self.assertIn("3/4", selected)
+        self.assertIn("12G", selected)
+        details = _reservation_detail_lines(node, reservation)
+        self.assertIn("Edit:   bk c e gpu-a/12345678 -d 1h", details)
+        self.assertIn("Cancel: bk c d gpu-a/12345678", details)
+
+    def test_node_view_pages_to_keep_the_selected_node_visible(self):
+        nodes = tuple(
+            ClusterNode(
+                f"gpu-{index}",
+                f"{index:020x}",
+                "ssh",
+                f"gpu-{index}",
+                "/usr/bin/bk",
+                index,
+                8,
+            )
+            for index in range(10)
+        )
+        lines = render_cluster_lines(
+            ClusterConfig(Path("/cluster.json"), nodes),
+            [],
+            9,
+            80,
+            12,
+        )
+        self.assertTrue(any(line.startswith(">gpu-9") for line in lines))
+        self.assertTrue(any("7-10/10" in line for line in lines))
+        self.assertFalse(any(line.startswith(" gpu-0") for line in lines))
 
 
 if __name__ == "__main__":

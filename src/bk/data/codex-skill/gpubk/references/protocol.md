@@ -22,8 +22,8 @@ bk usage me --since 24h --json --compact
 bk usage samples --since 2d --resolution 5m --json --compact
 bk c status --json
 bk c check --json
-bk c recommend COUNT DURATION --json
-bk c book COUNT DURATION --op-id ID --json
+bk c rec COUNT DURATION --json
+bk c COUNT DURATION --op-id ID --json
 ```
 
 Omitting `--start` uses the active configured booking interval when possible, then permits earliest-slot queueing. Providing `--start` means exact placement at the active slice boundary or a future boundary; a new write to an older historical slice is rejected. Read `policy.granularity_minutes` from context instead of assuming five minutes. Human CLI users may use `--at`; Agents should keep using explicit ISO 8601 and structured fields.
@@ -145,7 +145,9 @@ binds a display name and priority to an expected stable node ID. Every remote Ag
 usage, recommendation, and booking response includes `node.id`; a mismatch fails
 closed. `cluster-context` returns each node's ordinary `bk.agent.v1` context without
 flattening node-local GPU indexes. `cluster-recommendation` ranks by start, node
-priority, and node name. `cluster-booking-result` contains one destination node, one
+priority, and node name after validating duration, exact start, and any echoed request
+fields. Each node entry includes `rejected_reason` and `write_compatible`.
+`cluster-booking-result` contains one destination node, one
 stable operation ID, and the unchanged destination `bk.agent.v1` result.
 Cluster edit and cancel accept caller-supplied stable operation IDs and return a
 `cluster-mutation-result` containing the owning node and unchanged destination result.

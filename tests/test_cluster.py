@@ -103,6 +103,87 @@ class ClusterTests(unittest.TestCase):
             ):
                 run_cluster_cli(["status"])
 
+    def test_short_booking_syntax_matches_single_node_cli_modes(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        capabilities = {
+            "federated_node_identity": True,
+            "idempotent_booking": True,
+            "operation_status": True,
+            "preflight_idempotent_replay": True,
+        }
+        for arguments, expected_mode in (
+            (["1", "30m"], "shared"),
+            (["s", "1", "30m"], "shared"),
+            (["x", "1", "30m"], "exclusive"),
+        ):
+            with self.subTest(arguments=arguments):
+                reply = NodeReply(
+                    node,
+                    {
+                        "generated_at": to_iso(utc_now()),
+                        "capabilities": capabilities,
+                        "recommendation": {
+                            "gpus": [0],
+                            "start_at": "2030-01-01T00:00:00Z",
+                            "end_at": "2030-01-01T00:30:00Z",
+                        },
+                    },
+                    None,
+                )
+                result = NodeReply(
+                    node,
+                    {
+                        "status": "created",
+                        "reservation": {
+                            "short_id": "12345678",
+                            "gpus": [0],
+                            "start_at": "2030-01-01T00:00:00Z",
+                            "end_at": "2030-01-01T00:30:00Z",
+                        },
+                    },
+                    None,
+                )
+                with (
+                    mock.patch("bk.cluster.load_cluster_config", return_value=config),
+                    mock.patch(
+                        "bk.cluster._parallel", return_value=[reply]
+                    ) as parallel,
+                    mock.patch(
+                        "bk.cluster._invoke_idempotent_write", return_value=result
+                    ) as write,
+                    redirect_stdout(StringIO()),
+                ):
+                    self.assertEqual(run_cluster_cli(arguments), 0)
+                recommendation = parallel.call_args.args[1]
+                self.assertEqual(
+                    recommendation[recommendation.index("--mode") + 1],
+                    expected_mode,
+                )
+                booking = write.call_args.args[1]
+                self.assertEqual(booking[0] == "x", expected_mode == "exclusive")
+
+        with self.assertRaisesRegex(BookingError, "specified more than once"):
+            run_cluster_cli(["x", "1", "30m", "--mode", "shared"])
+
+    def test_invalid_short_booking_is_rejected_before_node_transport(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        for arguments, message in (
+            (["1", "later"], "duration"),
+            (["1", "30m", "--start", "tonight"], "isoformat"),
+            (["1", "30m", "--gpu", "0,nope"], "GPU indexes"),
+            (["1", "30m", "--mem", "large"], "memory"),
+        ):
+            with self.subTest(arguments=arguments):
+                with (
+                    mock.patch("bk.cluster.load_cluster_config", return_value=config),
+                    mock.patch("bk.cluster._parallel") as parallel,
+                    self.assertRaisesRegex(BookingError, message),
+                ):
+                    run_cluster_cli(arguments)
+                parallel.assert_not_called()
+
     def test_catalog_write_round_trips_principal_mapping(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "cluster.json"
@@ -217,8 +298,16 @@ class ClusterTests(unittest.TestCase):
             }
 
         archived = [
-            ArchivedUsage(local.node_id, "one", now, now + timedelta(days=1), payload(os.getuid(), 60)),
-            ArchivedUsage(remote.node_id, "two", now, now + timedelta(days=1), payload(2001, 120)),
+            ArchivedUsage(
+                local.node_id,
+                "one",
+                now,
+                now + timedelta(days=1),
+                payload(os.getuid(), 60),
+            ),
+            ArchivedUsage(
+                remote.node_id, "two", now, now + timedelta(days=1), payload(2001, 120)
+            ),
         ]
         output = StringIO()
         with (
@@ -325,7 +414,9 @@ class ClusterTests(unittest.TestCase):
                 load_cluster_config(duplicate_nodes)
 
     def test_ssh_command_is_noninteractive_and_shell_quotes_remote_arguments(self):
-        node = ClusterNode("gpu-b", "b" * 20, "ssh", "user@gpu-b", "/opt/gpubk/bin/bk", 0, 8)
+        node = ClusterNode(
+            "gpu-b", "b" * 20, "ssh", "user@gpu-b", "/opt/gpubk/bin/bk", 0, 8
+        )
         with mock.patch(
             "bk.cluster_transport.shutil.which",
             return_value="/usr/bin/ssh",
@@ -374,11 +465,18 @@ class ClusterTests(unittest.TestCase):
             NodeReply(second, payload, None),
         ]
         output = StringIO()
-        with mock.patch("bk.cluster._parallel", return_value=replies), redirect_stdout(output):
+        with (
+            mock.patch("bk.cluster._parallel", return_value=replies),
+            redirect_stdout(output),
+        ):
             with mock.patch("bk.cluster.load_cluster_config", return_value=config):
                 status = run_cluster_cli(["recommend", "1", "30m"])
         self.assertEqual(status, 0)
-        rows = [line for line in output.getvalue().splitlines() if line.startswith(("preferred", "slow-priority"))]
+        rows = [
+            line
+            for line in output.getvalue().splitlines()
+            if line.startswith(("preferred", "slow-priority"))
+        ]
         self.assertTrue(rows[0].startswith("preferred"))
 
     def test_unreachable_node_does_not_block_a_healthy_recommendation(self):
@@ -470,7 +568,9 @@ class ClusterTests(unittest.TestCase):
             run_cluster_cli(["book", "1", "30m"])
         parallel.assert_not_called()
 
-    def test_cluster_status_and_check_report_disabled_nodes_without_contacting_them(self):
+    def test_cluster_status_and_check_report_disabled_nodes_without_contacting_them(
+        self,
+    ):
         enabled = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
         disabled = ClusterNode(
             "gpu-b",
@@ -576,7 +676,59 @@ class ClusterTests(unittest.TestCase):
         ):
             self.assertEqual(run_cluster_cli(["recommend", "1", "30m"]), 0)
         self.assertIn("healthy", output.getvalue())
-        self.assertNotIn("malformed", output.getvalue())
+        self.assertIn("malformed", output.getvalue())
+        self.assertIn("invalid recommendation", output.getvalue())
+
+    def test_recommendation_json_reports_rejections_and_write_compatibility(self):
+        malformed = ClusterNode("malformed", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        healthy = ClusterNode("healthy", "b" * 20, "ssh", "b", "/usr/bin/bk", 1, 8)
+        config = ClusterConfig(Path("/cluster.json"), (malformed, healthy))
+        generated = to_iso(utc_now())
+        replies = [
+            NodeReply(
+                malformed,
+                {
+                    "generated_at": generated,
+                    "recommendation": {"end_at": "2030-01-01T00:30:00Z"},
+                },
+                None,
+            ),
+            NodeReply(
+                healthy,
+                {
+                    "generated_at": generated,
+                    "capabilities": {
+                        "federated_node_identity": True,
+                        "idempotent_booking": True,
+                        "operation_status": True,
+                        "preflight_idempotent_replay": True,
+                    },
+                    "recommendation": {
+                        "gpus": [0],
+                        "start_at": "2030-01-01T00:00:00Z",
+                        "end_at": "2030-01-01T00:30:00Z",
+                    },
+                },
+                None,
+            ),
+        ]
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel", return_value=replies),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["recommend", "1", "30m", "--json"]), 0)
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["selected_node"], "healthy")
+        nodes = {item["name"]: item for item in payload["nodes"]}
+        self.assertEqual(
+            nodes["malformed"]["rejected_reason"], "invalid recommendation"
+        )
+        self.assertFalse(nodes["malformed"]["write_compatible"])
+        self.assertIsNone(nodes["healthy"]["rejected_reason"])
+        self.assertTrue(nodes["healthy"]["write_compatible"])
 
     def test_recommendation_rejects_wrong_or_duplicate_gpu_placement(self):
         malformed = ClusterNode("malformed", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
@@ -617,7 +769,69 @@ class ClusterTests(unittest.TestCase):
         ):
             self.assertEqual(run_cluster_cli(["recommend", "1", "30m"]), 0)
         self.assertIn("healthy", output.getvalue())
-        self.assertNotIn("malformed", output.getvalue())
+        self.assertIn("malformed", output.getvalue())
+        self.assertIn("invalid recommendation", output.getvalue())
+
+    def test_recommendation_rejects_wrong_duration_and_request_echo(self):
+        wrong_duration = ClusterNode(
+            "duration", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8
+        )
+        wrong_echo = ClusterNode("echo", "b" * 20, "ssh", "b", "/usr/bin/bk", 1, 8)
+        healthy = ClusterNode("healthy", "c" * 20, "ssh", "c", "/usr/bin/bk", 2, 8)
+        config = ClusterConfig(
+            Path("/cluster.json"), (wrong_duration, wrong_echo, healthy)
+        )
+        generated = to_iso(utc_now())
+
+        def payload(end: str, *, count: int = 1):
+            return {
+                "generated_at": generated,
+                "request": {
+                    "count": count,
+                    "duration_seconds": 1800,
+                    "mode": "shared",
+                    "allow_queue": False,
+                    "start_at": "2030-01-01T00:00:00Z",
+                },
+                "recommendation": {
+                    "gpus": [0],
+                    "start_at": "2030-01-01T00:00:00Z",
+                    "end_at": end,
+                },
+            }
+
+        replies = [
+            NodeReply(wrong_duration, payload("2030-01-01T00:25:00Z"), None),
+            NodeReply(
+                wrong_echo,
+                payload("2030-01-01T00:30:00Z", count=2),
+                None,
+            ),
+            NodeReply(healthy, payload("2030-01-01T00:30:00Z"), None),
+        ]
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel", return_value=replies),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(
+                run_cluster_cli(
+                    [
+                        "recommend",
+                        "1",
+                        "30m",
+                        "--start",
+                        "2030-01-01T00:00:00Z",
+                    ]
+                ),
+                0,
+            )
+        rendered = output.getvalue()
+        self.assertIn("duration", rendered)
+        self.assertIn("echo", rendered)
+        self.assertIn("healthy", rendered)
+        self.assertIn("request echo does not match", rendered)
 
     def test_malformed_context_fields_do_not_break_cluster_status(self):
         malformed = ClusterNode("malformed", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
@@ -837,7 +1051,9 @@ class ClusterTests(unittest.TestCase):
         with (
             mock.patch("bk.cluster.load_cluster_config", return_value=config),
             mock.patch("bk.cluster._parallel", return_value=[reply]) as parallel,
-            mock.patch("bk.cluster._invoke_idempotent_write", return_value=result) as write,
+            mock.patch(
+                "bk.cluster._invoke_idempotent_write", return_value=result
+            ) as write,
             redirect_stdout(StringIO()),
         ):
             self.assertEqual(
@@ -998,7 +1214,11 @@ class ClusterTests(unittest.TestCase):
                             "sampled_gpu_seconds": 120,
                             "avg_sm_percent": 50,
                         },
-                        {"uid": 30, "username": "duplicate-name", "active_gpu_seconds": 5},
+                        {
+                            "uid": 30,
+                            "username": "duplicate-name",
+                            "active_gpu_seconds": 5,
+                        },
                     ]
                 },
                 None,
@@ -1015,7 +1235,11 @@ class ClusterTests(unittest.TestCase):
                             "sampled_gpu_seconds": 240,
                             "avg_sm_percent": 25,
                         },
-                        {"uid": 30, "username": "duplicate-name", "active_gpu_seconds": 7},
+                        {
+                            "uid": 30,
+                            "username": "duplicate-name",
+                            "active_gpu_seconds": 7,
+                        },
                     ]
                 },
                 None,
@@ -1132,6 +1356,28 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(payload["node"], "gpu-a")
         self.assertEqual(payload["operation_id"], "cancel-1")
 
+    def test_disabled_node_rejects_edit_and_cancel_without_transport(self):
+        node = ClusterNode(
+            "gpu-a",
+            "a" * 20,
+            "ssh",
+            "gpu-a",
+            "/usr/bin/bk",
+            0,
+            8,
+            False,
+        )
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._invoke") as invoke,
+        ):
+            with self.assertRaisesRegex(BookingError, "disabled"):
+                run_cluster_cli(["edit", "gpu-a/123456", "-d", "1h"])
+            with self.assertRaisesRegex(BookingError, "disabled"):
+                run_cluster_cli(["cancel", "gpu-a/123456"])
+        invoke.assert_not_called()
+
     def test_uncertain_cancel_reports_the_exact_retry_operation_id(self):
         node = ClusterNode("gpu-a", "a" * 20, "ssh", "gpu-a", "/usr/bin/bk", 0, 8)
         config = ClusterConfig(Path("/cluster.json"), (node,))
@@ -1161,9 +1407,7 @@ class ClusterTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(BookingError, "retry.*--op-id cancel-1"),
         ):
-            run_cluster_cli(
-                ["cancel", "gpu-a/12345678", "--op-id", "cancel-1"]
-            )
+            run_cluster_cli(["cancel", "gpu-a/12345678", "--op-id", "cancel-1"])
 
     def test_usage_rejects_invalid_limit_before_loading_cluster_state(self):
         with (
@@ -1198,6 +1442,48 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(payload["schema_version"], CLUSTER_SCHEMA_VERSION)
         self.assertEqual(payload["nodes"][0]["node_id"], node.node_id)
+
+    def test_status_human_table_shows_owner_slots_and_expected_vram(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "gpu-a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        reply = NodeReply(
+            node,
+            {
+                "generated_at": to_iso(utc_now()),
+                "actor": {"uid": 10, "username": "user"},
+                "policy": {"gpu_count": 1},
+                "reservations": [
+                    {
+                        "id": "12345678-1234-1234-1234-123456789abc",
+                        "short_id": "12345678",
+                        "username": "user",
+                        "mine": True,
+                        "mode": "shared",
+                        "share_units_per_gpu": 3,
+                        "share_capacity_units_per_gpu": 4,
+                        "expected_memory_mb_per_gpu": 12288,
+                        "gpus": [0],
+                        "start_at": "2030-01-01T00:00:00Z",
+                        "end_at": "2030-01-01T01:00:00Z",
+                    }
+                ],
+            },
+            None,
+        )
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel", return_value=[reply]),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["status"]), 0)
+        rendered = output.getvalue()
+        self.assertIn("Own", rendered)
+        self.assertIn("Req", rendered)
+        self.assertIn("VRAM", rendered)
+        self.assertIn("gpu-a/12345678", rendered)
+        self.assertIn("3/4", rendered)
+        self.assertIn("12G", rendered)
 
 
 if __name__ == "__main__":

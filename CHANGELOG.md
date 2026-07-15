@@ -4,6 +4,11 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Make cluster booking follow the ordinary short syntax (`bk c 2 1h`, `bk c x 1 30m`),
+  validate remote recommendation duration, exact start, and echoed intent before ranking,
+  block edits/cancels to maintenance nodes, and show shared-slot and VRAM requests in the
+  cluster reservation table. The cluster TUI now pages large node lists and lets users focus
+  reservations for complete read-only details and copyable lifecycle commands.
 - Add non-destructive cluster node disable/enable operations, skip maintenance nodes
   without SSH delays or placement, retain their identity mappings and history, and add
   `bk cluster check` for per-user reachability, identity, clock, GPU, and write-capability
