@@ -100,6 +100,24 @@ bk doctor --probe --require-monitor --strict
 
 升级会保留数据和策略。涉及删除或所有权变更时，应先使用 `--dry-run` 预览。
 
+### 卸载多人服务器部署
+
+管理员卸载会删除服务、配置、全局 `bk` 链接，并可选择清除全部 GPUBK 数据。Python
+包安装在独立环境 `/opt/gpubk` 中，不属于系统 `python3`；最后直接删除这个环境即可：
+
+```bash
+sudo systemctl disable --now gpubk-monitor.service gpubk-broker.service
+sudo /opt/gpubk/bin/bk admin services uninstall --yes
+sudo /opt/gpubk/bin/bk admin uninstall --purge-data --yes
+sudo rm -rf /opt/gpubk
+hash -r
+command -v bk || echo "GPUBK 已卸载"
+```
+
+需要先核对删除范围时，运行
+`sudo /opt/gpubk/bin/bk admin uninstall --dry-run --purge-data`。不要运行
+`python3 -m pip uninstall gpubk`：系统 Python 看不到安装在 `/opt/gpubk` 中的包。
+
 ## 多机协同
 
 cluster 模式连接多个各自独立、安全的 GPUBK 节点。每台 GPU 服务器仍保留自己的

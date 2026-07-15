@@ -18,6 +18,7 @@ from bk.admin import (
     AdminInitPlan,
     INSTALL_MANIFEST_MODE,
     _detected_gpu_count,
+    _python_uninstall_hint,
     _validate_plan,
     apply_admin_command_link_install,
     apply_admin_gpu_policy,
@@ -63,6 +64,25 @@ class TtyInput(StringIO):
 
 
 class AdminInitTests(unittest.TestCase):
+    def test_python_uninstall_hint_for_isolated_environment(self):
+        with mock.patch.object(admin_module.sys, "prefix", "/opt/gpubk"), mock.patch.object(
+            admin_module.sys, "base_prefix", "/usr"
+        ), mock.patch.object(
+            admin_module.sys, "executable", "/opt/gpubk/bin/python"
+        ):
+            hint = _python_uninstall_hint()
+
+        self.assertIn("sudo rm -rf /opt/gpubk", hint)
+        self.assertNotIn("pip uninstall", hint)
+
+    def test_python_uninstall_hint_for_system_interpreter(self):
+        with mock.patch.object(admin_module.sys, "prefix", "/usr"), mock.patch.object(
+            admin_module.sys, "base_prefix", "/usr"
+        ), mock.patch.object(admin_module.sys, "executable", "/usr/bin/python3"):
+            hint = _python_uninstall_hint()
+
+        self.assertIn("/usr/bin/python3 -m pip uninstall gpubk", hint)
+
     def plan(self, root: Path, **changes) -> AdminInitPlan:
         identity = non_root_identity()
         values = {

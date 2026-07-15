@@ -10,6 +10,7 @@ import json
 import os
 import pwd
 import shutil
+import shlex
 import socket
 import stat
 import subprocess
@@ -1986,10 +1987,23 @@ def _run_admin_uninstall(args: argparse.Namespace) -> int:
     else:
         print(f"removed server configuration: {config_file}")
         print("preserved: service account and Unix groups were never modified")
-        print(
-            "next: uninstall the Python package with 'python3 -m pip uninstall gpubk'"
-        )
+        print(_python_uninstall_hint())
     return 0
+
+
+def _python_uninstall_hint() -> str:
+    prefix = Path(sys.prefix).resolve()
+    base_prefix = Path(getattr(sys, "base_prefix", sys.prefix)).resolve()
+    executable = Path(sys.executable).resolve()
+    if prefix != base_prefix:
+        return (
+            "next: remove the isolated Python environment with "
+            f"'sudo rm -rf {shlex.quote(str(prefix))}'"
+        )
+    return (
+        "next: uninstall the Python package from this interpreter with "
+        f"'{shlex.quote(str(executable))} -m pip uninstall gpubk'"
+    )
 
 
 def _run_admin_transfer(args: argparse.Namespace) -> int:

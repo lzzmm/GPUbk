@@ -107,6 +107,26 @@ bk doctor --probe --require-monitor --strict
 The installer preserves data and policy during upgrades. Preview destructive or
 ownership-changing operations with `--dry-run` first.
 
+### Uninstall a shared server
+
+The administrative uninstall removes services, configuration, the global `bk`
+link, and optionally all GPUBK data. The Python package lives inside
+`/opt/gpubk`, not in the system `python3`, so remove that environment last:
+
+```bash
+sudo systemctl disable --now gpubk-monitor.service gpubk-broker.service
+sudo /opt/gpubk/bin/bk admin services uninstall --yes
+sudo /opt/gpubk/bin/bk admin uninstall --purge-data --yes
+sudo rm -rf /opt/gpubk
+hash -r
+command -v bk || echo "GPUBK removed"
+```
+
+Use `sudo /opt/gpubk/bin/bk admin uninstall --dry-run --purge-data` first when
+you want to inspect exactly what will be removed. Do not run `python3 -m pip
+uninstall gpubk`: the system interpreter cannot see a package installed in
+`/opt/gpubk`.
+
 ## Multiple Servers
 
 Cluster mode federates independently safe GPUBK hosts. Every GPU server keeps its
