@@ -146,9 +146,12 @@ for final versions and their immutable release assets.
     digests, and installs the wheel back from TestPyPI. Only then does the protected `pypi`
     environment request approval to promote the exact same wheel and sdist.
 11. Approve `pypi` and wait for its automatic digest comparison and installation smoke test.
-    Download the exact workflow artifact, confirm its recorded hashes, create a draft GitHub Release
-    for the same tag, attach the wheel and sdist, then publish the draft. Never rebuild an artifact
-    locally for promotion. Release immutability locks the published tag and assets and creates a
+    The workflow then creates a draft GitHub Release for the same tag, attaches the exact wheel,
+    sdist, and checksum file, downloads the draft assets, rejects missing or unexpected names,
+    verifies the recorded distribution hashes, and only then publishes the draft. Never rebuild
+    or upload an artifact locally for promotion. If this final job is interrupted, use GitHub's
+    **Re-run failed jobs** action; it resumes the existing draft and refuses to replace an already
+    published release. Release immutability locks the published tag and assets and creates a
     release attestation.
 
 The workflow rejects a tag that is lightweight, points anywhere other than the

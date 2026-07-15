@@ -332,18 +332,60 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: python-package-distributions
-      - name: Publish the verified GitHub Release
+      - name: Stage, verify, and publish the immutable GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
         shell: bash
-        run: >-
-          gh release create "$GITHUB_REF_NAME"
-          dist/* SHA256SUMS
-          --repo "$GITHUB_REPOSITORY"
-          --verify-tag
-          --title "GPUBK $VERSION"
-          --generate-notes
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          if state=$(gh release view "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json isDraft \
+            --jq '.isDraft' 2>/dev/null); then
+            if [[ "$state" != "true" ]]; then
+              echo "GitHub Release $tag is already published; refusing to replace it" >&2
+              exit 1
+            fi
+          else
+            gh release create "$tag" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --draft \
+              --title "GPUBK $VERSION" \
+              --generate-notes
+          fi
+
+          gh release upload "$tag" dist/* SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --clobber
+
+          rm -rf release-verify
+          mkdir release-verify
+          gh release download "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --dir release-verify
+          python - <<'PY'
+          from pathlib import Path
+
+          expected = {path.name for path in Path("dist").iterdir() if path.is_file()}
+          expected.add("SHA256SUMS")
+          actual = {
+              path.name for path in Path("release-verify").iterdir() if path.is_file()
+          }
+          if actual != expected:
+              raise SystemExit(
+                  "GitHub Release asset mismatch: "
+                  f"missing={sorted(expected - actual)!r} "
+                  f"unexpected={sorted(actual - expected)!r}"
+              )
+          PY
+          (cd release-verify && sha256sum --check SHA256SUMS)
+
+          gh release edit "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --draft=false
 
   promote-pypi:
     if: >-
