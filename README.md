@@ -497,6 +497,12 @@ Cluster controls remain hidden when no catalog exists. With a catalog, `bk c` sh
 all nodes and active reservations, `bk c rec 2 1h` compares legal starts,
 `bk c 2 1h` books the best single node, `bk c x 2 1h` does the same exclusively,
 `bk c tui` opens the node/reservation browser, and `bk @NODE 2 1h` targets one node.
+Use `bk c 1 2h -- python /absolute/path/train.py` to attach a scheduled command to
+the automatically selected host. GPUBK-generated retry and JSON flags remain before
+`--`; option-like workload arguments remain untouched after it. A mixed-version node
+must advertise scheduled-job and private-spec support before it can receive this write.
+Use executable and script paths valid on the destination: the remote non-interactive
+SSH session supplies its working directory and `PATH`, not the caller's local directory.
 In the browser, `Tab` changes focus and `Enter` opens complete reservation details.
 Older nodes remain visible during
 rolling upgrades but are read-only until they advertise the required safe-write
@@ -685,6 +691,7 @@ bk c check
 bk c rec 1 30m
 bk c 1 30m -j
 bk c x 1 30m          # exclusive, earliest node
+bk c 1 2h -- python /absolute/path/train.py
 ```
 
 `bk cluster -h` and every subcommand's `-h` work before this catalog exists. For

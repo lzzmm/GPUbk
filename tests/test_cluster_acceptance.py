@@ -122,18 +122,19 @@ class ClusterAcceptanceTests(unittest.TestCase):
         health = {"ready": True}
         recommendation = {"selected_node": "node-1"}
 
-        def booking(node, reservation_id):
+        def booking(node, reservation_id, *, scheduled=False):
             return {
                 "node": {"name": node},
                 "result": {
                     "reservation": {
                         "id": reservation_id,
                         "short_id": reservation_id[:8],
+                        **({"job": {"status": "pending"}} if scheduled else {}),
                     }
                 },
             }
 
-        first = booking("node-1", "reservation-a")
+        first = booking("node-1", "reservation-a", scheduled=True)
         second = booking("node-2", "reservation-b")
         final = {
             "nodes": [
@@ -152,7 +153,9 @@ class ClusterAcceptanceTests(unittest.TestCase):
             "cancelled",
             final,
         ]
-        with mock.patch.object(ACCEPTANCE, "run_client", side_effect=side_effect) as client:
+        with mock.patch.object(
+            ACCEPTANCE, "run_client", side_effect=side_effect
+        ) as client:
             result = ACCEPTANCE.exercise_cluster(
                 Path("/tmp/bk"),
                 Path("/tmp/cluster.json"),
@@ -161,23 +164,33 @@ class ClusterAcceptanceTests(unittest.TestCase):
         self.assertEqual(result["replay"]["node"]["name"], "node-1")
         self.assertTrue(result["health"]["ready"])
         self.assertEqual(client.call_count, 9)
+        first_arguments = client.call_args_list[3].args[2:]
+        separator = first_arguments.index("--")
+        self.assertIn("--op-id", first_arguments[:separator])
+        self.assertEqual(
+            first_arguments[separator + 1 :],
+            ("/bin/true", "--json", "--op-id", "workload-value"),
+        )
+        self.assertEqual(client.call_args_list[5].args[2:], first_arguments)
 
     def test_failed_run_still_writes_a_private_report(self):
         with tempfile.TemporaryDirectory() as raw_directory:
             output = Path(raw_directory) / "reports"
             with (
-                mock.patch.object(ACCEPTANCE.shutil, "which", return_value="/usr/bin/tool"),
+                mock.patch.object(
+                    ACCEPTANCE.shutil, "which", return_value="/usr/bin/tool"
+                ),
                 mock.patch.object(
                     ACCEPTANCE,
                     "candidate_wheel",
                     side_effect=ACCEPTANCE.ClusterAcceptanceError("build failed"),
                 ),
                 redirect_stdout(io.StringIO()),
-                self.assertRaisesRegex(ACCEPTANCE.ClusterAcceptanceError, "build failed"),
+                self.assertRaisesRegex(
+                    ACCEPTANCE.ClusterAcceptanceError, "build failed"
+                ),
             ):
-                ACCEPTANCE.main(
-                    ["gpu-a", "gpu-b", "--output-dir", str(output)]
-                )
+                ACCEPTANCE.main(["gpu-a", "gpu-b", "--output-dir", str(output)])
             reports = list(output.glob("cluster-*.json"))
             self.assertEqual(len(reports), 1)
             payload = json.loads(reports[0].read_text(encoding="utf-8"))

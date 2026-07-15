@@ -20,6 +20,7 @@ from bk.cluster import (
     _node_command,
     load_cluster_config,
     run_cluster_cli,
+    run_node_cli,
     write_cluster_config,
 )
 from bk.models import BookingError
@@ -183,6 +184,176 @@ class ClusterTests(unittest.TestCase):
                 ):
                     run_cluster_cli(arguments)
                 parallel.assert_not_called()
+
+    def test_automatic_cluster_job_preserves_command_and_skips_legacy_nodes(self):
+        legacy = ClusterNode("legacy", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        current = ClusterNode("current", "b" * 20, "ssh", "b", "/usr/bin/bk", 1, 8)
+        config = ClusterConfig(Path("/cluster.json"), (legacy, current))
+        generated = to_iso(utc_now())
+        placement = {
+            "generated_at": generated,
+            "recommendation": {
+                "gpus": [0],
+                "start_at": "2030-01-01T00:00:00Z",
+                "end_at": "2030-01-01T00:30:00Z",
+            },
+        }
+        base_capabilities = {
+            "federated_node_identity": True,
+            "idempotent_booking": True,
+            "operation_status": True,
+            "preflight_idempotent_replay": True,
+        }
+        replies = [
+            NodeReply(
+                legacy,
+                {**placement, "capabilities": base_capabilities},
+                None,
+            ),
+            NodeReply(
+                current,
+                {
+                    **placement,
+                    "capabilities": {
+                        **base_capabilities,
+                        "scheduled_jobs": True,
+                        "scheduled_job_path_snapshot": True,
+                        "private_job_specs": True,
+                    },
+                },
+                None,
+            ),
+        ]
+        result = NodeReply(
+            current,
+            {
+                "status": "created",
+                "reservation": {
+                    "short_id": "12345678",
+                    "gpus": [0],
+                    "start_at": "2030-01-01T00:00:00Z",
+                    "end_at": "2030-01-01T00:30:00Z",
+                },
+            },
+            None,
+        )
+        job = [
+            "python",
+            "train.py",
+            "--json",
+            "--op-id",
+            "job-value",
+            "--mode",
+            "debug",
+            "; rm -rf /",
+        ]
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel", return_value=replies) as parallel,
+            mock.patch(
+                "bk.cluster._invoke_idempotent_write", return_value=result
+            ) as write,
+            redirect_stdout(StringIO()),
+        ):
+            self.assertEqual(run_cluster_cli(["x", "1", "30m", "--", *job]), 0)
+
+        self.assertNotIn("--", parallel.call_args.args[1])
+        self.assertIs(write.call_args.args[0], current)
+        sent = write.call_args.args[1]
+        separator = sent.index("--")
+        self.assertEqual(sent[0], "x")
+        self.assertIn("--op-id", sent[:separator])
+        self.assertIn("--json", sent[:separator])
+        self.assertEqual(sent[separator + 1 :], job)
+
+    def test_explicit_node_job_injects_internal_options_before_delimiter(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        context = NodeReply(
+            node,
+            {
+                "capabilities": {
+                    "federated_node_identity": True,
+                    "idempotent_booking": True,
+                    "operation_status": True,
+                    "preflight_idempotent_replay": True,
+                    "scheduled_jobs": True,
+                    "scheduled_job_path_snapshot": True,
+                    "private_job_specs": True,
+                }
+            },
+            None,
+        )
+        result = NodeReply(
+            node,
+            {
+                "status": "created",
+                "reservation": {
+                    "short_id": "12345678",
+                    "gpus": [0],
+                    "start_at": "2030-01-01T00:00:00Z",
+                    "end_at": "2030-01-01T00:30:00Z",
+                },
+            },
+            None,
+        )
+        job = ["python", "train.py", "--json", "--op-id", "job-value"]
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._invoke", return_value=context),
+            mock.patch("bk.cluster.uuid.uuid4", return_value="generated-op"),
+            mock.patch(
+                "bk.cluster._invoke_idempotent_write", return_value=result
+            ) as write,
+            redirect_stdout(StringIO()),
+        ):
+            self.assertEqual(run_node_cli("gpu-a", ["1", "30m", "--", *job]), 0)
+
+        self.assertEqual(write.call_args.args[2], "generated-op")
+        sent = write.call_args.args[1]
+        separator = sent.index("--")
+        self.assertEqual(sent[:separator].count("--op-id"), 1)
+        self.assertEqual(sent[:separator].count("--json"), 1)
+        self.assertEqual(sent[separator + 1 :], job)
+
+    def test_cluster_jobs_fail_closed_on_missing_capabilities(self):
+        node = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        context = NodeReply(
+            node,
+            {
+                "capabilities": {
+                    "federated_node_identity": True,
+                    "idempotent_booking": True,
+                    "operation_status": True,
+                    "preflight_idempotent_replay": True,
+                }
+            },
+            None,
+        )
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._invoke", return_value=context),
+            mock.patch("bk.cluster._invoke_idempotent_write") as write,
+            self.assertRaisesRegex(BookingError, "scheduled_jobs"),
+        ):
+            run_node_cli("gpu-a", ["1", "30m", "--", "python", "train.py"])
+        write.assert_not_called()
+
+    def test_cluster_job_delimiter_errors_before_transport(self):
+        with (
+            mock.patch("bk.cluster.load_cluster_config") as load,
+            self.assertRaisesRegex(BookingError, "job command"),
+        ):
+            run_cluster_cli(["1", "30m", "--"])
+        load.assert_not_called()
+
+        with (
+            mock.patch("bk.cluster.load_cluster_config") as load,
+            self.assertRaisesRegex(BookingError, "does not accept a job command"),
+        ):
+            run_cluster_cli(["rec", "1", "30m", "--", "echo", "unused"])
+        load.assert_not_called()
 
     def test_catalog_write_round_trips_principal_mapping(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Preserve the `--` job-command boundary for explicit and automatically selected cluster
+  bookings, inject retry and JSON options only into the GPUBK side, and require scheduled-job
+  capabilities before routing a command to a mixed-version node. The isolated multi-host
+  acceptance runner now books and replays a private scheduled command with option-like arguments.
 - Make cluster booking follow the ordinary short syntax (`bk c 2 1h`, `bk c x 1 30m`),
   validate remote recommendation duration, exact start, and echoed intent before ranking,
   block edits/cancels to maintenance nodes, and show shared-slot and VRAM requests in the

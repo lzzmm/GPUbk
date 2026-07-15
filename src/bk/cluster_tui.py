@@ -429,6 +429,7 @@ def _cluster_command_lines(node: ClusterNode) -> list[str]:
         "Book the earliest node:",
         "  bk c 1 30m",
         "  bk c x 1 1h",
+        "  bk c 1 2h -- python /abs/path/train.py",
         "",
         f"Book this node ({node.name}):",
         f"  bk @{node.name} 1 30m",

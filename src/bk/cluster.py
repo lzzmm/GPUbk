@@ -47,6 +47,12 @@ _BOOK_CAPABILITIES = (
     "operation_status",
     "preflight_idempotent_replay",
 )
+_SCHEDULED_BOOK_CAPABILITIES = (
+    *_BOOK_CAPABILITIES,
+    "scheduled_jobs",
+    "scheduled_job_path_snapshot",
+    "private_job_specs",
+)
 _EDIT_CAPABILITIES = (
     "federated_node_identity",
     "idempotent_edit",
@@ -92,9 +98,15 @@ class ClusterBookingIntent:
     share: Optional[int]
     operation_id: Optional[str]
     json_output: bool
+    command_argv: Optional[tuple[str, ...]]
 
     @classmethod
-    def from_namespace(cls, args: argparse.Namespace) -> "ClusterBookingIntent":
+    def from_namespace(
+        cls,
+        args: argparse.Namespace,
+        *,
+        command_argv: Optional[Sequence[str]] = None,
+    ) -> "ClusterBookingIntent":
         return cls(
             count=args.count,
             duration=args.duration,
@@ -106,6 +118,7 @@ class ClusterBookingIntent:
             share=args.share,
             operation_id=args.op_id,
             json_output=args.json,
+            command_argv=(tuple(command_argv) if command_argv is not None else None),
         )
 
     def recommendation_argv(self) -> list[str]:
@@ -123,7 +136,10 @@ class ClusterBookingIntent:
         argv = [] if self.mode == "shared" else ["x"]
         argv += [str(self.count), self.duration]
         argv = _append_cluster_booking_options(argv, self)
-        return [*argv, "--op-id", operation_id, "--json"]
+        argv += ["--op-id", operation_id, "--json"]
+        if self.command_argv is not None:
+            argv += ["--", *self.command_argv]
+        return argv
 
 
 @dataclass(frozen=True)
@@ -281,8 +297,13 @@ def run_cluster_cli(argv: Sequence[str]) -> int:
         parsed = _cluster_status_parser("check").parse_args(_cluster_help_args(args))
         return _cluster_check(load_cluster_config(), json_output=parsed.json)
     if action in {"recommend", "rec"}:
+        booking_args, command_argv = _split_cluster_job_command(args)
+        if command_argv is not None:
+            raise BookingError(
+                "cluster recommend does not accept a job command; use 'bk c ... -- COMMAND' to book it"
+            )
         parsed = _cluster_booking_parser("bk cluster recommend").parse_args(
-            _cluster_help_args(args)
+            _cluster_help_args(booking_args)
         )
         return _cluster_recommend(
             load_cluster_config(),
@@ -290,12 +311,16 @@ def run_cluster_cli(argv: Sequence[str]) -> int:
             book=False,
         )
     if action in {"book", "b"}:
+        booking_args, command_argv = _split_cluster_job_command(args)
         parsed = _cluster_booking_parser("bk cluster book").parse_args(
-            _cluster_help_args(args)
+            _cluster_help_args(booking_args)
         )
         return _cluster_recommend(
             load_cluster_config(),
-            ClusterBookingIntent.from_namespace(parsed),
+            ClusterBookingIntent.from_namespace(
+                parsed,
+                command_argv=command_argv,
+            ),
             book=True,
         )
     if action in {"usage", "u"}:
@@ -345,10 +370,45 @@ def _normalize_cluster_action(argv: Sequence[str]) -> tuple[str, list[str]]:
         "exclusive": "exclusive",
     }
     if first in modes:
-        if any(item == "--mode" or item.startswith("--mode=") for item in args):
+        booking_args, command_argv = _split_cluster_job_command(args)
+        if any(item == "--mode" or item.startswith("--mode=") for item in booking_args):
             raise BookingError("cluster booking mode was specified more than once")
-        return "book", [*args, "--mode", modes[first]]
+        return "book", _join_cluster_job_command(
+            [*booking_args, "--mode", modes[first]],
+            command_argv,
+        )
     return first, args
+
+
+def _split_cluster_job_command(
+    argv: Sequence[str],
+) -> tuple[list[str], Optional[tuple[str, ...]]]:
+    args = list(argv)
+    if "--" not in args:
+        return args, None
+    separator = args.index("--")
+    command_argv = tuple(args[separator + 1 :])
+    if not command_argv:
+        raise BookingError("-- must be followed by a job command")
+    return args[:separator], command_argv
+
+
+def _join_cluster_job_command(
+    booking_args: Sequence[str],
+    command_argv: Optional[Sequence[str]],
+) -> list[str]:
+    result = list(booking_args)
+    if command_argv is not None:
+        result += ["--", *command_argv]
+    return result
+
+
+def _booking_capabilities(
+    command_argv: Optional[Sequence[str]],
+) -> tuple[str, ...]:
+    return (
+        _SCHEDULED_BOOK_CAPABILITIES if command_argv is not None else _BOOK_CAPABILITIES
+    )
 
 
 def run_node_cli(node_name: str, argv: Sequence[str]) -> int:
@@ -367,15 +427,20 @@ def run_node_cli(node_name: str, argv: Sequence[str]) -> int:
             "bk @NODE currently accepts booking commands only; use bk cluster "
             "for cross-node status, usage, edit, and cancel"
         )
-    requested_json = "--json" in command
+    booking_args, command_argv = _split_cluster_job_command(command)
+    requested_json = "--json" in booking_args
     context = _invoke(node, ["agent", "context", "--compact"])
-    _require_write_capabilities(context, _BOOK_CAPABILITIES)
-    operation_id = _argument_value(command, "--op-id")
+    _require_write_capabilities(
+        context,
+        _booking_capabilities(command_argv),
+    )
+    operation_id = _argument_value(booking_args, "--op-id")
     if operation_id is None:
         operation_id = str(uuid.uuid4())
-        command += ["--op-id", operation_id]
+        booking_args += ["--op-id", operation_id]
     if not requested_json:
-        command.append("--json")
+        booking_args.append("--json")
+    command = _join_cluster_job_command(booking_args, command_argv)
     reply = _invoke_idempotent_write(
         node,
         command,
@@ -660,6 +725,7 @@ def _cluster_recommend(
     book: bool,
 ) -> int:
     _validate_cluster_booking_intent(intent)
+    required_capabilities = _booking_capabilities(intent.command_argv)
     operation_id = intent.operation_id or str(uuid.uuid4())
     replay_node = None
     if book and intent.operation_id is not None:
@@ -677,9 +743,12 @@ def _cluster_recommend(
 
     if replay_node is not None:
         selected = _invoke(replay_node, ["agent", "context", "--compact"])
-        _require_write_capabilities(selected, _BOOK_CAPABILITIES)
+        _require_write_capabilities(selected, required_capabilities)
     else:
-        selected = _select_cluster_write_candidate(candidates)
+        selected = _select_cluster_write_candidate(
+            candidates,
+            required_capabilities,
+        )
     return _submit_cluster_booking(selected, intent, operation_id)
 
 
@@ -883,11 +952,12 @@ def _raise_no_cluster_candidate(
 
 def _select_cluster_write_candidate(
     candidates: Sequence[ClusterCandidate],
+    required_capabilities: Sequence[str] = _BOOK_CAPABILITIES,
 ) -> NodeReply:
     missing_by_node = {
         candidate.reply.node.name: _missing_capabilities(
             candidate.reply.payload,
-            _BOOK_CAPABILITIES,
+            required_capabilities,
         )
         for candidate in candidates
     }
@@ -912,6 +982,7 @@ def _emit_cluster_recommendation(
     rejected: dict[str, str],
 ) -> int:
     selected = candidates[0].reply
+    required_capabilities = _booking_capabilities(intent.command_argv)
     if intent.json_output:
         print(
             json.dumps(
@@ -928,7 +999,7 @@ def _emit_cluster_recommendation(
                             "rejected_reason": rejected.get(reply.node.name),
                             "write_compatible": not _missing_capabilities(
                                 reply.payload,
-                                _BOOK_CAPABILITIES,
+                                required_capabilities,
                             ),
                             "recommendation": reply.payload,
                         }
@@ -940,7 +1011,12 @@ def _emit_cluster_recommendation(
             )
         )
     else:
-        _print_cluster_candidates(candidates, replies, rejected)
+        _print_cluster_candidates(
+            candidates,
+            replies,
+            rejected,
+            required_capabilities,
+        )
     return 0
 
 
@@ -1837,6 +1913,7 @@ def _print_cluster_candidates(
     candidates: Sequence[ClusterCandidate],
     replies: Sequence[NodeReply],
     rejected: dict[str, str],
+    required_capabilities: Sequence[str] = _BOOK_CAPABILITIES,
 ) -> None:
     print(
         f"{'Node':<16} {'Choice':<8} {'Write':<6} {'GPUs':<12} "
@@ -1850,7 +1927,7 @@ def _print_cluster_candidates(
         print(
             f"{reply.node.name:<16} "
             f"{('best' if index == 0 else 'ready'):<8} "
-            f"{('yes' if not _missing_capabilities(reply.payload, _BOOK_CAPABILITIES) else 'no'):<6} "
+            f"{('yes' if not _missing_capabilities(reply.payload, required_capabilities) else 'no'):<6} "
             f"{_gpu_text(recommendation.get('gpus')):<12} "
             f"{_local_time(recommendation.get('start_at')):<27} "
             f"{_local_time(recommendation.get('end_at')):<27}"
@@ -1880,6 +1957,7 @@ Everyday commands:
   bk c rec 2 1h              compare earliest legal placements without writing
   bk c 2 1h                  book the best single node in shared mode
   bk c x 2 1h                book the best single node exclusively
+  bk c 1 2h -- COMMAND       book and schedule a command on the selected node
   bk c u -s 7d               aggregate this SSH identity's sampled history
   bk c history -s 30d        read verified offline history when configured
   bk c tui                   browse nodes and reservation details

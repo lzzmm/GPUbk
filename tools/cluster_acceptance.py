@@ -501,9 +501,28 @@ def exercise_cluster(
     operation_a = "cluster-acceptance-a-" + secrets.token_hex(8)
     operation_b = "cluster-acceptance-b-" + secrets.token_hex(8)
     booking_args = ("cluster", "x", "1", "10m")
-    first = run_client(bk, catalog, *booking_args, "--op-id", operation_a, "--json")
+    job_argv = ("/bin/true", "--json", "--op-id", "workload-value")
+    first = run_client(
+        bk,
+        catalog,
+        *booking_args,
+        "--op-id",
+        operation_a,
+        "--json",
+        "--",
+        *job_argv,
+    )
     second = run_client(bk, catalog, *booking_args, "--op-id", operation_b, "--json")
-    replay = run_client(bk, catalog, *booking_args, "--op-id", operation_a, "--json")
+    replay = run_client(
+        bk,
+        catalog,
+        *booking_args,
+        "--op-id",
+        operation_a,
+        "--json",
+        "--",
+        *job_argv,
+    )
     if not all(
         isinstance(item, dict) for item in (recommendation, first, second, replay)
     ):
@@ -516,6 +535,10 @@ def exercise_cluster(
         )
     first_reservation = first["result"]["reservation"]
     replay_reservation = replay["result"]["reservation"]
+    if not isinstance(first_reservation.get("job"), dict):
+        raise ClusterAcceptanceError(
+            "cluster scheduled-command booking omitted public job state"
+        )
     if (
         replay["node"]["name"] != first_node
         or replay_reservation["id"] != first_reservation["id"]

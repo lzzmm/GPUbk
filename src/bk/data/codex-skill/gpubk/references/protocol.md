@@ -24,6 +24,7 @@ bk c status --json
 bk c check --json
 bk c rec COUNT DURATION --json
 bk c COUNT DURATION --op-id ID --json
+bk c COUNT DURATION --op-id ID --json -- COMMAND ARG...
 ```
 
 Omitting `--start` uses the active configured booking interval when possible, then permits earliest-slot queueing. Providing `--start` means exact placement at the active slice boundary or a future boundary; a new write to an older historical slice is rejected. Read `policy.granularity_minutes` from context instead of assuming five minutes. Human CLI users may use `--at`; Agents should keep using explicit ISO 8601 and structured fields.
@@ -164,6 +165,11 @@ prefix. Cross-node usage combines UIDs only when the administrator catalog maps 
 SSH is the authentication boundary and the remote process's numeric UID is authoritative.
 An explicit operation-ID retry is fail-closed when a disabled or unreachable node prevents
 the client from proving where that operation was committed. Never reroute that retry.
+For a cluster scheduled command, the client injects its operation ID and structured-output
+flag only before the `--` delimiter and forwards every workload argument after the delimiter
+unchanged. Routing additionally requires `scheduled_jobs`, `scheduled_job_path_snapshot`,
+and `private_job_specs`; ordinary reservation writes continue to use the smaller booking
+capability set so rolling read-only compatibility is preserved.
 
 An operation ID identifies one immutable write intent for the current UID, including a scheduled
 command's submission `PATH`. Exact retries return

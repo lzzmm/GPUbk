@@ -86,6 +86,7 @@ class ClusterProcessIntegrationTests(unittest.TestCase):
                 "BK_DATA_DIR": str(self.root / node.name),
                 "BK_GPU_COUNT": "1",
                 "BK_MAX_SHARED_USERS": "2",
+                "XDG_STATE_HOME": str(self.root / node.name / "user-state"),
                 "GPUBK_TEST_NODE_ID": node.node_id,
                 "GPUBK_TEST_NODE_NAME": node.name,
             }
@@ -122,6 +123,58 @@ class ClusterProcessIntegrationTests(unittest.TestCase):
                 (self.root / node.name / "ledger.json").read_text(encoding="utf-8")
             )
             self.assertEqual(len(ledger["reservations"]), 1)
+
+    def test_automatic_cluster_job_is_private_and_replay_safe_end_to_end(self):
+        operation_id = "stable-cluster-job"
+        job_argv = [
+            sys.executable,
+            "-c",
+            "print('not executed by this test')",
+            "--json",
+            "--op-id",
+            "workload-value",
+        ]
+        arguments = [
+            "x",
+            "1",
+            "30m",
+            "--op-id",
+            operation_id,
+            "--json",
+            "--",
+            *job_argv,
+        ]
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=self.config),
+            mock.patch(
+                "bk.cluster_transport.node_command",
+                side_effect=self.node_command,
+            ),
+        ):
+            outputs = []
+            for _attempt in range(2):
+                output = StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(run_cluster_cli(arguments), 0)
+                outputs.append(json.loads(output.getvalue()))
+
+        self.assertEqual([item["node"]["name"] for item in outputs], ["gpu-a"] * 2)
+        reservations = [item["result"]["reservation"] for item in outputs]
+        self.assertEqual(reservations[0]["id"], reservations[1]["id"])
+        self.assertEqual(reservations[0]["job"]["status"], "pending")
+
+        specs = list(
+            (self.root / "gpu-a" / "user-state" / "bk" / "jobs" / "specs").glob(
+                "*.json"
+            )
+        )
+        self.assertEqual(len(specs), 1)
+        private_spec = json.loads(specs[0].read_text(encoding="utf-8"))
+        self.assertEqual(private_spec["argv"], job_argv)
+        ledger = json.loads(
+            (self.root / "gpu-a" / "ledger.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("not executed by this test", json.dumps(ledger))
 
     def test_readiness_check_skips_disabled_node_without_starting_a_process(self):
         disabled = ClusterNode(
@@ -182,9 +235,7 @@ class ClusterProcessIntegrationTests(unittest.TestCase):
             parse_iso(reservations[1]["start_at"]),
         )
         ledger = json.loads(
-            (self.root / self.first.name / "ledger.json").read_text(
-                encoding="utf-8"
-            )
+            (self.root / self.first.name / "ledger.json").read_text(encoding="utf-8")
         )
         self.assertEqual(len(ledger["reservations"]), 2)
 

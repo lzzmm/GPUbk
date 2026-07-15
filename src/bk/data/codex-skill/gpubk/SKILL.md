@@ -36,6 +36,13 @@ to a node whose catalog entry has `enabled=false` or whose check status is not `
 Use `bk c rec COUNT DURATION --json` before a cross-node write and keep the
 returned node name attached to every reservation ID. Use `bk c COUNT DURATION --json`
 for automatic single-node placement or `bk @NODE ... --json` for an explicit node.
+To attach a private scheduled command, keep all GPUBK options before the delimiter:
+`bk c COUNT DURATION --op-id ID --json -- COMMAND ARG...`. Do not move retry flags
+after `--`; those arguments belong exclusively to the workload. Require the destination
+to advertise `scheduled_jobs`, `scheduled_job_path_snapshot`, and `private_job_specs`.
+Do not assume the caller's local working directory exists on the selected host. Use
+destination-valid absolute executable and script paths; the remote non-interactive SSH
+session determines the captured working directory and `PATH`.
 Never merge identities by username; only administrator-provided `(node_id, uid)`
 principal mappings are authoritative. A cluster reservation never spans hosts.
 If an operation retry may belong to a disabled node, surface the unresolved routing

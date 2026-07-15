@@ -72,6 +72,13 @@ node as enabled.
 - `bk c 2 1h` submits to the node with the earliest legal start; `bk c x 2 1h`
   requests exclusive mode. The longer `bk cluster book ...` form remains valid. A
   reservation never spans hosts.
+- `bk c 1 2h -- python /absolute/path/train.py` attaches a private scheduled command
+  to the automatically selected node. GPUBK options stay before `--`; every argument
+  after it is preserved for the workload. Nodes without scheduled-job and private-spec
+  capabilities remain readable but cannot receive this write.
+  The destination's non-interactive SSH session supplies the working directory and
+  `PATH`; use executable and script paths that are valid on that host. GPUBK does not
+  pretend that the submitting machine's current directory exists remotely.
 - `bk @NODE 2 1h` explicitly books one node using the ordinary booking syntax.
 - Node-qualified IDs use `NODE/SHORT_ID`; the stored booking UUID is unchanged.
 - Ties are resolved by start time, configured node priority, live-load confidence,
