@@ -3207,6 +3207,10 @@ def _list_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     if not reservations:
         print("No reservation history." if args.history else "No active reservations.")
         return 0
+    colors = color_enabled(sys.stdout)
+    if colors:
+        title = "YOUR RESERVATION HISTORY" if args.history else "YOUR RESERVATIONS"
+        print(style(title, "heading", enabled=True))
     mine = _own_active_reservations(store, actor)
     mine_index = {reservation["id"]: index + 1 for index, reservation in enumerate(mine)}
     for reservation in reservations:
@@ -3222,8 +3226,11 @@ def _list_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                 f" status={reservation.get('status')} edits={edit_count}"
                 + (f" reason={reason}" if reason else "")
             )
+        mode_role = "warning" if reservation["mode"] == MODE_EXCLUSIVE else "accent"
+        reservation_id = style(_short_id(reservation), "id", enabled=colors)
+        mode = style(str(reservation["mode"]), mode_role, enabled=colors)
         print(
-            f"{index:>2} {_short_id(reservation)} {reservation['mode']} uid={reservation['uid']} "
+            f"{index:>2} {reservation_id} {mode} uid={reservation['uid']} "
             f"user={reservation['username']} gpu={gpus} "
             f"{_reservation_share_label(reservation, config)}"
             f"job={reservation.get('job', {}).get('status', '-')} "
