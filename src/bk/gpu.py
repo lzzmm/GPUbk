@@ -4,6 +4,7 @@ import csv
 import json
 import os
 import pwd
+import re
 import subprocess
 import time
 from dataclasses import dataclass
@@ -23,6 +24,10 @@ class GpuProcessSnapshot:
     sm_utilization_percent: Optional[int] = None
     kind: str = "C"
     host_start_id: str = ""
+    host_uid: Optional[int] = None
+    identity_source: str = "host"
+    container_runtime: str = ""
+    container_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -46,6 +51,8 @@ class _HostIdentity:
     username: str
     command: str
     start_id: str
+    container_runtime: str = ""
+    container_id: str = ""
 
 
 _NVML_SAMPLER: Optional["_NvmlSampler"] = None
@@ -59,6 +66,16 @@ MAX_IDENTITY_CACHE_ENTRIES = 4096
 MAX_SIMULATION_FILE_BYTES = 4 * 1024 * 1024
 MAX_SIMULATION_PROCESSES_PER_GPU = 100_000
 MAX_CUDA_DEVICE_IDENTIFIER_BYTES = 256
+MAX_CGROUP_BYTES = 64 * 1024
+_CONTAINER_PATTERNS = (
+    ("docker", re.compile(r"(?:^|[/])docker[-/](?P<id>[0-9a-f]{12,64})(?:\.scope)?(?:$|[/])", re.IGNORECASE)),
+    ("containerd", re.compile(r"(?:^|[/])cri-containerd-(?P<id>[0-9a-f]{12,64})\.scope(?:$|[/])", re.IGNORECASE)),
+    ("podman", re.compile(r"(?:^|[/])libpod-(?P<id>[0-9a-f]{12,64})\.scope(?:$|[/])", re.IGNORECASE)),
+)
+_CONTAINER_RUNTIMES = frozenset({"docker", "containerd", "podman"})
+_IDENTITY_SOURCES = frozenset(
+    {"host", "container-reservation", "container-ambiguous"}
+)
 
 
 def snapshot(config: Config) -> List[GpuSnapshot]:
@@ -315,6 +332,10 @@ class _NvmlSampler:
                     sm_utilization_percent=utilization.get(pid),
                     kind="+".join(sorted(kinds)),
                     host_start_id=identity.start_id,
+                    host_uid=identity.uid,
+                    identity_source="host",
+                    container_runtime=identity.container_runtime,
+                    container_id=identity.container_id,
                 )
             )
         return result, compute_query_succeeded
@@ -350,11 +371,14 @@ def _host_identity(pid: int) -> _HostIdentity:
         username = pwd.getpwuid(uid).pw_name
     except (KeyError, OSError):
         username = str(uid)
+    container_runtime, container_id = _read_container_identity(proc_dir)
     identity = _HostIdentity(
         uid=uid,
         username=username,
         command=_read_process_command(proc_dir),
         start_id=f"{process_token[0]}:{process_token[1]}",
+        container_runtime=container_runtime,
+        container_id=container_id,
     )
 
     _IDENTITY_CACHE[pid] = (now + 5.0, process_token, identity)
@@ -376,6 +400,23 @@ def _read_process_command(proc_dir: Path) -> str:
             return fh.read(MAX_PROCESS_COMMAND_BYTES).strip()
     except OSError:
         return ""
+
+
+def _read_container_identity(proc_dir: Path) -> Tuple[str, str]:
+    try:
+        raw = (proc_dir / "cgroup").read_bytes()
+    except OSError:
+        return "", ""
+    text = raw[:MAX_CGROUP_BYTES].decode("utf-8", errors="replace")
+    for runtime, pattern in _CONTAINER_PATTERNS:
+        match = pattern.search(text)
+        if match:
+            return runtime, match.group("id").lower()
+    if "kubepods" in text:
+        candidates = re.findall(r"(?<![0-9a-f])([0-9a-f]{64})(?![0-9a-f])", text, re.IGNORECASE)
+        if candidates:
+            return "containerd", candidates[-1].lower()
+    return "", ""
 
 
 def _prune_identity_cache(now: float) -> None:
@@ -450,6 +491,17 @@ def _simulation_snapshot(path: Path) -> List[GpuSnapshot]:
 def _simulation_process(raw) -> GpuProcessSnapshot:
     if not isinstance(raw, dict):
         raise ValueError("simulation process must be an object")
+    container_runtime = str(raw.get("container_runtime", "")).strip().lower()
+    container_id = str(raw.get("container_id", "")).strip().lower()
+    if (
+        container_runtime not in _CONTAINER_RUNTIMES
+        or re.fullmatch(r"[0-9a-f]{12,64}", container_id) is None
+    ):
+        container_runtime = ""
+        container_id = ""
+    identity_source = str(raw.get("identity_source", "host"))
+    if identity_source not in _IDENTITY_SOURCES:
+        identity_source = "host"
     return GpuProcessSnapshot(
         pid=_bounded_int(raw["pid"], "process pid", 1, 2**31 - 1),
         uid=_optional_bounded_int(raw.get("uid"), "process uid", 0, MAX_UID),
@@ -461,6 +513,10 @@ def _simulation_process(raw) -> GpuProcessSnapshot:
         ),
         kind=str(raw.get("kind", "C")),
         host_start_id=str(raw.get("host_start_id", "")),
+        host_uid=_optional_bounded_int(raw.get("host_uid", raw.get("uid")), "process host uid", 0, MAX_UID),
+        identity_source=identity_source,
+        container_runtime=container_runtime,
+        container_id=container_id,
     )
 
 

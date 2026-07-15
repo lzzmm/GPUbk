@@ -1,0 +1,111 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="286" viewBox="0 0 900 286" role="img" aria-labelledby="title desc">
+  <title id="title">GPUBK TUI preview</title>
+  <desc id="desc">A compact GPUBK dashboard with aligned GPU metrics, reservations, a timeline, and keyboard controls.</desc>
+  <style>
+    .shell { fill: #0d1114; stroke: #465058; }
+    .chrome { fill: #20272c; }
+    .accent-line { fill: #3d8b98; }
+    .fg { fill: #d9dee1; }
+    .bright { fill: #f4f6f7; }
+    .dim { fill: #7e8990; }
+    .rule { stroke: #293137; }
+    .now { stroke: #4aa1af; }
+    .teal { fill: #4d96a3; }
+    .amber { fill: #ae7a3d; }
+    .green { fill: #579064; }
+    .violet { fill: #76669b; }
+    .red { fill: #aa5962; }
+    .steel { fill: #557791; }
+    text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    @media (prefers-color-scheme: light) {
+      .shell { fill: #f7f8f8; stroke: #a8b0b5; }
+      .chrome { fill: #30383e; }
+      .accent-line { fill: #347e8a; }
+      .fg { fill: #263037; }
+      .bright { fill: #ffffff; }
+      .dim { fill: #6e7980; }
+      .rule { stroke: #d8dddf; }
+      .now { stroke: #248292; }
+      .teal { fill: #347f8c; }
+      .amber { fill: #986728; }
+      .green { fill: #417c4e; }
+      .violet { fill: #69578d; }
+      .red { fill: #984852; }
+      .steel { fill: #476b86; }
+    }
+  </style>
+
+  <rect class="shell" x="1" y="1" width="898" height="284" rx="3"/>
+  <rect class="chrome" x="2" y="2" width="896" height="29"/>
+  <rect class="accent-line" x="2" y="31" width="896" height="2"/>
+  <text class="bright" x="14" y="22" font-size="14" font-weight="700">GPUBK</text>
+  <text class="dim" x="82" y="22" font-size="11">gpu-lab</text>
+  <text class="dim" x="650" y="22" font-size="11">MONITOR OK</text>
+  <text class="bright" x="884" y="22" font-size="11" text-anchor="end">8 GPU  ·  LIVE</text>
+
+  <!-- Fixed metric columns -->
+  <g class="dim" font-size="10">
+    <text x="14" y="52">GPU</text>
+    <text x="46" y="52">MODEL</text>
+    <text x="211" y="52" text-anchor="end">UTIL</text>
+    <text x="276" y="52" text-anchor="end">FREE</text>
+    <text x="316" y="52" text-anchor="end">PROC</text>
+    <text x="336" y="52">STATE</text>
+    <text x="432" y="52" text-anchor="end">USE/MAX</text>
+  </g>
+  <g class="fg" font-size="11">
+    <text x="14" y="78">0</text><text x="46" y="78">RTX PRO 6000</text><text x="211" y="78" text-anchor="end">84%</text><text x="276" y="78" text-anchor="end">18.2G</text><text x="316" y="78" text-anchor="end">3</text><text x="336" y="78">booked</text><text x="432" y="78" text-anchor="end">3/4</text>
+    <text x="14" y="107">1</text><text x="46" y="107">RTX PRO 6000</text><text x="211" y="107" text-anchor="end">36%</text><text x="276" y="107" text-anchor="end">71.4G</text><text x="316" y="107" text-anchor="end">1</text><text x="336" y="107">shared</text><text x="432" y="107" text-anchor="end">2/4</text>
+    <text x="14" y="136">2</text><text x="46" y="136">RTX PRO 6000</text><text x="211" y="136" text-anchor="end">0%</text><text x="276" y="136" text-anchor="end">95.7G</text><text x="316" y="136" text-anchor="end">0</text><text x="336" y="136">idle</text><text x="432" y="136" text-anchor="end">0/4</text>
+    <text x="14" y="165">3</text><text x="46" y="165">RTX PRO 6000</text><text x="211" y="165" text-anchor="end">67%</text><text x="276" y="165" text-anchor="end">42.8G</text><text x="316" y="165" text-anchor="end">2</text><text x="336" y="165">exclusive</text><text x="432" y="165" text-anchor="end">X</text>
+    <text x="14" y="194">4</text><text x="46" y="194">RTX PRO 6000</text><text x="211" y="194" text-anchor="end">8%</text><text x="276" y="194" text-anchor="end">88.1G</text><text x="316" y="194" text-anchor="end">1</text><text x="336" y="194">booked</text><text x="432" y="194" text-anchor="end">1/4</text>
+  </g>
+
+  <!-- Timeline -->
+  <g class="dim" font-size="10">
+    <text x="468" y="52">WED · JUL 15</text>
+    <text x="590" y="52" text-anchor="middle">17:00</text>
+    <text x="686" y="52" text-anchor="middle">17:30</text>
+    <text x="782" y="52" text-anchor="middle">18:00</text>
+    <text x="878" y="52" text-anchor="middle">18:30</text>
+  </g>
+  <g class="rule" stroke-width="1">
+    <line x1="12" y1="87" x2="888" y2="87"/><line x1="12" y1="116" x2="888" y2="116"/>
+    <line x1="12" y1="145" x2="888" y2="145"/><line x1="12" y1="174" x2="888" y2="174"/>
+    <line x1="12" y1="203" x2="888" y2="203"/>
+    <line x1="542" y1="58" x2="542" y2="203"/><line x1="686" y1="58" x2="686" y2="203"/>
+    <line x1="782" y1="58" x2="782" y2="203"/><line x1="878" y1="58" x2="878" y2="203"/>
+  </g>
+  <line class="now" x1="628" y1="58" x2="628" y2="203" stroke-width="2"/>
+  <rect class="shell" x="607" y="57" width="42" height="14"/>
+  <text class="teal" x="628" y="68" font-size="9" text-anchor="middle" font-weight="700">NOW</text>
+
+  <rect class="teal" x="584" y="73" width="118" height="8" rx="1"/>
+  <rect class="amber" x="584" y="91" width="118" height="7" rx="1"/>
+  <rect class="green" x="628" y="102" width="178" height="8" rx="1"/>
+  <rect class="violet" x="738" y="131" width="135" height="8" rx="1"/>
+  <rect class="red" x="610" y="149" width="194" height="7" rx="1"/>
+  <rect class="steel" x="658" y="160" width="146" height="8" rx="1"/>
+  <rect class="green" x="628" y="189" width="89" height="8" rx="1"/>
+
+  <!-- Reservation table with fixed columns -->
+  <g class="dim" font-size="9">
+    <text x="14" y="220">#</text><text x="34" y="220">ID</text><text x="92" y="220">USER</text>
+    <text x="180" y="220">MODE</text><text x="228" y="220">REQ</text><text x="266" y="220">GPU</text>
+    <text x="316" y="220">VRAM/GPU</text><text x="389" y="220">START</text><text x="442" y="220">END</text><text x="495" y="220">DUR</text>
+  </g>
+  <g class="fg" font-size="10">
+    <text x="14" y="238">1</text><text x="34" y="238">e95273</text><text x="92" y="238">user-a</text>
+    <text x="180" y="238">shar</text><text x="228" y="238">3/4</text><text x="266" y="238">0,1</text>
+    <text x="316" y="238">24G</text><text x="389" y="238">17:00</text><text x="442" y="238">18:30</text><text x="495" y="238">1h30m</text>
+  </g>
+  <g class="amber" font-size="10">
+    <text x="14" y="255">2</text><text x="34" y="255">a81c20</text><text x="92" y="255">user-b</text>
+    <text x="180" y="255">excl</text><text x="228" y="255">X</text><text x="266" y="255">3</text>
+    <text x="316" y="255">-</text><text x="389" y="255">17:15</text><text x="442" y="255">18:45</text><text x="495" y="255">1h30m</text>
+  </g>
+
+  <rect class="chrome" x="2" y="263" width="896" height="21"/>
+  <rect class="accent-line" x="2" y="263" width="896" height="1"/>
+  <text class="bright" x="14" y="278" font-size="10">RSV  arrows select  ·  Tab GPU  ·  a add  ·  e edit  ·  d delete  ·  u usage  ·  n NOW  ·  ? help  ·  q quit</text>
+</svg>

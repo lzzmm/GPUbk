@@ -2,6 +2,7 @@ include CHANGELOG.md
 include CLUSTER.md
 include LICENSE
 include README.zh-CN.md
+recursive-include docs *.md
 include RELEASING.md
 include SECURITY.md
 include TELEMETRY.md

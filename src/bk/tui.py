@@ -39,7 +39,13 @@ from .sharing import parse_share_units, reservation_share_units, share_text
 from .storage import LedgerStore
 from .timeparse import format_local_range, parse_iso, parse_memory_mb, utc_now
 from .tutorial import TUI_TOUR, mark_onboarding_seen, onboarding_seen
-from .usage import ProcessUsage, classify_process_usage, summarize_process_command
+from .usage import (
+    ProcessUsage,
+    classify_process_usage,
+    process_container_label,
+    process_owner_label,
+    summarize_process_command,
+)
 from .usage_api import UsageQueryService
 from .usage_store import UsageAuditStore
 from .usage_view import (
@@ -1343,19 +1349,23 @@ def _process_table_line(
     id_width: int = MIN_SHORT_ID_WIDTH,
 ) -> str:
     process = item.process
+    owner = process_owner_label(process)
     sm = f"{process.sm_utilization_percent}%" if process.sm_utilization_percent is not None else "-"
     memory = f"{process.gpu_memory_mb}M" if process.gpu_memory_mb else "-"
     booking = _truncate(",".join(value[:id_width] for value in item.reservation_ids) or "-", id_width)
     command = summarize_process_command(process.command)
+    container = process_container_label(process)
+    if container:
+        command = f"{container} {command}"
     if width < 100:
         prefix = (
-            f"{process.pid:>7} {_truncate(process.username, 10):<10} "
+            f"{process.pid:>7} {_truncate(owner, 10):<10} "
             f"{process.kind:<3} {sm:>3} {memory:>6} {item.status:<11} "
             f"{booking:<{id_width}} "
         )
     else:
         prefix = (
-            f"{process.pid:>7} {_truncate(process.username, 16):<16} "
+            f"{process.pid:>7} {_truncate(owner, 16):<16} "
             f"{process.kind:<4} {sm:>4} {memory:>8} {item.status:<11} "
             f"{booking:<{id_width}} "
         )

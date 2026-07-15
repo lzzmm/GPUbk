@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import math
+import grp
+import pwd
 import shlex
-from dataclasses import dataclass
+import stat
+import time
+from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .gpu import GpuProcessSnapshot, GpuSnapshot
 from .timeparse import parse_iso, utc_now
@@ -22,6 +26,11 @@ GPU_LIVE_UNKNOWN = "unknown"
 GPU_LIVE_BUSY = "busy"
 GPU_BUSY_UTILIZATION_PERCENT = 10
 GPU_BUSY_MEMORY_MIN_MB = 1024
+CONTAINER_IDENTITY_HOST = "host"
+CONTAINER_IDENTITY_INFERRED = "container-reservation"
+CONTAINER_IDENTITY_AMBIGUOUS = "container-ambiguous"
+_CONTAINER_ACCESS_CACHE: Dict[Tuple[str, int], Tuple[float, bool]] = {}
+_CONTAINER_ACCESS_CACHE_SECONDS = 60.0
 
 SYSTEM_GPU_PROCESS_NAMES = {
     "gnome-shell",
@@ -71,6 +80,7 @@ def classify_process_usage(
     snapshots: Sequence[GpuSnapshot],
     reservations: Sequence[dict],
     at: Optional[datetime] = None,
+    container_uid_allowed: Optional[Callable[[str, int], bool]] = None,
 ) -> Dict[int, List[ProcessUsage]]:
     at = at or utc_now()
     current = [
@@ -81,8 +91,12 @@ def classify_process_usage(
         and at < parse_iso(item["end_at"])
     ]
     result: Dict[int, List[ProcessUsage]] = {}
+    access_check = container_uid_allowed or _uid_can_use_container_runtime
     for gpu in snapshots:
-        rows = [_classify_process(gpu.index, process, current) for process in gpu.processes]
+        rows = [
+            _classify_process(gpu.index, process, current, access_check)
+            for process in gpu.processes
+        ]
         result[gpu.index] = sorted(rows, key=lambda item: (not item.violation, item.process.username, item.process.pid))
     return result
 
@@ -261,7 +275,12 @@ def _memory_percent(gpu: GpuSnapshot) -> float:
     return min(100.0, max(0.0, gpu.memory_used_mb * 100.0 / gpu.memory_total_mb))
 
 
-def _classify_process(gpu: int, process: GpuProcessSnapshot, current: Sequence[dict]) -> ProcessUsage:
+def _classify_process(
+    gpu: int,
+    process: GpuProcessSnapshot,
+    current: Sequence[dict],
+    container_uid_allowed: Callable[[str, int], bool],
+) -> ProcessUsage:
     if _is_system_process(process):
         return ProcessUsage(gpu, process, USAGE_SYSTEM)
     if process.uid is None:
@@ -271,10 +290,121 @@ def _classify_process(gpu: int, process: GpuProcessSnapshot, current: Sequence[d
     if matches:
         ids = tuple(str(item.get("id", "")) for item in matches)
         return ProcessUsage(gpu, process, USAGE_AUTHORIZED, ids)
+    if process.uid == 0 and process.container_runtime and process.container_id:
+        inferred = _infer_container_owner(
+            gpu,
+            process,
+            current,
+            container_uid_allowed,
+        )
+        if inferred is not None:
+            return inferred
     if user_reservations:
         ids = tuple(str(item.get("id", "")) for item in user_reservations)
         return ProcessUsage(gpu, process, USAGE_WRONG_GPU, ids)
     return ProcessUsage(gpu, process, USAGE_UNRESERVED)
+
+
+def _infer_container_owner(
+    gpu: int,
+    process: GpuProcessSnapshot,
+    current: Sequence[dict],
+    container_uid_allowed: Callable[[str, int], bool],
+) -> Optional[ProcessUsage]:
+    candidates: Dict[int, List[dict]] = {}
+    for reservation in current:
+        if gpu not in reservation.get("gpus", []):
+            continue
+        try:
+            uid = int(reservation.get("uid", -1))
+        except (TypeError, ValueError):
+            continue
+        if uid <= 0 or not container_uid_allowed(process.container_runtime, uid):
+            continue
+        candidates.setdefault(uid, []).append(reservation)
+    if len(candidates) > 1:
+        ambiguous = replace(
+            process,
+            host_uid=process.host_uid if process.host_uid is not None else process.uid,
+            identity_source=CONTAINER_IDENTITY_AMBIGUOUS,
+        )
+        return ProcessUsage(gpu, ambiguous, USAGE_UNKNOWN)
+    if len(candidates) != 1:
+        return None
+    uid, reservations = next(iter(candidates.items()))
+    username = str(reservations[0].get("username", uid))
+    attributed = replace(
+        process,
+        uid=uid,
+        username=username,
+        host_uid=process.host_uid if process.host_uid is not None else process.uid,
+        identity_source=CONTAINER_IDENTITY_INFERRED,
+    )
+    ids = tuple(str(item.get("id", "")) for item in reservations)
+    return ProcessUsage(gpu, attributed, USAGE_AUTHORIZED, ids)
+
+
+def _uid_can_use_container_runtime(runtime: str, uid: int) -> bool:
+    if runtime != "docker" or uid <= 0:
+        return False
+    key = (runtime, uid)
+    now = time.monotonic()
+    cached = _CONTAINER_ACCESS_CACHE.get(key)
+    if cached is not None and cached[0] > now:
+        return cached[1]
+    allowed = _uid_can_access_docker_socket(uid)
+    _CONTAINER_ACCESS_CACHE[key] = (now + _CONTAINER_ACCESS_CACHE_SECONDS, allowed)
+    if len(_CONTAINER_ACCESS_CACHE) > 4096:
+        expired = [item for item, value in _CONTAINER_ACCESS_CACHE.items() if value[0] <= now]
+        for item in expired:
+            _CONTAINER_ACCESS_CACHE.pop(item, None)
+    return allowed
+
+
+def _uid_can_access_docker_socket(
+    uid: int,
+    socket_path: Path = Path("/var/run/docker.sock"),
+) -> bool:
+    try:
+        socket_stat = socket_path.stat()
+    except OSError:
+        try:
+            docker_gid = grp.getgrnam("docker").gr_gid
+        except (KeyError, OSError):
+            return False
+        mode = stat.S_IWGRP
+    else:
+        if socket_stat.st_mode & stat.S_IWOTH:
+            return True
+        docker_gid = socket_stat.st_gid
+        mode = socket_stat.st_mode
+    if not mode & stat.S_IWGRP:
+        return False
+    try:
+        account = pwd.getpwuid(uid)
+    except (KeyError, OSError):
+        return False
+    if account.pw_gid == docker_gid:
+        return True
+    try:
+        group = grp.getgrgid(docker_gid)
+    except (KeyError, OSError):
+        return False
+    return account.pw_name in group.gr_mem
+
+
+def process_owner_label(process: GpuProcessSnapshot) -> str:
+    if process.identity_source == CONTAINER_IDENTITY_INFERRED:
+        return f"{process.username}*"
+    if process.identity_source == CONTAINER_IDENTITY_AMBIGUOUS:
+        return "container?"
+    return process.username
+
+
+def process_container_label(process: GpuProcessSnapshot) -> str:
+    if not process.container_runtime or not process.container_id:
+        return ""
+    return f"{process.container_runtime}:{process.container_id[:12]}"
 
 
 def _is_system_process(process: GpuProcessSnapshot) -> bool:
