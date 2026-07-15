@@ -22,7 +22,12 @@ class LedgerPolicyTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.data_dir = Path(self.tmp.name)
-        self.config = Config(data_dir=self.data_dir, gpu_count=2, max_shared_users=2)
+        self.config = Config(
+            data_dir=self.data_dir,
+            gpu_count=2,
+            max_shared_users=2,
+            booking_horizon_days=3650,
+        )
         self.store = LedgerStore(self.data_dir)
         self.actor = Actor(1001, "user1001")
         self.request = BookingRequest(
@@ -69,6 +74,7 @@ class LedgerPolicyTests(unittest.TestCase):
             data_dir=self.data_dir,
             gpu_count=2,
             max_shared_users=2,
+            booking_horizon_days=3650,
             dir_mode=0o2770,
             storage_gid=os.getgid(),
         )
@@ -90,6 +96,7 @@ class LedgerPolicyTests(unittest.TestCase):
             data_dir=self.data_dir,
             gpu_count=2,
             max_shared_users=2,
+            booking_horizon_days=3650,
             dir_mode=0o2770,
         )
         changed = Config(
@@ -111,6 +118,7 @@ class LedgerPolicyTests(unittest.TestCase):
             data_dir=self.data_dir,
             gpu_count=2,
             max_shared_users=2,
+            booking_horizon_days=3650,
             dir_mode=0o2770,
             storage_gid=os.getgid(),
         )
@@ -125,6 +133,7 @@ class LedgerPolicyTests(unittest.TestCase):
             data_dir=self.data_dir,
             gpu_count=2,
             max_shared_users=2,
+            booking_horizon_days=3650,
             dir_mode=0o2770,
         )
         bypass_store = LedgerStore(self.data_dir, dir_mode=0o2770)
@@ -207,6 +216,7 @@ class LedgerPolicyTests(unittest.TestCase):
             data_dir=self.data_dir,
             gpu_count=2,
             max_shared_users=2,
+            booking_horizon_days=3650,
             slot_minutes=10,
         )
         request = BookingRequest(

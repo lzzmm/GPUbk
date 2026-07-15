@@ -87,7 +87,10 @@ class ReservationIndexTests(unittest.TestCase):
         ledger = {"version": 1, "reservations": reservations}
         with tempfile.TemporaryDirectory() as tmp:
             config = Config(data_dir=Path(tmp), gpu_count=8, queue_search_hours=24)
-            with mock.patch("bk.schedule_index.parse_iso", wraps=parse_iso) as parser:
+            with (
+                mock.patch("bk.scheduler.utc_now", return_value=NOW),
+                mock.patch("bk.schedule_index.parse_iso", wraps=parse_iso) as parser,
+            ):
                 result = find_earliest_slot(
                     ledger,
                     config,

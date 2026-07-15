@@ -12,6 +12,7 @@ from bk.scheduler import (
     MAX_EDIT_OPERATIONS_PER_RESERVATION,
     add_booking,
     cancel_booking,
+    cancel_booking_as_admin,
     edit_booking,
     find_applied_create,
     find_applied_edit,
@@ -612,20 +613,98 @@ class SchedulerModeTests(unittest.TestCase):
         ledger = self.store.load()
         self.assertEqual(len(ledger["reservations"]), 1)
 
-    def test_edit_rejects_a_reservation_that_has_already_started(self):
+    def test_started_reservation_can_only_change_its_future_end(self):
         actor = Actor(uid=1001, username="user1001")
         created = add_booking(self.store, self.config, self.request(actor.uid, MODE_SHARED))
-        before = self.store.load()
+        original_end = created.reservation["end_at"]
 
         with mock.patch("bk.scheduler.utc_now", return_value=self.start + timedelta(minutes=5)):
-            with self.assertRaisesRegex(BookingError, "after it has started"):
+            edited = edit_booking(
+                self.store,
+                self.config,
+                EditRequest(
+                    actor=actor,
+                    reservation_id=created.reservation["id"],
+                    duration_seconds=30 * 60,
+                ),
+            )
+            with self.assertRaisesRegex(BookingError, "elapsed time, GPUs, mode"):
                 edit_booking(
                     self.store,
                     self.config,
-                    EditRequest(actor=actor, reservation_id=created.reservation["id"], duration_seconds=30 * 60),
+                    EditRequest(
+                        actor=actor,
+                        reservation_id=created.reservation["id"],
+                        mode=MODE_EXCLUSIVE,
+                        duration_seconds=25 * 60,
+                    ),
                 )
 
-        self.assertEqual(self.store.load(), before)
+        self.assertEqual(parse_iso(edited.reservation["start_at"]), self.start)
+        self.assertEqual(parse_iso(edited.reservation["end_at"]), self.start + timedelta(minutes=30))
+        history = edited.reservation["edit_operations"]
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["before"]["end_at"], original_end)
+        self.assertEqual(history[0]["after"]["end_at"], edited.reservation["end_at"])
+
+    def test_booking_horizon_and_blackout_are_enforced_in_scheduler(self):
+        now = self.start - timedelta(days=1)
+        blackout_start = self.start
+        blackout_end = self.start + timedelta(hours=2)
+        config = replace(
+            self.config,
+            booking_horizon_days=2,
+            booking_blackouts=((
+                blackout_start.isoformat(),
+                blackout_end.isoformat(),
+                "maintenance",
+            ),),
+        )
+        with mock.patch("bk.scheduler.utc_now", return_value=now):
+            with self.assertRaisesRegex(BookingError, "administrator blackout"):
+                add_booking(self.store, config, self.request(1001, MODE_SHARED))
+            queued = add_booking(
+                self.store,
+                config,
+                self.request(1001, MODE_SHARED, allow_queue=True),
+            )
+            with self.assertRaisesRegex(BookingError, "2-day booking horizon"):
+                add_booking(
+                    self.store,
+                    config,
+                    self.request(
+                        1002,
+                        MODE_SHARED,
+                        start=now + timedelta(days=2),
+                    ),
+                )
+
+        self.assertEqual(parse_iso(queued.reservation["start_at"]), blackout_end)
+
+    def test_administrator_cancellation_preserves_reason_and_notifies_owner(self):
+        owner = Actor(uid=1001, username="user1001")
+        created = add_booking(self.store, self.config, self.request(owner.uid, MODE_SHARED))
+
+        with self.assertRaisesRegex(BookingError, "administrator cancellation requires sudo"):
+            cancel_booking_as_admin(
+                self.store,
+                self.config,
+                created.reservation["id"],
+                Actor(uid=2001, username="not-admin"),
+                "maintenance",
+            )
+        cancelled = cancel_booking_as_admin(
+            self.store,
+            self.config,
+            created.reservation["id"],
+            Actor(uid=0, username="root"),
+            "urgent cooling maintenance",
+        )
+
+        self.assertEqual(cancelled["status"], "cancelled")
+        self.assertEqual(cancelled["cancel_operation"]["kind"], "administrator")
+        self.assertEqual(cancelled["cancel_operation"]["reason"], "urgent cooling maintenance")
+        self.assertIn("urgent cooling maintenance", cancelled["notifications"][0]["message"])
 
     def test_exact_edit_rejects_a_new_start_in_the_past(self):
         actor = Actor(uid=1001, username="user1001")

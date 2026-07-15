@@ -238,8 +238,9 @@ After an ambiguous interruption, GPUBK recovers and rereads the ledger before de
 unreferenced private spec, so integrations should retry the exact intent with the same operation
 ID. The preflight replay can still confirm a committed command after its old working directory was
 removed; inspect `worker` and job state separately because execution may no longer be possible. New
-exact starts before the active booking slice, started reservation edits, and explicit edit starts
-in the past are rejected. A valid edit start remains exact unless `allow_queue=true` is explicitly
+exact starts before the active booking slice and explicit edit starts in the past are rejected.
+Once a reservation starts, only its future end may change; start, GPUs, mode, slots, and memory
+remain immutable. A valid future edit start remains exact unless `allow_queue=true` is explicitly
 supplied to resolve a resource conflict.
 Each retained reservation keeps at most 256 idempotent edit intents so malformed automation cannot grow one hot record without bound. Recreate an unusually long-lived reservation before exceeding that limit.
 

@@ -7,6 +7,7 @@ import os
 import shlex
 import stat
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
 
@@ -28,6 +29,9 @@ CONFIG_UPDATE_JOURNAL_NAME = "config-update.json"
 MAX_GPU_COUNT = 1024
 MAX_SHARED_UNITS = 10_000
 MAX_QUEUE_SEARCH_HOURS = 10 * 365 * 24
+MAX_BOOKING_HORIZON_DAYS = 10 * 365
+MAX_BOOKING_BLACKOUTS = 512
+MAX_BLACKOUT_REASON_LENGTH = 512
 MAX_RETENTION_DAYS = 100 * 365
 MAX_USAGE_LOAD_WINDOW_MINUTES = 365 * 24 * 60
 MAX_LOCK_TIMEOUT_SECONDS = 60 * 60
@@ -57,6 +61,8 @@ CONFIG_ENV_MAP = {
     "slot_minutes": "BK_SLOT_MINUTES",
     "max_shared_users": "BK_MAX_SHARED_USERS",
     "queue_search_hours": "BK_QUEUE_SEARCH_HOURS",
+    "booking_horizon_days": "BK_BOOKING_HORIZON_DAYS",
+    "booking_blackouts": "BK_BOOKING_BLACKOUTS",
     "ledger_retention_days": "BK_LEDGER_RETENTION_DAYS",
     "usage_load_window_minutes": "BK_USAGE_LOAD_WINDOW_MINUTES",
     "usage_minute_retention_days": "BK_USAGE_MINUTE_RETENTION_DAYS",
@@ -112,6 +118,8 @@ class Config:
     gpu_count: int = 1
     max_shared_users: int = 2
     queue_search_hours: int = 168
+    booking_horizon_days: int = 30
+    booking_blackouts: Tuple[Tuple[str, str, str], ...] = ()
     ledger_retention_days: int = 90
     usage_load_window_minutes: int = 120
     usage_minute_retention_days: int = 30
@@ -156,6 +164,16 @@ class Config:
     gpu_priority: Tuple[Tuple[int, int], ...] = ()
 
     def __post_init__(self) -> None:
+        if (
+            isinstance(self.booking_horizon_days, bool)
+            or not isinstance(self.booking_horizon_days, int)
+            or self.booking_horizon_days < 1
+            or self.booking_horizon_days > MAX_BOOKING_HORIZON_DAYS
+        ):
+            raise ValueError(
+                "booking_horizon_days must be between 1 and "
+                f"{MAX_BOOKING_HORIZON_DAYS}"
+            )
         object.__setattr__(
             self, "slot_minutes", validate_slot_minutes(self.slot_minutes)
         )
@@ -179,6 +197,11 @@ class Config:
             self,
             "gpu_priority",
             validate_gpu_priority(self.gpu_priority, self.gpu_count),
+        )
+        object.__setattr__(
+            self,
+            "booking_blackouts",
+            validate_booking_blackouts(self.booking_blackouts),
         )
         object.__setattr__(
             self,
@@ -501,6 +524,67 @@ def validate_gpu_priority(value: object, gpu_count: int) -> Tuple[Tuple[int, int
     return tuple(sorted(result))
 
 
+def validate_booking_blackouts(value: object) -> Tuple[Tuple[str, str, str], ...]:
+    if value is None or value == "" or value == ():
+        return ()
+    parsed = value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError("booking_blackouts must be a JSON array") from exc
+    if not isinstance(parsed, (list, tuple)):
+        raise ValueError("booking_blackouts must be an array")
+    if len(parsed) > MAX_BOOKING_BLACKOUTS:
+        raise ValueError(f"booking_blackouts must contain at most {MAX_BOOKING_BLACKOUTS} windows")
+    result = []
+    for index, item in enumerate(parsed):
+        if isinstance(item, dict):
+            start_raw = item.get("start_at")
+            end_raw = item.get("end_at")
+            reason_raw = item.get("reason", "administrator maintenance")
+        elif isinstance(item, (list, tuple)) and len(item) == 3:
+            start_raw, end_raw, reason_raw = item
+        else:
+            raise ValueError(
+                f"booking_blackouts[{index}] must contain start_at, end_at, and reason"
+            )
+        start = _blackout_timestamp(start_raw, f"booking_blackouts[{index}].start_at")
+        end = _blackout_timestamp(end_raw, f"booking_blackouts[{index}].end_at")
+        if start >= end:
+            raise ValueError(f"booking_blackouts[{index}] end_at must be after start_at")
+        if not isinstance(reason_raw, str):
+            raise ValueError(f"booking_blackouts[{index}].reason must be text")
+        reason = reason_raw.strip()
+        if not reason or len(reason) > MAX_BLACKOUT_REASON_LENGTH:
+            raise ValueError(
+                f"booking_blackouts[{index}].reason must contain 1-{MAX_BLACKOUT_REASON_LENGTH} characters"
+            )
+        if any(ord(character) < 32 for character in reason):
+            raise ValueError(f"booking_blackouts[{index}].reason contains control characters")
+        result.append((_config_iso(start), _config_iso(end), reason))
+    result.sort(key=lambda item: (item[0], item[1], item[2]))
+    return tuple(result)
+
+
+def _blackout_timestamp(value: object, key: str) -> datetime:
+    if not isinstance(value, str) or not value or len(value) > 64:
+        raise ValueError(f"{key} must be an ISO 8601 timestamp with a timezone")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{key} must be an ISO 8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{key} must include a timezone")
+    return parsed.astimezone(timezone.utc).replace(microsecond=0)
+
+
+def _config_iso(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
+
+
 def _read_config_file(
     path: Path,
     *,
@@ -754,6 +838,15 @@ def load_config() -> Config:
         max_shared_users=_int_value(raw, "max_shared_users", 2, maximum=MAX_SHARED_UNITS),
         queue_search_hours=_int_value(
             raw, "queue_search_hours", 168, maximum=MAX_QUEUE_SEARCH_HOURS
+        ),
+        booking_horizon_days=_int_value(
+            raw,
+            "booking_horizon_days",
+            30,
+            maximum=MAX_BOOKING_HORIZON_DAYS,
+        ),
+        booking_blackouts=validate_booking_blackouts(
+            raw.get("booking_blackouts")
         ),
         ledger_retention_days=_nonnegative_int_value(
             raw, "ledger_retention_days", 90, maximum=MAX_RETENTION_DAYS

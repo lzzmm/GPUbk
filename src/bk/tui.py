@@ -27,6 +27,7 @@ from .schedule_index import ReservationIndex
 from .scheduler import (
     add_booking,
     availability_detail,
+    booking_policy_conflict,
     edit_booking,
     find_earliest_slot,
     find_nearest_slot,
@@ -184,7 +185,7 @@ HELP_PAGES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
             ("i", "Show the administrator account and contact"),
             ("a then 2", "Find earliest two-GPU slot; Enter confirms"),
             ("Tab", "Inspect a GPU's sharers and processes"),
-            ("e", "Edit a selected future reservation"),
+            ("e", "Edit future fields; running jobs are end-only"),
             ("bk u", "Show this UID's historical GPU summary"),
             ("u in TUI", "Open your personal summary without leaving TUI"),
             ("bk agent context", "Give an Agent safe allocation context"),
@@ -204,6 +205,7 @@ class TuiState:
     error: bool = False
     add_mode: bool = False
     edit_mode: bool = False
+    edit_started: bool = False
     edit_reservation_id: Optional[str] = None
     editor_view_start: Optional[datetime] = None
     add_search_anchor: Optional[datetime] = None
@@ -992,6 +994,8 @@ def _editor_banner_text(
     operation = "EDIT" if state.edit_mode else "ADD"
     if state.edit_mode and state.edit_reservation_id:
         operation += f" {state.edit_reservation_id[:id_width]}"
+    if state.edit_started:
+        operation += " END-ONLY"
     mode = (
         f"S{preview.share_units}"
         if preview.mode == MODE_SHARED
@@ -1688,10 +1692,6 @@ def _start_edit_select(config: Config, store: LedgerStore, state: TuiState) -> N
         state.message = "you can inspect this reservation, but only its owner can edit it"
         state.error = True
         return
-    if parse_iso(reservation["start_at"]) <= utc_now():
-        state.message = "cannot edit a reservation after it has started"
-        state.error = True
-        return
     _load_edit_state(config, state, reservation)
 
 
@@ -1705,6 +1705,7 @@ def _load_edit_state(config: Config, state: TuiState, reservation: dict) -> None
     }
     state.add_mode = False
     state.edit_mode = True
+    state.edit_started = start <= utc_now()
     _configure_booking_slot(state, config.slot_minutes)
     state.edit_reservation_id = str(reservation["id"])
     context_steps = max(1, (30 + state.booking_slot_minutes - 1) // state.booking_slot_minutes)
@@ -1723,7 +1724,11 @@ def _load_edit_state(config: Config, state: TuiState, reservation: dict) -> None
     raw_memory = reservation.get("expected_memory_mb")
     state.add_expected_memory_mb = int(raw_memory) if raw_memory is not None else None
     state.add_share_units = reservation_share_units(reservation, config.max_shared_users)
-    state.message = ""
+    state.message = (
+        "running reservation: resources and elapsed time locked; adjust end with [ ]"
+        if state.edit_started
+        else ""
+    )
     state.error = False
 
 
@@ -1750,6 +1755,14 @@ def _handle_add_key(
         return
     if key in (ord("v"), ord("V")):
         _cycle_speed(state)
+        return
+    if state.edit_started and key not in {
+        ord("["), ord("]"), ord("{"), ord("}"), ord(","), ord("."),
+        ord("<"), ord(">"), ord("+"), ord("="), ord("_"), ord("-"),
+        ord("r"), ord("R"), curses.KEY_ENTER, 10, 13,
+    }:
+        state.message = "running edit is end-only: [ ] adjust, v accelerates, Enter applies"
+        state.error = True
         return
     if key in (KEY_SHIFT_RIGHT, ord("L")):
         _move_editor_start(state, state.speed_multiplier * _quick_duration_steps(state))
@@ -1936,8 +1949,25 @@ def _handle_add_key(
         _find_add_slot(config, store, state, fixed_gpus=True)
         return
     if key in (curses.KEY_ENTER, 10, 13):
+        ledger = store.load()
+        if state.edit_mode and not state.edit_started:
+            current = next(
+                (
+                    item
+                    for item in ledger.get("reservations", [])
+                    if item.get("id") == state.edit_reservation_id
+                ),
+                None,
+            )
+            if current is not None and parse_iso(current["start_at"]) <= utc_now():
+                _load_edit_state(config, state, current)
+                state.message = (
+                    "reservation started while editing; switched to end-only mode"
+                )
+                state.error = False
+                return
         view_start = _editor_view_start(state)
-        preview = _build_add_preview(store.load(), config, state, view_start)
+        preview = _build_add_preview(ledger, config, state, view_start)
         if not preview.valid:
             state.message = preview.reason
             state.error = True
@@ -1946,10 +1976,15 @@ def _handle_add_key(
             if state.edit_mode:
                 if not state.edit_reservation_id:
                     raise BookingError("reservation not found")
-                result = edit_booking(
-                    store,
-                    config,
-                    EditRequest(
+                if state.edit_started:
+                    request = EditRequest(
+                        actor=_current_actor(),
+                        reservation_id=state.edit_reservation_id,
+                        duration_seconds=int((preview.end - preview.start).total_seconds()),
+                        gpu_memory_capacity_mb=state.gpu_memory_capacity_mb,
+                    )
+                else:
+                    request = EditRequest(
                         actor=_current_actor(),
                         reservation_id=state.edit_reservation_id,
                         start_at=preview.start,
@@ -1963,8 +1998,8 @@ def _handle_add_key(
                         gpu_memory_capacity_mb=state.gpu_memory_capacity_mb,
                         share_units=state.add_share_units if preview.mode == MODE_SHARED else None,
                         update_share_units=True,
-                    ),
-                )
+                    )
+                result = edit_booking(store, config, request)
             else:
                 result = add_booking(
                     store,
@@ -2279,6 +2314,7 @@ def _clear_editor_feedback(state: TuiState) -> None:
 def _close_editor(state: TuiState) -> None:
     state.add_mode = False
     state.edit_mode = False
+    state.edit_started = False
     state.edit_reservation_id = None
     state.editor_view_start = None
     state.add_search_anchor = None
@@ -2735,7 +2771,7 @@ def _build_add_preview(ledger: dict, config: Config, state: TuiState, view_start
         if state.edit_mode
         else _floor_to_add_step(now, slot_minutes)
     )
-    if start < earliest:
+    if start < earliest and not state.edit_started:
         local_earliest = earliest.astimezone()
         return AddPreview(
             start,
@@ -2773,6 +2809,72 @@ def _build_add_preview(ledger: dict, config: Config, state: TuiState, view_start
             False,
             f"GPU {','.join(map(str, disabled))} disabled by the administrator",
             blink=state.add_mode,
+            share_units=state.add_share_units,
+            share_capacity=config.max_shared_users,
+        )
+    if state.edit_started:
+        reservation = next(
+            (
+                item
+                for item in ledger.get("reservations", [])
+                if item.get("id") == state.edit_reservation_id
+            ),
+            None,
+        )
+        if reservation is None:
+            return AddPreview(
+                start, end, selected, cursor_gpu, mode, False,
+                "reservation not found", blink=False,
+                share_units=state.add_share_units,
+                share_capacity=config.max_shared_users,
+            )
+        earliest_end = ceil_to_slot(now, slot_minutes)
+        if end < earliest_end or end <= now:
+            return AddPreview(
+                start, end, selected, cursor_gpu, mode, False,
+                f"end must be at or after {earliest_end.astimezone():%m-%d %H:%M}",
+                blink=False,
+                share_units=state.add_share_units,
+                share_capacity=config.max_shared_users,
+            )
+        current_end = parse_iso(reservation["end_at"])
+        if end > current_end:
+            extension_start = max(current_end, earliest_end)
+            policy_reason = booking_policy_conflict(
+                config, extension_start, end, now=now
+            )
+            if policy_reason:
+                return AddPreview(
+                    start, end, selected, cursor_gpu, mode, False, policy_reason,
+                    blink=False,
+                    share_units=state.add_share_units,
+                    share_capacity=config.max_shared_users,
+                )
+            availability_ledger = _availability_ledger(ledger, state, at=now)
+            for gpu in selected:
+                ok, reason = availability_detail(
+                    availability_ledger,
+                    gpu,
+                    extension_start,
+                    end,
+                    mode,
+                    _current_actor().uid,
+                    config.max_shared_users,
+                    state.add_expected_memory_mb,
+                    state.gpu_memory_capacity_mb,
+                    config.shared_memory_reserve_mb,
+                    state.add_share_units if mode == MODE_SHARED else 1,
+                )
+                if not ok:
+                    return AddPreview(
+                        start, end, selected, cursor_gpu, mode, False, reason,
+                        blink=False,
+                        share_units=state.add_share_units,
+                        share_capacity=config.max_shared_users,
+                    )
+        return AddPreview(
+            start, end, selected, cursor_gpu, mode, True,
+            blink=False,
             share_units=state.add_share_units,
             share_capacity=config.max_shared_users,
         )

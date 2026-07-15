@@ -40,6 +40,14 @@ from .models import (
 )
 from .node_identity import stable_node_identity
 from .policy import DAEMON_POLICY_EXIT_CODE, DaemonPolicyError, validate_ledger_policy
+from .presets import (
+    delete_preset,
+    get_preset,
+    learned_profile,
+    load_preset_document,
+    preset_suggestion,
+    save_preset,
+)
 from .schedule_index import ReservationIndex
 from .scheduler import (
     find_applied_operation,
@@ -78,6 +86,7 @@ from .timeparse import (
     parse_iso,
     parse_memory_mb,
     parse_start,
+    to_iso,
     utc_now,
 )
 from .tutorial import CLI_TIP, mark_onboarding_seen, onboarding_seen, run_cli_tutorial
@@ -163,6 +172,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _book_command(argv[1:], MODE_SHARED, config, store)
         if head in {"exclusive", "x"}:
             return _book_command(argv[1:], MODE_EXCLUSIVE, config, store)
+        if head in {"preset", "presets", "p"}:
+            return _preset_command(argv[1:], config, store)
         if head in {"tui", "t"}:
             return _tui_command(argv[1:], config, store)
         if head in {"tutorial", "tour", "intro"}:
@@ -214,6 +225,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             return _doctor_command(argv[1:], config, store)
         if head in {"list", "ls", "l"}:
             return _list_command(argv[1:], config, store)
+        if head in {"notifications", "notification", "notify", "n"}:
+            return _notifications_command(argv[1:], store)
+        if head in {"history", "hist"}:
+            return _reservation_history_command(argv[1:], config, store)
         print(f"Unknown command: {head}", file=sys.stderr)
         _print_help(config, file=sys.stderr)
         return 2
@@ -341,6 +356,12 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
     if head in {"list", "ls", "l"}:
         _list_command(args[1:], config, store)
         return True
+    if head in {"notifications", "notification", "notify", "n"}:
+        _notifications_command(args[1:], store)
+        return True
+    if head in {"history", "hist"}:
+        _reservation_history_command(args[1:], config, store)
+        return True
     if head in {"log", "logs", "lg"}:
         _log_command(args[1:], store)
         return True
@@ -408,9 +429,209 @@ def _dispatch_shell_command(args: List[str], config: Config, store: LedgerStore)
     if head in {"exclusive", "x"}:
         _book_command(args[1:], MODE_EXCLUSIVE, config, store)
         return True
+    if head in {"preset", "presets", "p"}:
+        _preset_command(args[1:], config, store)
+        return True
     print(f"Unknown command: {head}")
     _print_shell_help()
     return True
+
+
+def _preset_command(argv: List[str], config: Config, store: LedgerStore) -> int:
+    if argv and argv[0] in {"-h", "--help"}:
+        parser = argparse.ArgumentParser(
+            prog="bk preset",
+            description="Save and reuse this Linux user's booking patterns.",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog="""commands:
+  list, ls                 list saved presets
+  save NAME N DUR [VRAM]   save or replace a preset
+  show NAME                show one preset
+  delete NAME              delete one preset
+  suggest                  inspect learned booking patterns
+  NAME [booking options]   book with a saved preset
+
+examples:
+  bk preset save train 2 4h 12g -s 2
+  bk p train
+  bk p train --start tomorrow 9
+""",
+        )
+        parser.print_help()
+        return 0
+    if not argv or argv[0] in {"list", "ls", "l"}:
+        parser = argparse.ArgumentParser(
+            prog="bk preset list",
+            description="List this Linux user's local booking presets.",
+        )
+        parser.add_argument("--json", action="store_true")
+        args = parser.parse_args(argv[1:] if argv else [])
+        presets = load_preset_document()["presets"]
+        if args.json:
+            print(json.dumps({"schema_version": "gpubk.presets.v1", "presets": presets}, sort_keys=True))
+            return 0
+        if not presets:
+            print("No presets yet. Save one with `bk preset save NAME 1 30m`.")
+            return 0
+        print("Name                             Mode GPUs Duration Share VRAM/GPU Placement")
+        for item in presets:
+            memory = (
+                _format_memory_mb(int(item["expected_memory_mb"]))
+                if item.get("expected_memory_mb") is not None
+                else "auto"
+            )
+            share = str(item.get("share_units") or "-")
+            preferred = item.get("preferred_gpus")
+            excluded = item.get("excluded_gpus", [])
+            placement = "auto"
+            if preferred is not None:
+                placement = "GPU " + ",".join(map(str, preferred))
+            elif excluded:
+                placement = "except " + ",".join(map(str, excluded))
+            print(
+                f"{item['name']:<32} {item['mode'][:4]:<4} {item['count']:>4} "
+                f"{_duration_compact(item['duration_seconds']):>8} {share:>5} "
+                f"{memory:>8} {placement}"
+            )
+        return 0
+
+    action = argv[0]
+    if action in {"save", "set"}:
+        parser = argparse.ArgumentParser(
+            prog="bk preset save",
+            description="Save or replace a local booking preset. Start time is never stored.",
+        )
+        parser.add_argument("name")
+        parser.add_argument("count", type=int)
+        parser.add_argument("duration")
+        parser.add_argument("memory", nargs="?", help="expected VRAM per GPU, e.g. 12g")
+        parser.add_argument("-x", "--exclusive", action="store_true")
+        parser.add_argument("-g", "--gpu", help="fixed comma-separated GPU indexes")
+        parser.add_argument(
+            "-e", "--exclude-gpu", "--exclude", dest="exclude_gpu",
+            help="GPU indexes excluded from automatic placement",
+        )
+        parser.add_argument("-s", "--share", type=int, default=1, help="shared slots per GPU")
+        args = parser.parse_args(argv[1:])
+        if args.count < 1 or args.count > len(config.enabled_gpus):
+            parser.error(f"count must be between 1 and {len(config.enabled_gpus)}")
+        duration = parse_duration_seconds(args.duration)
+        if duration % config.slot_seconds:
+            parser.error(f"duration must be a multiple of {config.slot_minutes} minutes")
+        preferred = _parse_gpu_list(args.gpu) if args.gpu else None
+        excluded = (
+            _parse_gpu_list(args.exclude_gpu, label="--exclude-gpu")
+            if args.exclude_gpu else []
+        )
+        if preferred is not None and len(preferred) != args.count:
+            parser.error("the fixed GPU list must match count")
+        invalid = sorted((set(preferred or []) | set(excluded)) - set(config.enabled_gpus))
+        if invalid:
+            parser.error(f"GPU {','.join(map(str, invalid))} is not enabled")
+        if set(preferred or []) & set(excluded):
+            parser.error("a GPU cannot be both fixed and excluded")
+        mode = MODE_EXCLUSIVE if args.exclusive else MODE_SHARED
+        if mode == MODE_SHARED and not 1 <= args.share <= config.max_shared_users:
+            parser.error(f"share must be between 1 and {config.max_shared_users}")
+        saved = save_preset(
+            {
+                "name": args.name,
+                "mode": mode,
+                "count": args.count,
+                "duration_seconds": duration,
+                "expected_memory_mb": parse_memory_mb(args.memory) if args.memory else None,
+                "share_units": args.share if mode == MODE_SHARED else None,
+                "preferred_gpus": preferred,
+                "excluded_gpus": excluded,
+            }
+        )
+        print(f"saved preset: {saved['name']} (use with `bk p {saved['name']}`)")
+        return 0
+
+    if action in {"delete", "del", "rm"}:
+        parser = argparse.ArgumentParser(prog="bk preset delete")
+        parser.add_argument("name")
+        args = parser.parse_args(argv[1:])
+        if not delete_preset(args.name):
+            raise ValueError(f"preset not found: {args.name}")
+        print(f"deleted preset: {args.name}")
+        return 0
+
+    if action in {"show", "get"}:
+        parser = argparse.ArgumentParser(prog="bk preset show")
+        parser.add_argument("name")
+        parser.add_argument("--json", action="store_true")
+        args = parser.parse_args(argv[1:])
+        item = get_preset(args.name)
+        if args.json:
+            print(json.dumps(item, sort_keys=True))
+        else:
+            print(json.dumps(item, indent=2, sort_keys=True))
+        return 0
+
+    if action in {"suggest", "learn"}:
+        parser = argparse.ArgumentParser(prog="bk preset suggest")
+        parser.parse_args(argv[1:])
+        actor = _current_actor()
+        suggestion = preset_suggestion(
+            store.load(), actor.uid, load_preset_document()["presets"]
+        )
+        if suggestion is None:
+            print("No new preset suggestion yet; three matching bookings are required.")
+            return 0
+        print(_preset_suggestion_text(suggestion))
+        return 0
+
+    name = action
+    preset = get_preset(name)
+    booking_args = [
+        str(preset["count"]),
+        _duration_compact(int(preset["duration_seconds"])),
+    ]
+    if preset.get("expected_memory_mb") is not None:
+        booking_args.extend(["-m", f"{int(preset['expected_memory_mb'])}m"])
+    if preset.get("preferred_gpus") is not None:
+        booking_args.extend(["-g", ",".join(map(str, preset["preferred_gpus"]))])
+    elif preset.get("excluded_gpus"):
+        booking_args.extend(["-e", ",".join(map(str, preset["excluded_gpus"]))])
+    if preset["mode"] == MODE_SHARED:
+        booking_args.extend(["-s", str(preset.get("share_units") or 1)])
+    booking_args.extend(argv[1:])
+    return _book_command(
+        booking_args,
+        str(preset["mode"]),
+        config,
+        store,
+        prog=f"bk p {name}",
+    )
+
+
+def _preset_suggestion_text(suggestion: dict) -> str:
+    command = [
+        "bk", "preset", "save", suggestion["name"], str(suggestion["count"]),
+        _duration_compact(int(suggestion["duration_seconds"])),
+    ]
+    if suggestion.get("expected_memory_mb") is not None:
+        command.append(f"{int(suggestion['expected_memory_mb'])}m")
+    if suggestion.get("mode") == MODE_EXCLUSIVE:
+        command.append("-x")
+    elif int(suggestion.get("share_units") or 1) != 1:
+        command.extend(["-s", str(suggestion["share_units"])])
+    return (
+        f"You used this pattern {suggestion['observations']} times. "
+        f"Save it as a preset: `{shlex.join(command)}`"
+    )
+
+
+def _maybe_print_preset_suggestion(store: LedgerStore, actor: Actor) -> None:
+    try:
+        suggestion = preset_suggestion(
+            store.load(), actor.uid, load_preset_document()["presets"]
+        )
+    except (OSError, ValueError):
+        return
+    if suggestion is not None and suggestion["observations"] == 3:
+        print(f"tip: {_preset_suggestion_text(suggestion)}")
 
 
 def _book_command(
@@ -555,6 +776,8 @@ def _book_command(
         _maybe_print_first_use_tip(
             "Next: 'bk st' shows live state. Run 'bk tutorial' for the full tour."
         )
+        if result.created:
+            _maybe_print_preset_suggestion(store, actor)
     return 0
 
 
@@ -1717,8 +1940,16 @@ def _config_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     print(f"environment overrides: {overrides}")
     print(
         f"scheduling: GPUs={effective['gpu_count']} slice={effective['slot_minutes']}m "
-        f"shared={effective['max_shared_users']} queue={effective['queue_search_hours']}h"
+        f"shared={effective['max_shared_users']} queue={effective['queue_search_hours']}h "
+        f"horizon={effective['booking_horizon_days']}d"
     )
+    if effective["booking_blackouts"]:
+        print(f"booking blackouts: {len(effective['booking_blackouts'])}")
+        for blackout in effective["booking_blackouts"]:
+            print(
+                f"  {format_local(blackout['start_at'])} -> "
+                f"{format_local(blackout['end_at'])}: {blackout['reason']}"
+            )
     if effective["disabled_gpus"] or effective["gpu_priority"]:
         enabled = ",".join(map(str, effective["enabled_gpus"])) or "none"
         disabled = ",".join(map(str, effective["disabled_gpus"])) or "none"
@@ -1795,6 +2026,11 @@ def _effective_config(config: Config) -> dict:
         "slot_minutes": config.slot_minutes,
         "max_shared_users": config.max_shared_users,
         "queue_search_hours": config.queue_search_hours,
+        "booking_horizon_days": config.booking_horizon_days,
+        "booking_blackouts": [
+            {"start_at": start, "end_at": end, "reason": reason}
+            for start, end, reason in config.booking_blackouts
+        ],
         "ledger_retention_days": config.ledger_retention_days,
         "usage_load_window_minutes": config.usage_load_window_minutes,
         "usage_minute_retention_days": config.usage_minute_retention_days,
@@ -1852,9 +2088,15 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
         raise BookingError("no GPUs are enabled for booking; contact the administrator")
     print("Guided booking. Enter accepts a default; type back or cancel at any field.")
     actor = _current_actor()
+    defaults = learned_profile(store.load(), actor.uid)
+    if defaults is not None:
+        print(
+            "Defaults learned from "
+            f"{defaults['observations']} recent matching bookings; every value remains editable."
+        )
     while True:
         try:
-            values = _guided_booking_fields(config, store)
+            values = _guided_booking_fields(config, store, defaults)
         except (EOFError, KeyboardInterrupt):
             print("\ncancelled")
             return 0
@@ -1934,29 +2176,57 @@ def _add_interactive(config: Config, store: LedgerStore) -> int:
         _print_scheduled_job_worker(submission)
     if store.last_warning:
         print(f"warning: {store.last_warning}", file=sys.stderr)
+    if result.created:
+        _maybe_print_preset_suggestion(store, actor)
     return 0
 
 
-def _guided_booking_fields(config: Config, store: LedgerStore) -> Optional[dict]:
+def _guided_booking_fields(
+    config: Config,
+    store: LedgerStore,
+    defaults: Optional[dict] = None,
+) -> Optional[dict]:
     enabled_count = len(config.enabled_gpus)
+    default_mode = str((defaults or {}).get("mode", MODE_SHARED))
+    default_count = int((defaults or {}).get("count", 1))
+    if not 1 <= default_count <= enabled_count:
+        default_count = 1
+    default_duration = int((defaults or {}).get("duration_seconds", 30 * 60))
+    if default_duration <= 0 or default_duration % config.slot_seconds:
+        default_duration = (
+            (30 * 60 + config.slot_seconds - 1) // config.slot_seconds
+        ) * config.slot_seconds
+    default_share = int((defaults or {}).get("share_units") or 1)
+    if not 1 <= default_share <= config.max_shared_users:
+        default_share = 1
+    default_memory = (defaults or {}).get("expected_memory_mb")
+    memory_default_text = (
+        _format_memory_mb(int(default_memory)) if default_memory is not None else "auto"
+    )
     fields = [
         (
             "mode",
-            lambda _values: "mode [s shared / x exclusive] (s): ",
-            lambda raw, _values: _guided_mode(raw),
+            lambda _values: (
+                "mode [s shared / x exclusive] "
+                f"({'s' if default_mode == MODE_SHARED else 'x'}): "
+            ),
+            lambda raw, _values: _guided_mode(raw, default_mode),
         ),
         (
             "count",
-            lambda _values: f"GPU count [1-{enabled_count} enabled] (1): ",
-            lambda raw, _values: _guided_gpu_count(raw, enabled_count),
+            lambda _values: f"GPU count [1-{enabled_count} enabled] ({default_count}): ",
+            lambda raw, _values: _guided_gpu_count(raw, enabled_count, default_count),
         ),
         (
             "duration",
             lambda _values: (
                 f"duration [multiple of {config.slot_minutes}m; "
-                f"e.g. {config.slot_minutes}m, 1h, 1d] (30m): "
+                f"e.g. {config.slot_minutes}m, 1h, 1d] "
+                f"({_duration_compact(default_duration)}): "
             ),
-            lambda raw, _values: _guided_duration(raw, config.slot_minutes),
+            lambda raw, _values: _guided_duration(
+                raw, config.slot_minutes, default_duration
+            ),
         ),
         (
             "start",
@@ -1979,17 +2249,23 @@ def _guided_booking_fields(config: Config, store: LedgerStore) -> Optional[dict]
         ),
         (
             "share",
-            lambda values: _guided_share_prompt(config, store, values),
+            lambda values: _guided_share_prompt(
+                config, store, values, default_share
+            ),
             lambda raw, values: _guided_share(
                 raw,
                 values["mode"],
                 config.max_shared_users,
+                default_share,
             ),
         ),
         (
             "memory",
-            lambda _values: "expected VRAM per GPU [auto or 12g] (auto): ",
-            lambda raw, _values: _guided_memory(raw),
+            lambda _values: (
+                "expected VRAM per GPU [auto or 12g] "
+                f"({memory_default_text}): "
+            ),
+            lambda raw, _values: _guided_memory(raw, default_memory),
         ),
         (
             "command",
@@ -2122,8 +2398,8 @@ def _guided_value(prompt: str, parser):
             print(f"  Invalid input: {exc}. Please try again.")
 
 
-def _guided_mode(raw: str) -> str:
-    value = (raw or "s").lower()
+def _guided_mode(raw: str, default: str = MODE_SHARED) -> str:
+    value = (raw or ("s" if default == MODE_SHARED else "x")).lower()
     if value in {"s", MODE_SHARED}:
         return MODE_SHARED
     if value in {"x", MODE_EXCLUSIVE}:
@@ -2131,17 +2407,27 @@ def _guided_mode(raw: str) -> str:
     raise ValueError("use s/shared or x/exclusive")
 
 
-def _guided_share(raw: str, mode: str, capacity_units: int) -> Optional[int]:
+def _guided_share(
+    raw: str,
+    mode: str,
+    capacity_units: int,
+    default: int = 1,
+) -> Optional[int]:
     if mode == MODE_EXCLUSIVE:
         if raw:
             raise ValueError("share applies only to shared reservations")
         return None
     if not raw:
-        return 1
+        return default
     return parse_share_units(raw, capacity_units)
 
 
-def _guided_share_prompt(config: Config, store: LedgerStore, values: dict) -> str:
+def _guided_share_prompt(
+    config: Config,
+    store: LedgerStore,
+    values: dict,
+    default: int = 1,
+) -> str:
     if values["mode"] == MODE_EXCLUSIVE:
         return "shared slots [not used by exclusive] (Enter): "
     start, _allow_queue = values["start"]
@@ -2161,7 +2447,8 @@ def _guided_share_prompt(config: Config, store: LedgerStore, values: dict) -> st
     )
     return (
         f"shared slots/GPU [max {config.max_shared_users}; "
-        f"{_shared_slot_usage_text(usage)}; request 1-{config.max_shared_users}] (1): "
+        f"{_shared_slot_usage_text(usage)}; request 1-{config.max_shared_users}] "
+        f"({default}): "
     )
 
 
@@ -2265,9 +2552,9 @@ def _guided_edit_share(
     return parse_share_units(raw, capacity_units), True
 
 
-def _guided_gpu_count(raw: str, gpu_count: int) -> int:
+def _guided_gpu_count(raw: str, gpu_count: int, default: int = 1) -> int:
     if not raw:
-        return 1
+        return default
     try:
         count = int(raw)
     except ValueError as exc:
@@ -2277,8 +2564,12 @@ def _guided_gpu_count(raw: str, gpu_count: int) -> int:
     return count
 
 
-def _guided_duration(raw: str, slot_minutes: int) -> int:
-    duration = parse_duration_seconds(raw or "30m")
+def _guided_duration(
+    raw: str,
+    slot_minutes: int,
+    default_seconds: int = 30 * 60,
+) -> int:
+    duration = parse_duration_seconds(raw or _duration_compact(default_seconds))
     if duration % (slot_minutes * 60):
         raise ValueError(f"duration must be a multiple of {slot_minutes} minutes")
     return duration
@@ -2401,8 +2692,10 @@ def _guided_optional_count(raw: str, gpu_count: int, gpus: Optional[List[int]]) 
     return count
 
 
-def _guided_memory(raw: str) -> Optional[int]:
-    if not raw or raw.lower() == "auto":
+def _guided_memory(raw: str, default: Optional[int] = None) -> Optional[int]:
+    if not raw:
+        return default
+    if raw.lower() == "auto":
         return None
     return parse_memory_mb(raw)
 
@@ -2609,6 +2902,8 @@ def _edit_command(argv: List[str], config: Config, store: LedgerStore) -> int:
 
 def _edit_interactive(config: Config, store: LedgerStore, reservation_id: str, actor: Actor) -> int:
     reservation = _get_reservation(store, reservation_id)
+    if parse_iso(reservation["start_at"]) <= utc_now():
+        return _edit_started_interactive(config, store, reservation, actor)
     print(f"Guided edit {_short_id(reservation)}. Enter keeps a value; type back or cancel at any field.")
     print(
         f"Current: mode={reservation['mode']} gpu={','.join(map(str, reservation.get('gpus', [])))} "
@@ -2697,6 +2992,86 @@ def _edit_interactive(config: Config, store: LedgerStore, reservation_id: str, a
     if store.last_warning:
         print(f"warning: {store.last_warning}", file=sys.stderr)
     return 0
+
+
+def _edit_started_interactive(
+    config: Config,
+    store: LedgerStore,
+    reservation: dict,
+    actor: Actor,
+) -> int:
+    start = parse_iso(reservation["start_at"])
+    current_end = parse_iso(reservation["end_at"])
+    current_duration = int((current_end - start).total_seconds())
+    print(
+        f"Reservation {_short_id(reservation)} is already running. "
+        "Elapsed time and resources are locked; only its future end may change."
+    )
+    print(
+        f"Current: GPU={','.join(map(str, reservation.get('gpus', [])))} "
+        f"end={format_local(reservation['end_at'])} "
+        f"total={_duration_compact(current_duration)}"
+    )
+    try:
+        raw = input(
+            "new end [keep | +30m extend | -15m shorten | 20:00 | total 2h] (keep): "
+        ).strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\ncancelled")
+        return 0
+    if not raw or raw.lower() in {"keep", "cancel"}:
+        print("no changes" if not raw or raw.lower() == "keep" else "cancelled")
+        return 0
+    try:
+        new_end = _guided_started_end(raw, start, current_end, config.slot_minutes)
+    except (BookingError, ValueError) as exc:
+        print(f"bk: {exc}", file=sys.stderr)
+        return 2
+    duration = int((new_end - start).total_seconds())
+    print(
+        f"Review: end={format_local(to_iso(new_end))} "
+        f"total={_duration_compact(duration)}"
+    )
+    try:
+        if not _guided_value("apply this end time? [Y/n]: ", _guided_confirmation):
+            print("cancelled")
+            return 0
+    except (EOFError, KeyboardInterrupt):
+        print("\ncancelled")
+        return 0
+    submission = submit_edit(
+        config,
+        store,
+        actor,
+        str(reservation["id"]),
+        duration_seconds=duration,
+    )
+    _print_edit_result(config, submission.result.reservation, submission.result)
+    if store.last_warning:
+        print(f"warning: {store.last_warning}", file=sys.stderr)
+    return 0
+
+
+def _guided_started_end(
+    raw: str,
+    start: datetime,
+    current_end: datetime,
+    slot_minutes: int,
+) -> datetime:
+    value = raw.strip()
+    lowered = value.lower()
+    if lowered.startswith("total "):
+        candidate = start + timedelta(
+            seconds=parse_duration_seconds(value.split(maxsplit=1)[1])
+        )
+    elif value[0] in {"+", "-"}:
+        delta = timedelta(seconds=parse_duration_seconds(value[1:]))
+        candidate = current_end + delta if value[0] == "+" else current_end - delta
+    else:
+        candidate = parse_friendly_start(value, slot_minutes=slot_minutes)
+    if int(candidate.timestamp()) % (slot_minutes * 60):
+        raise ValueError(f"new end must align to a {slot_minutes}-minute slice")
+    return candidate.astimezone(timezone.utc).replace(microsecond=0)
 
 
 def _print_edit_result(config: Config, reservation: dict, result) -> None:
@@ -2791,9 +3166,28 @@ def _safe_log_text(value: object, width: int) -> str:
 def _list_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser = argparse.ArgumentParser(prog="bk list")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument(
+        "--history",
+        "--all",
+        action="store_true",
+        help="show this UID's active, cancelled, and expired reservations",
+    )
     args = parser.parse_args(argv)
-    active = list_active(store.load())
     actor = _current_actor()
+    ledger = store.load()
+    active = list_active(ledger)
+    reservations = (
+        sorted(
+            [
+                item
+                for item in ledger.get("reservations", [])
+                if int(item.get("uid", -1)) == actor.uid
+            ],
+            key=lambda item: (str(item.get("start_at", "")), str(item.get("id", ""))),
+        )
+        if args.history
+        else active
+    )
     if args.json:
         print(
             json.dumps(
@@ -2802,7 +3196,7 @@ def _list_command(argv: List[str], config: Config, store: LedgerStore) -> int:
                     "kind": "reservations",
                     "reservations": [
                         public_reservation(item, actor, config.max_shared_users)
-                        for item in active
+                        for item in reservations
                     ],
                 },
                 ensure_ascii=False,
@@ -2810,24 +3204,183 @@ def _list_command(argv: List[str], config: Config, store: LedgerStore) -> int:
             )
         )
         return 0
-    if not active:
-        print("No active reservations.")
+    if not reservations:
+        print("No reservation history." if args.history else "No active reservations.")
         return 0
     mine = _own_active_reservations(store, actor)
     mine_index = {reservation["id"]: index + 1 for index, reservation in enumerate(mine)}
-    for reservation in active:
+    for reservation in reservations:
         gpus = ",".join(str(item) for item in reservation.get("gpus", []))
         index = mine_index.get(reservation["id"], "-")
         duration_seconds = int((parse_iso(reservation["end_at"]) - parse_iso(reservation["start_at"])).total_seconds())
+        suffix = ""
+        if args.history:
+            cancellation = reservation.get("cancel_operation")
+            reason = cancellation.get("reason") if isinstance(cancellation, dict) else None
+            edit_count = len(reservation.get("edit_operations", []))
+            suffix = (
+                f" status={reservation.get('status')} edits={edit_count}"
+                + (f" reason={reason}" if reason else "")
+            )
         print(
             f"{index:>2} {_short_id(reservation)} {reservation['mode']} uid={reservation['uid']} "
             f"user={reservation['username']} gpu={gpus} "
             f"{_reservation_share_label(reservation, config)}"
             f"job={reservation.get('job', {}).get('status', '-')} "
             f"dur={_duration_detail(duration_seconds)} "
-            f"{format_local_range(reservation['start_at'], reservation['end_at'])}"
+            f"{format_local_range(reservation['start_at'], reservation['end_at'])}{suffix}"
         )
     return 0
+
+
+def _notifications_command(argv: List[str], store: LedgerStore) -> int:
+    parser = argparse.ArgumentParser(
+        prog="bk notifications",
+        description="Show administrator actions and other notices for this UID.",
+    )
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--limit", type=int, default=20)
+    args = parser.parse_args(argv)
+    if args.limit < 1 or args.limit > 1000:
+        parser.error("--limit must be between 1 and 1000")
+    actor = _current_actor()
+    notices = []
+    for reservation in store.load().get("reservations", []):
+        if int(reservation.get("uid", -1)) != actor.uid:
+            continue
+        for notice in reservation.get("notifications", []):
+            if isinstance(notice, dict):
+                notices.append({**notice, "reservation_id": reservation.get("id")})
+    notices.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
+    notices = notices[: args.limit]
+    if args.json:
+        print(
+            json.dumps(
+                {
+                    "schema_version": "gpubk.notifications.v1",
+                    "kind": "notifications",
+                    "notifications": notices,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 0
+    if not notices:
+        print("No notifications.")
+        return 0
+    colors = color_enabled(sys.stdout)
+    print("When                    Reservation Event")
+    for notice in notices:
+        created = format_local(str(notice["created_at"]))
+        reservation_id = str(notice.get("reservation_id", ""))[:8]
+        message = str(notice.get("message", notice.get("reason", "notification")))
+        print(
+            f"{created:<23} {style(f'{reservation_id:<11}', 'id', enabled=colors)} "
+            f"{style(message, 'error', enabled=colors)}"
+        )
+    return 0
+
+
+def _reservation_history_command(
+    argv: List[str],
+    config: Config,
+    store: LedgerStore,
+) -> int:
+    parser = argparse.ArgumentParser(
+        prog="bk history",
+        description="Show the retained lifecycle of one reservation owned by this UID.",
+    )
+    parser.add_argument("reservation_id")
+    parser.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+    actor = _current_actor()
+    reservation = _resolve_own_reservation_history(
+        store.load(), args.reservation_id, actor
+    )
+    history = {
+        "schema_version": "gpubk.reservation-history.v1",
+        "kind": "reservation-history",
+        "reservation": public_reservation(
+            reservation, actor, config.max_shared_users
+        ),
+        "edits": reservation.get("edit_operations", []),
+        "cancellation": reservation.get("cancel_operation"),
+        "notifications": reservation.get("notifications", []),
+    }
+    if args.json:
+        print(json.dumps(history, ensure_ascii=False, sort_keys=True))
+        return 0
+    print(
+        f"Reservation {_short_id(reservation)} status={reservation.get('status')} "
+        f"owner={reservation.get('username')}"
+    )
+    print(
+        f"Current: mode={reservation.get('mode')} "
+        f"GPU={','.join(map(str, reservation.get('gpus', [])))} "
+        f"{format_local_range(reservation['start_at'], reservation['end_at'])}"
+    )
+    edits = reservation.get("edit_operations", [])
+    if not edits:
+        print("Edits: none")
+    else:
+        print(f"Edits: {len(edits)}")
+        for index, edit in enumerate(edits, 1):
+            before = edit.get("before")
+            after = edit.get("after")
+            when = (
+                format_local(str(edit["at"]))
+                if edit.get("at") is not None
+                else "legacy"
+            )
+            if isinstance(before, dict) and isinstance(after, dict):
+                print(
+                    f"  {index:>2} {when} {_edit_state_summary(before)} -> "
+                    f"{_edit_state_summary(after)}"
+                )
+            else:
+                print(f"  {index:>2} {when} legacy edit (details unavailable)")
+    cancellation = reservation.get("cancel_operation")
+    if isinstance(cancellation, dict):
+        print(
+            "Cancellation: "
+            f"{cancellation.get('kind', 'legacy')} by "
+            f"{cancellation.get('actor_username', 'unknown')} "
+            f"reason={cancellation.get('reason', 'not recorded')}"
+        )
+    return 0
+
+
+def _edit_state_summary(state: dict) -> str:
+    gpus = ",".join(map(str, state.get("gpus", [])))
+    memory = state.get("expected_memory_mb")
+    memory_text = _format_memory_mb(int(memory)) if memory is not None else "auto"
+    return (
+        f"{state.get('mode')} GPU={gpus} "
+        f"{format_local_range(state['start_at'], state['end_at'])} "
+        f"share={state.get('share_units') or '-'} mem={memory_text}"
+    )
+
+
+def _resolve_own_reservation_history(
+    ledger: dict,
+    token: str,
+    actor: Actor,
+) -> dict:
+    value = token.strip()
+    if not value:
+        raise BookingError("reservation ID is required")
+    matches = [
+        item
+        for item in ledger.get("reservations", [])
+        if int(item.get("uid", -1)) == actor.uid
+        and str(item.get("id", "")).startswith(value)
+    ]
+    if not matches:
+        raise BookingError("reservation not found in this UID's retained history")
+    if len(matches) > 1:
+        raise BookingError("reservation ID prefix is ambiguous; provide more characters")
+    return matches[0]
 
 
 def _login_command(argv: List[str], config: Config, store: LedgerStore) -> int:
@@ -3563,6 +4116,8 @@ ADMINISTRATION (current administrator only)
   sudo bk admin init                 initialize a shared server
   sudo bk admin services install     install tracked boot services
   sudo bk admin login-hook install   optional login booking notice
+  sudo bk admin cancel ID --reason TEXT  cancel and notify owner
+  sudo bk admin gpu-policy           GPU, horizon, and blackout policy
   sudo bk admin data backup [PATH]   checksummed data snapshot
   sudo bk admin data verify PATH     read-only integrity check
   sudo bk admin data clear --yes     backup, then empty reset
@@ -3603,6 +4158,8 @@ BOOK
   bk 1 1h -t +30m                 exact friendly local time
   bk 1 1h -- command args...     book and schedule a command
   bk a                            guided booking with input recovery
+  bk preset save train 2 4h 12g  save a reusable local preset
+  bk p train                      book with that preset
 
 VIEW
   bk info                         administrator account and contact
@@ -3612,14 +4169,18 @@ VIEW
   bk tl [window] [--step auto]   fine-grained aligned timeline
   bk slots 2 1h                  read-only earliest alternatives
   bk l                            active reservations
+  bk l --history                  your cancelled/expired history
+  bk n                            administrator notifications
+  bk history ID                   detailed edits and cancellation reason
   bk t                            full-screen TUI
 
 MANAGE
   bk e [number|short_id]         guided edit
   bk e ID --duration 2h          direct edit
   bk e ID --at 20:00             move using local time
+  bk e ID                         running: change future end only
   bk d <number|short_id>         cancel
-  bk lg [--limit 100] [--json]    recent personal operation log
+  bk lg [--limit 100] [--json]   recent personal operation log
 
 JOBS AND USAGE
   bk run -- COMMAND              run on your active booking
@@ -3650,6 +4211,8 @@ AUTOMATION
 TIME AND POLICY
   Duration: 30m, 1h30m, 1d; align to the configured slice (default 5m).
   No start: try now, then queue to the earliest valid slot.
+  Future bookings stop at the administrator horizon (default 30 days).
+  Blackouts are rejected or skipped by automatic queueing.
   Common flags: -g GPU, -e EXCLUDED, -m VRAM, -s SLOTS, -t TIME.
   Help: -h is the short form of --help on every subcommand.
   Admin help: bk help admin | bk admin data -h.
@@ -3680,9 +4243,14 @@ def _print_shell_help() -> None:
   s 1 4h [--gpu 0]          shared booking
   x 1 4h [--gpu 0]          exclusive booking
   a | add                   guided booking prompts
+  p [NAME]                  list presets or book with one
+  preset save NAME 1 30m    save a reusable local preset
   e <number|short_id>       modify your reservation
   d <number|short_id>       cancel your reservation
   l | list                  list active reservations
+  l --history               show your cancelled and expired reservations
+  n | notifications         show administrator notices for this UID
+  history ID               show retained before/after edit details
   lg | log [--limit 100]    show your recent operation log
   i | info                  show administrator account and contact
   cfg | config              inspect effective configuration and ledger policy

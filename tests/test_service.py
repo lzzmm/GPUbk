@@ -35,10 +35,15 @@ class AgentServiceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.data_dir = Path(self.tmp.name)
+        self.start = datetime(2030, 1, 1, 12, 0, tzinfo=timezone.utc)
+        self.scheduler_now_patch = mock.patch(
+            "bk.scheduler.utc_now",
+            return_value=self.start - timedelta(days=1),
+        )
+        self.scheduler_now_patch.start()
         self.config = Config(data_dir=self.data_dir, gpu_count=2, max_shared_users=2)
         self.store = LedgerStore(self.data_dir)
         self.actor = Actor(1002 if os.getuid() == 1001 else 1001, "alice")
-        self.start = datetime(2030, 1, 1, 12, 0, tzinfo=timezone.utc)
         self.snapshots = [
             GpuSnapshot(
                 0,
@@ -68,6 +73,7 @@ class AgentServiceTests(unittest.TestCase):
         )
 
     def tearDown(self):
+        self.scheduler_now_patch.stop()
         self.tmp.cleanup()
 
     def test_context_has_stable_schema_and_no_process_arguments(self):

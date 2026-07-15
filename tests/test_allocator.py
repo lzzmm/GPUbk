@@ -300,6 +300,7 @@ class ExternalAllocatorTests(unittest.TestCase):
             data_dir=self.data_dir,
             gpu_count=2,
             max_shared_users=1,
+            booking_horizon_days=3650,
             allocator_command=allocator_command(
                 {"schema_version": ALLOCATOR_SCHEMA_VERSION, "gpu_order": [0, 1]}
             ),

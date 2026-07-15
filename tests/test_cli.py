@@ -43,6 +43,7 @@ class CliTests(unittest.TestCase):
         env["BK_DATA_DIR"] = str(data_dir)
         env["BK_GPU_COUNT"] = "1"
         env["BK_MAX_SHARED_USERS"] = "2"
+        env["BK_BOOKING_HORIZON_DAYS"] = "3650"
         env["BK_GPU_SIM_FILE"] = str(Path(data_dir) / "missing-gpu-simulation.json")
         if extra_env:
             env.update(extra_env)
@@ -62,6 +63,7 @@ class CliTests(unittest.TestCase):
         env["BK_DATA_DIR"] = str(data_dir)
         env["BK_GPU_COUNT"] = "2"
         env["BK_MAX_SHARED_USERS"] = "2"
+        env["BK_BOOKING_HORIZON_DAYS"] = "3650"
         env["BK_GPU_SIM_FILE"] = str(Path(data_dir) / "missing-gpu-simulation.json")
         if extra_env:
             env.update(extra_env)
@@ -2722,7 +2724,8 @@ class CliTests(unittest.TestCase):
                 text,
             )
             self.assertIn(
-                "captured config overrides: BK_GPU_COUNT, BK_MAX_SHARED_USERS, "
+                "captured config overrides: BK_BOOKING_HORIZON_DAYS, BK_GPU_COUNT, "
+                "BK_MAX_SHARED_USERS, "
                 "BK_WORKER_MAX_PARALLEL, BK_WORKER_TERMINATION_GRACE_SECONDS",
                 result.stdout,
             )
@@ -3233,6 +3236,76 @@ class CliTests(unittest.TestCase):
                 if path.is_file()
             }
             self.assertEqual(after, before)
+
+    def test_preset_save_list_and_use(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            data_dir = root / "data"
+            environment = {
+                "XDG_CONFIG_HOME": str(root / "config"),
+                "BK_GPU_COUNT": "4",
+                "BK_MAX_SHARED_USERS": "4",
+            }
+
+            saved = self.run_bk(
+                ["preset", "save", "train", "2", "1h", "12g", "-s", "2"],
+                data_dir,
+                environment,
+            )
+            listed = self.run_bk(["p"], data_dir, environment)
+            booked = self.run_bk(["p", "train", "--json"], data_dir, environment)
+
+            self.assertEqual(saved.returncode, 0, saved.stderr)
+            self.assertIn("saved preset: train", saved.stdout)
+            self.assertIn("train", listed.stdout)
+            payload = json.loads(booked.stdout)
+            self.assertEqual(payload["reservation"]["gpus"], [0, 1])
+            self.assertEqual(payload["reservation"]["share_units_per_gpu"], 2)
+            self.assertEqual(
+                payload["reservation"]["expected_memory_mb_per_gpu"], 12 * 1024
+            )
+
+    def test_preset_short_and_long_help_are_not_treated_as_names(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+
+            short = self.run_bk(["p", "-h"], data_dir)
+            long = self.run_bk(["preset", "--help"], data_dir)
+
+            self.assertEqual(short.returncode, 0, short.stderr)
+            self.assertEqual(long.returncode, 0, long.stderr)
+            self.assertIn("save NAME N DUR", short.stdout)
+            self.assertIn("book with a saved preset", long.stdout)
+
+    def test_default_booking_horizon_rejects_far_future_start(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            far_start = iso(ceil_5m(datetime.now(timezone.utc) + timedelta(days=31)))
+            result = self.run_bk(
+                ["1", "30m", "--start", far_start],
+                data_dir,
+                {"BK_BOOKING_HORIZON_DAYS": "30"},
+            )
+
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("30-day booking horizon", result.stderr)
+
+    def test_list_history_keeps_cancelled_reservation_and_reason(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            created = self.run_bk(["1", "30m"], data_dir)
+            reservation_id = created.stdout.split()[1]
+            edited = self.run_bk(["e", reservation_id, "-d", "35m"], data_dir)
+            cancelled = self.run_bk(["d", reservation_id], data_dir)
+            history = self.run_bk(["l", "--history"], data_dir)
+            lifecycle = self.run_bk(["history", reservation_id], data_dir)
+
+            self.assertEqual(edited.returncode, 0, edited.stderr)
+            self.assertEqual(cancelled.returncode, 0, cancelled.stderr)
+            self.assertIn("status=cancelled", history.stdout)
+            self.assertIn("cancelled by reservation owner", history.stdout)
+            self.assertIn("Edits: 1", lifecycle.stdout)
+            self.assertIn("Cancellation: owner", lifecycle.stdout)
 
 
 if __name__ == "__main__":

@@ -106,6 +106,21 @@ class BrokerLedgerStore(LedgerStore):
             raise BookingError("broker returned an invalid cancellation result")
         return result
 
+    def broker_admin_cancel_booking(
+        self,
+        reservation_id: str,
+        actor: Actor,
+        reason: str,
+    ) -> dict:
+        del actor
+        result = self._broker.call(
+            "booking.admin-cancel",
+            {"reservation_id": str(reservation_id), "reason": reason},
+        )
+        if not isinstance(result, dict):
+            raise BookingError("broker returned an invalid administrator cancellation result")
+        return result
+
     def transaction(self, mutator):
         try:
             return self._patch_transaction(mutator)
@@ -472,6 +487,28 @@ class BrokerServer:
                 reservation_id,
                 actor,
                 operation_id,
+            )
+        if operation == "booking.admin-cancel":
+            _require_keys(
+                payload,
+                {"reservation_id", "reason"},
+                required={"reservation_id", "reason"},
+                label="administrator cancellation payload",
+            )
+            reservation_id = payload.get("reservation_id")
+            reason = payload.get("reason")
+            if not isinstance(reservation_id, str) or not reservation_id:
+                raise BookingError("reservation_id is required")
+            if not isinstance(reason, str):
+                raise BookingError("administrator cancellation reason is required")
+            from .scheduler import cancel_booking_as_admin
+
+            return cancel_booking_as_admin(
+                self.store,
+                self.config,
+                reservation_id,
+                actor,
+                reason,
             )
         raise BookingError(f"unsupported broker operation: {operation}")
 

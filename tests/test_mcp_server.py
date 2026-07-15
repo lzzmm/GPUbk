@@ -23,6 +23,7 @@ class McpBackendTests(unittest.TestCase):
             data_dir=self.data_dir,
             gpu_count=2,
             max_shared_users=2,
+            booking_horizon_days=3650,
             job_log_dir=Path(self.tmp.name) / "private-jobs",
         )
         self.store = LedgerStore(self.data_dir)

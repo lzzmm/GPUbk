@@ -11,12 +11,14 @@ GPUBK 是面向 Linux 共享服务器的 GPU 预约工具。PyPI 包名是 `gpub
 ## 主要功能
 
 - shared 与 exclusive 预约粒度可配置，默认 5 分钟。
+- 用户私有常用预设，以及从历史学习但可随时修改的引导默认值。
 - 自动排队、实时 GPU 感知和每卡显存预算。
 - 同时适配深色、浅色终端的紧凑时间轴。
 - 到点执行命令并自动设置 `CUDA_VISIBLE_DEVICES`。
 - 基于 NVML 的进程监测和近期负载历史。
 - 稳定 JSON、MCP 工具、内置 Codex Skill 和可选外部 allocator。
 - 原子文件事务、UID 权限检查、备份和只追加审计日志。
+- 管理员最远预约范围、禁约窗口、带原因取消和用户通知。
 
 GPUBK 是协作式调度器，不代替 Linux 设备权限。拥有 `/dev/nvidia*` 直接访问权的
 用户仍可绕过本工具，管理员需要另行配置设备访问策略。
@@ -97,8 +99,22 @@ bk 1 1h -e 2,3                  # 自动调度，但排除 GPU 2、3
 bk x 2 4h                        # exclusive 排他预约
 bk 1 1h -t +30m                 # 30 分钟后，当地时间
 bk 1 1h --at "tomorrow 09:00"  # 明天 09:00
-bk 1 1h --start 2030-01-01T20:00:00+08:00  # 脚本使用的精确时间
+bk 1 1h --start "$(date -d 'tomorrow 20:00' --iso-8601=seconds)"  # 精确 ISO 时间
 ```
+
+常用申请可以保存为当前用户的私有预设。预设位于用户自己的 `XDG_CONFIG_HOME`，
+不会保存开始时间；默认仍按实时状态自动选卡，只有显式写入 `-g` 或 `-e` 时才固定或排除 GPU。
+
+```bash
+bk preset save train 2 4h 12g -s 2   # 2 张卡、2 个 shared slot、每卡 12 GiB
+bk preset save debug 1 30m -x -g 0    # 排他使用固定 GPU 0
+bk p                                  # 列出预设
+bk p train                            # 用预设预约最早合法时段
+bk preset delete train
+```
+
+连续出现三次相同预约习惯后，GPUBK 会提示保存预设。`bk add` 会把近期最常见的模式、
+卡数、时长、shared slot 和每卡显存作为可修改默认值，但不会学习某次偶然分配到的 GPU。
 
 使用 `bk COMMAND --help` 或 `bk help COMMAND` 查看对应帮助。帮助命令不会进入
 引导表单、全屏 TUI 或 MCP stdio 服务。
@@ -110,6 +126,9 @@ bk l
 bk e 1 --duration 2h
 bk e 1 --at "tomorrow 09:00"
 bk d 1
+bk l --history                      # 自己的生效、取消和过期记录
+bk n                                # 管理员通知及取消原因
+bk history ID                       # 每次编辑前后状态和最终取消信息
 bk lg --limit 100                # 当前 UID 最近的操作记录
 bk lg --limit 20 --json          # 有界、机器可读的审计事件
 bk config                         # 查看最终生效配置与台账策略
@@ -124,6 +143,7 @@ bk doctor                         # 只读检查台账
 调度规则保持简单：
 
 - 开始时间和持续时间使用服务器配置的预约边界。
+- 预约结束时间不能超过管理员设定的最远预约范围（默认 30 天），也不能跨越管理员禁约窗口。
 - 不传 `--at` 或 `--start` 时优先使用当前预约时间片（默认配置下 `12:41` 从 `12:40` 开始）；
   若必须延后才会显示 `queued:`。
 - `--at` 支持 `+30m`、`20:00`、`tomorrow 09:00` 和 `07-13 20:00`；
@@ -170,7 +190,9 @@ bk slots x 1 30m --limit 3
 
 `bk add` 和不带修改参数的 `bk edit ID` 都是可恢复的引导流程，支持上述自然时间；
 输入错误时只重新询问当前字段，还可以输入 `back` 或 `cancel`，写入前会用当地时间
-显示变更摘要。已经开始的预约不可编辑，也不能把开始时间改到过去；`--queue`
+显示变更摘要。预约开始前可以修改未来字段；开始后，已经过去的时间、GPU、模式、slot
+和显存不可改，只能调整未来结束时间，支持 `+30m`、`-15m`、`20:00` 或 `total 2h`。
+每次编辑都会保存修改前后状态。`--queue`
 只会在合法起点发生资源冲突时向后排队，不会悄悄修正非法的过去时间。`bk slots`
 只读，并会为第一项方案给出可直接执行的预约命令。
 
@@ -726,6 +748,27 @@ sudo bk admin gpu-policy --allow-implicit-shared-memory --yes
 `/etc/gpubk/config-update.json`；先运行
 `sudo bk admin gpu-policy --recover --dry-run`，确认后再加 `--yes`。恢复完成前普通启动会
 安全拒绝运行，避免新旧可信文件混用。
+
+同一个受审查事务也可以设置最远预约天数并整体替换禁约窗口；多个窗口可重复传入
+`--blackout`：
+
+```bash
+sudo systemctl stop gpubk-broker.service gpubk-monitor.service
+sudo bk admin gpu-policy --booking-horizon-days 30 \
+  --blackout 2026-08-01T00:00:00+08:00 2026-08-01T12:00:00+08:00 机房维护 \
+  --dry-run
+sudo bk admin gpu-policy --booking-horizon-days 30 \
+  --blackout 2026-08-01T00:00:00+08:00 2026-08-01T12:00:00+08:00 机房维护 \
+  --yes
+sudo systemctl start gpubk-broker.service gpubk-monitor.service
+```
+
+`--clear-blackouts` 会清空禁约窗口。管理员取消任意生效预约时必须填写用户可见原因；
+取消记录、原因和此前编辑历史都会保留在台账保留期内：
+
+```bash
+sudo bk admin cancel RESERVATION_ID --reason "机房散热维护" --yes
+```
 
 若想先做可回滚的前台试运行，再启用 systemd 服务，可以用选定的运行账号在第二个终端
 启动 broker，不要加 `sudo`：

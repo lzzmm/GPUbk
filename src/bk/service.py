@@ -600,6 +600,11 @@ def build_agent_context(
             "require_shared_memory": config.require_shared_memory,
             "shared_memory_reserve_mb": config.shared_memory_reserve_mb,
             "queue_search_hours": config.queue_search_hours,
+            "booking_horizon_days": config.booking_horizon_days,
+            "booking_blackouts": [
+                {"start_at": start, "end_at": end, "reason": reason}
+                for start, end, reason in config.booking_blackouts
+            ],
             "ledger_retention_days": config.ledger_retention_days,
             "access_mode": config.access_mode,
             "storage_transport": config.storage_transport,
@@ -1053,12 +1058,14 @@ def _public_reservation(
         if reservation.get("mode") == MODE_SHARED
         else None
     )
+    mine = int(reservation.get("uid", -1)) == actor.uid
+    cancellation = reservation.get("cancel_operation")
     return {
         "id": reservation.get("id"),
         "short_id": str(reservation.get("id", ""))[:8],
         "uid": reservation.get("uid"),
         "username": reservation.get("username"),
-        "mine": int(reservation.get("uid", -1)) == actor.uid,
+        "mine": mine,
         "gpus": list(reservation.get("gpus", [])),
         "mode": reservation.get("mode"),
         "start_at": reservation.get("start_at"),
@@ -1068,6 +1075,17 @@ def _public_reservation(
         "share_units_per_gpu": share_units,
         "share_capacity_units_per_gpu": (
             share_capacity_units if reservation.get("mode") == MODE_SHARED else None
+        ),
+        "edit_count": len(reservation.get("edit_operations", [])) if mine else None,
+        "cancellation": (
+            {
+                "at": cancellation.get("at"),
+                "kind": cancellation.get("kind"),
+                "reason": cancellation.get("reason"),
+                "actor_username": cancellation.get("actor_username"),
+            }
+            if mine and isinstance(cancellation, dict)
+            else None
         ),
         "job": (
             {

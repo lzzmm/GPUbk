@@ -628,6 +628,64 @@ class AdminInitTests(unittest.TestCase):
         )
         apply_policy.assert_called_once_with(policy)
 
+    def test_gpu_policy_accepts_horizon_and_repeated_blackouts(self):
+        config_file = Path("/etc/gpubk/config.json")
+        blackouts = (
+            ("2030-01-01T00:00:00Z", "2030-01-01T02:00:00Z", "maintenance"),
+        )
+        policy = admin_module.AdminGpuPolicyPlan(
+            config_file=config_file,
+            data_dir=Path("/var/lib/gpubk"),
+            broker_socket=Path("/run/gpubk/broker.sock"),
+            service=AdminIdentity(1003, "admin", 1003),
+            current_disabled_gpus=(),
+            desired_disabled_gpus=(),
+            current_gpu_priority=(),
+            desired_gpu_priority=(),
+            current_require_shared_memory=False,
+            desired_require_shared_memory=False,
+            require_shared_memory_update=None,
+            current_document={"gpu_count": 8},
+            desired_document={"gpu_count": 8, "booking_horizon_days": 14},
+            blockers=(),
+            current_booking_horizon_days=30,
+            desired_booking_horizon_days=14,
+            booking_horizon_days_update=14,
+            current_booking_blackouts=(),
+            desired_booking_blackouts=blackouts,
+            booking_blackouts_update=blackouts,
+        )
+        output = StringIO()
+        with mock.patch(
+            "bk.admin.inspect_admin_gpu_policy", return_value=policy
+        ) as inspect_policy, redirect_stdout(output):
+            status = run_admin_cli(
+                [
+                    "gpu-policy",
+                    "--config-file",
+                    str(config_file),
+                    "--booking-horizon-days",
+                    "14",
+                    "--blackout",
+                    "2030-01-01T00:00:00Z",
+                    "2030-01-01T02:00:00Z",
+                    "maintenance",
+                    "--dry-run",
+                    "--json",
+                ]
+            )
+
+        self.assertEqual(status, 0)
+        self.assertEqual(json.loads(output.getvalue())["desired"]["booking_horizon_days"], 14)
+        self.assertEqual(
+            inspect_policy.call_args.kwargs["booking_blackouts"],
+            [[
+                "2030-01-01T00:00:00Z",
+                "2030-01-01T02:00:00Z",
+                "maintenance",
+            ]],
+        )
+
     def test_gpu_policy_json_recovery_emits_one_final_document(self):
         config_file = Path("/etc/gpubk/config.json")
         inspection = {

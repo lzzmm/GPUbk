@@ -84,7 +84,8 @@ never treat names or contact fields as authorization evidence.
 3. If expected VRAM is unknown, state that GPUBK derives it from the requested slots. Shared slots constrain admission; they do not physically enforce GPU compute bandwidth without MIG/MPS.
 4. Inspect context immediately before recommending. Current processes can change quickly. Never
    select `policy.disabled_gpus`; administrator priority tiers break otherwise-equivalent ties and
-   never justify moving a booking to a later start.
+   never justify moving a booking to a later start. Respect `booking_horizon_days` and every
+   reason-labelled `booking_blackouts` interval; do not suggest bypassing administrator policy.
 5. Run a read-only recommendation. Explain queued start, selected GPUs, confidence, live-busy warnings, and projected memory headroom.
 6. Treat explicit start as exact. It may use the active slice boundary or a future boundary,
    never an older historical slice. Do not silently convert it to queueing.
@@ -142,7 +143,8 @@ NVML device cannot be bound safely.
 - `bk log --json` returns only the current UID's bounded recent audit tail. Surface a non-null
   warning because it may indicate a damaged tail or that the 64 MiB scan ceiling was reached.
 
-For edits, reject started reservations and explicit starts in the past. A valid explicit `start`
+For a started reservation, preserve its start and resources and change only its total duration
+when the resulting end remains in the future; elapsed time is immutable. A valid explicit `start`
 is exact and does not move unless `allow_queue=true` was explicitly requested to resolve a
 resource conflict. Keep `bk worker` running for scheduled commands. Use `list_gpu_reservations`,
 `bk j --json`, or the bounded job-log tool to inspect state. `cleanup_my_job_specs` and

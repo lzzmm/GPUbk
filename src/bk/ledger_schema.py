@@ -17,6 +17,7 @@ from .timeparse import parse_iso
 MAX_RESERVATION_ID_LENGTH = 128
 MAX_USERNAME_LENGTH = 256
 MAX_EDIT_OPERATIONS_PER_RESERVATION = 256
+MAX_NOTIFICATIONS_PER_RESERVATION = 128
 
 
 def validate_ledger_document(data: object) -> None:
@@ -118,6 +119,9 @@ def _validate_reservation(
     cancellation = reservation.get("cancel_operation")
     if cancellation is not None:
         _validate_cancel_operation(cancellation, path, uid, seen_operations)
+    notifications = reservation.get("notifications")
+    if notifications is not None:
+        _validate_notifications(notifications, path)
 
 
 def _validate_edit_operations(
@@ -140,6 +144,45 @@ def _validate_edit_operations(
         operation_id = _bounded_text(item.get("op_id"), f"{item_path}.op_id", 128)
         _bounded_text(item.get("signature"), f"{item_path}.signature", 128)
         _register_operation_id(uid, operation_id, f"{item_path}.op_id", seen_operations)
+        if item.get("at") is not None:
+            _timestamp(item["at"], f"{item_path}.at")
+        if item.get("actor_uid") is not None:
+            _uid(item["actor_uid"], f"{item_path}.actor_uid")
+        if item.get("actor_username") is not None:
+            _bounded_text(
+                item["actor_username"],
+                f"{item_path}.actor_username",
+                MAX_USERNAME_LENGTH,
+            )
+        for state_name in ("before", "after"):
+            if item.get(state_name) is not None:
+                _validate_edit_state(item[state_name], f"{item_path}.{state_name}")
+
+
+def _validate_edit_state(value: object, path: str) -> None:
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must be an object")
+    gpus = value.get("gpus")
+    if not isinstance(gpus, list) or not gpus or len(gpus) > MAX_GPU_COUNT:
+        raise ValueError(f"{path}.gpus must be a non-empty GPU list")
+    normalized = []
+    for index, gpu in enumerate(gpus):
+        if isinstance(gpu, bool) or not isinstance(gpu, int) or not 0 <= gpu < MAX_GPU_COUNT:
+            raise ValueError(f"{path}.gpus[{index}] is invalid")
+        normalized.append(gpu)
+    if len(normalized) != len(set(normalized)):
+        raise ValueError(f"{path}.gpus contains duplicates")
+    if value.get("mode") not in {MODE_SHARED, MODE_EXCLUSIVE}:
+        raise ValueError(f"{path}.mode must be shared or exclusive")
+    start = _timestamp(value.get("start_at"), f"{path}.start_at")
+    end = _timestamp(value.get("end_at"), f"{path}.end_at")
+    if start >= end:
+        raise ValueError(f"{path}.end_at must be later than start_at")
+    _optional_positive_integer(
+        value.get("expected_memory_mb"),
+        f"{path}.expected_memory_mb",
+    )
+    _optional_positive_integer(value.get("share_units"), f"{path}.share_units")
 
 
 def _validate_cancel_operation(
@@ -149,11 +192,46 @@ def _validate_cancel_operation(
     seen_operations: set[tuple[int, str]],
 ) -> None:
     path = f"{reservation_path}.cancel_operation"
-    if not isinstance(value, dict) or set(value) != {"op_id", "signature"}:
-        raise ValueError(f"{path} must contain op_id and signature")
+    if not isinstance(value, dict):
+        raise ValueError(f"{path} must be an object")
     operation_id = _bounded_text(value.get("op_id"), f"{path}.op_id", 128)
     _bounded_text(value.get("signature"), f"{path}.signature", 128)
     _register_operation_id(uid, operation_id, f"{path}.op_id", seen_operations)
+    if value.get("at") is not None:
+        _timestamp(value["at"], f"{path}.at")
+    if value.get("actor_uid") is not None:
+        _uid(value["actor_uid"], f"{path}.actor_uid")
+    if value.get("actor_username") is not None:
+        _bounded_text(value["actor_username"], f"{path}.actor_username", MAX_USERNAME_LENGTH)
+    if value.get("kind") is not None and value["kind"] not in {"owner", "administrator"}:
+        raise ValueError(f"{path}.kind is unsupported")
+    if value.get("reason") is not None:
+        _bounded_text(value["reason"], f"{path}.reason", 512)
+
+
+def _validate_notifications(value: object, reservation_path: str) -> None:
+    path = f"{reservation_path}.notifications"
+    if not isinstance(value, list) or len(value) > MAX_NOTIFICATIONS_PER_RESERVATION:
+        raise ValueError(f"{path} must contain at most {MAX_NOTIFICATIONS_PER_RESERVATION} items")
+    seen = set()
+    for index, item in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(item, dict):
+            raise ValueError(f"{item_path} must be an object")
+        notification_id = _bounded_text(item.get("id"), f"{item_path}.id", 128)
+        if notification_id in seen:
+            raise ValueError(f"{item_path}.id is duplicated")
+        seen.add(notification_id)
+        _bounded_text(item.get("type"), f"{item_path}.type", 64)
+        _timestamp(item.get("created_at"), f"{item_path}.created_at")
+        _uid(item.get("actor_uid"), f"{item_path}.actor_uid")
+        _bounded_text(
+            item.get("actor_username"),
+            f"{item_path}.actor_username",
+            MAX_USERNAME_LENGTH,
+        )
+        _bounded_text(item.get("reason"), f"{item_path}.reason", 512)
+        _bounded_text(item.get("message"), f"{item_path}.message", 1024)
 
 
 def _register_operation_id(

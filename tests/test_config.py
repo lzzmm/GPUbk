@@ -10,6 +10,29 @@ from bk.config import Config, load_config
 
 
 class ConfigTests(unittest.TestCase):
+    def test_booking_policy_is_validated_and_normalized(self):
+        config = Config(
+            Path("/tmp/policy"),
+            booking_horizon_days=30,
+            booking_blackouts=((
+                "2030-01-01T08:00:00+08:00",
+                "2030-01-01T10:00:00+08:00",
+                "cooling maintenance",
+            ),),
+        )
+
+        self.assertEqual(config.booking_horizon_days, 30)
+        self.assertEqual(
+            config.booking_blackouts,
+            ((
+                "2030-01-01T00:00:00Z",
+                "2030-01-01T02:00:00Z",
+                "cooling maintenance",
+            ),),
+        )
+        with self.assertRaisesRegex(ValueError, "booking_horizon_days"):
+            Config(Path("/tmp/policy"), booking_horizon_days=0)
+
     def test_access_mode_is_derived_from_directory_permissions(self):
         self.assertEqual(Config(Path("/tmp/private"), dir_mode=0o700).access_mode, "private")
         self.assertEqual(Config(Path("/tmp/group"), dir_mode=0o2770).access_mode, "group")
@@ -40,6 +63,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(config.access_mode, "private")
             self.assertEqual(config.slot_minutes, 5)
             self.assertEqual(config.slot_seconds, 300)
+            self.assertEqual(config.booking_horizon_days, 30)
+            self.assertEqual(config.booking_blackouts, ())
             self.assertIsNone(config.config_file)
             self.assertEqual(config.config_path, Path(tmp) / "bk" / "config.json")
             self.assertEqual(config.timeline_hours, 2)

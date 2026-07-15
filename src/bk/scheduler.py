@@ -82,6 +82,9 @@ def add_booking(
         gpu_order = _normalize_gpu_order(request.gpu_order, config)
         gpu_scores = _normalize_gpu_scores(request.gpu_scores, config)
         _validate_gpu_scope(config, request.count, preferred, excluded)
+        policy_reason = booking_policy_conflict(config, start, end, now=now)
+        if policy_reason and not request.allow_queue:
+            raise BookingError(policy_reason)
 
         operation_signature = _create_operation_signature(
             request,
@@ -328,11 +331,16 @@ def cancel_booking(
                 raise BookingError("permission denied: reservation belongs to another UID")
             reservation["status"] = STATUS_CANCELLED
             reservation["updated_at"] = to_iso(now)
-            if op_id:
-                reservation["cancel_operation"] = {
-                    "op_id": op_id,
-                    "signature": operation_signature,
-                }
+            cancel_op_id = op_id or str(uuid.uuid4())
+            reservation["cancel_operation"] = {
+                "op_id": cancel_op_id,
+                "signature": operation_signature,
+                "at": to_iso(now),
+                "actor_uid": actor.uid,
+                "actor_username": actor.username,
+                "kind": "owner",
+                "reason": "cancelled by reservation owner",
+            }
             job = reservation.get("job")
             if isinstance(job, dict):
                 if job.get("status") == JOB_PENDING:
@@ -346,12 +354,111 @@ def cancel_booking(
                 reservation,
                 "ok",
                 "cancelled",
-                operation_id=op_id,
+                operation_id=cancel_op_id,
             )
             return ledger, reservation, [log], True
         raise BookingError("reservation not found")
 
     return store.transaction(mutate)
+
+
+def cancel_booking_as_admin(
+    store: LedgerStore,
+    config: Config,
+    reservation_id: str,
+    actor: Actor,
+    reason: str,
+) -> dict:
+    broker_cancel = getattr(store, "broker_admin_cancel_booking", None)
+    if callable(broker_cancel):
+        return broker_cancel(reservation_id, actor, reason)
+    administrator_uids = {0}
+    if config.broker_uid is not None:
+        administrator_uids.add(config.broker_uid)
+    if actor.uid not in administrator_uids:
+        raise BookingError("permission denied: administrator cancellation requires sudo")
+    reason = _admin_cancellation_reason(reason)
+    operation_signature = _operation_signature(
+        "admin-cancel",
+        {"reservation_id": reservation_id, "reason": reason},
+    )
+
+    def mutate(ledger: dict):
+        now = utc_now()
+        changed = bind_ledger_policy(ledger, config)
+        changed = _maintain_ledger(ledger, now, config.ledger_retention_days) or changed
+        reservation = _find_reservation(ledger, reservation_id)
+        if reservation is None:
+            raise BookingError("reservation not found")
+        if reservation.get("status") != STATUS_ACTIVE:
+            raise BookingError("reservation is not active")
+        owner_uid = int(reservation.get("uid"))
+        owner_username = str(reservation.get("username", owner_uid))
+        reservation["status"] = STATUS_CANCELLED
+        reservation["updated_at"] = to_iso(now)
+        cancel_op_id = str(uuid.uuid4())
+        reservation["cancel_operation"] = {
+            "op_id": cancel_op_id,
+            "signature": operation_signature,
+            "at": to_iso(now),
+            "actor_uid": actor.uid,
+            "actor_username": actor.username,
+            "kind": "administrator",
+            "reason": reason,
+        }
+        notification = {
+            "id": str(uuid.uuid4()),
+            "type": "reservation-admin-cancelled",
+            "created_at": to_iso(now),
+            "actor_uid": actor.uid,
+            "actor_username": actor.username,
+            "reason": reason,
+            "message": (
+                f"Reservation {str(reservation.get('id'))[:8]} was cancelled "
+                f"by administrator {actor.username}: {reason}"
+            ),
+        }
+        notifications = reservation.get("notifications", [])
+        if not isinstance(notifications, list):
+            raise BookingError("invalid reservation notification history")
+        reservation["notifications"] = [*notifications[-127:], notification]
+        job = reservation.get("job")
+        if isinstance(job, dict):
+            if job.get("status") == JOB_PENDING:
+                job["status"] = JOB_CANCELLED
+                job["finished_at"] = to_iso(now)
+            elif job.get("status") in {JOB_CLAIMED, JOB_RUNNING}:
+                job["cancel_requested_at"] = to_iso(now)
+        log = {
+            **_log_item(
+                actor,
+                "admin-cancel",
+                reservation,
+                "ok",
+                reason,
+                operation_id=cancel_op_id,
+            ),
+            "uid": owner_uid,
+            "username": owner_username,
+            "actor_uid": actor.uid,
+            "actor_username": actor.username,
+        }
+        return ledger, reservation, [log], True
+
+    return store.transaction(mutate)
+
+
+def _admin_cancellation_reason(value: object) -> str:
+    if not isinstance(value, str):
+        raise BookingError("administrator cancellation requires a reason")
+    reason = value.strip()
+    if not reason:
+        raise BookingError("administrator cancellation requires a reason")
+    if len(reason) > 512:
+        raise BookingError("administrator cancellation reason must be at most 512 characters")
+    if any(ord(character) < 32 for character in reason):
+        raise BookingError("administrator cancellation reason contains control characters")
+    return reason
 
 
 def edit_booking(
@@ -387,8 +494,6 @@ def edit_booking(
         if int(reservation.get("uid")) != request.actor.uid:
             raise BookingError("permission denied: reservation belongs to another UID")
         job = reservation.get("job")
-        if isinstance(job, dict) and job.get("status") != JOB_PENDING:
-            raise BookingError(f"cannot edit reservation after job entered {job.get('status')} state")
 
         mode = (
             request.mode
@@ -419,14 +524,31 @@ def edit_booking(
                 request.share_units if request.update_share_units else None,
                 config.max_shared_users,
             )
-        if mode == MODE_SHARED and config.require_shared_memory and expected_memory_mb is None:
-            raise BookingError("shared reservations must include a resolved memory budget")
         memory_capacities = _normalize_memory_capacities(request.gpu_memory_capacity_mb, config)
 
         current_start = parse_iso(reservation["start_at"])
         current_end = parse_iso(reservation["end_at"])
+        before = _reservation_edit_state(reservation)
         if current_start <= now:
-            raise BookingError("cannot edit a reservation after it has started")
+            return _edit_started_reservation(
+                ledger,
+                reservation,
+                config,
+                request,
+                now,
+                current_start,
+                current_end,
+                op_id,
+                operation_signature,
+                before,
+                memory_capacities,
+            )
+        if isinstance(job, dict) and job.get("status") != JOB_PENDING:
+            raise BookingError(
+                f"cannot edit reservation after job entered {job.get('status')} state"
+            )
+        if mode == MODE_SHARED and config.require_shared_memory and expected_memory_mb is None:
+            raise BookingError("shared reservations must include a resolved memory budget")
         requested_start = (
             request.start_at if request.start_at is not None else current_start
         )
@@ -454,6 +576,9 @@ def edit_booking(
                 raise BookingError("edit start must not be in the past")
         duration = timedelta(seconds=duration_seconds)
         end = start + duration
+        policy_reason = booking_policy_conflict(config, start, end, now=now)
+        if policy_reason and not request.allow_queue:
+            raise BookingError(policy_reason)
 
         preferred = _normalize_preferred_gpus(request.preferred_gpus) if request.preferred_gpus is not None else None
         excluded = _normalize_excluded_gpus(request.excluded_gpus, config)
@@ -530,18 +655,14 @@ def edit_booking(
             reservation["share_units"] = share_units
         else:
             reservation.pop("share_units", None)
-        if op_id:
-            history = reservation.get("edit_operations", [])
-            if not isinstance(history, list):
-                raise BookingError("invalid edit operation history")
-            if len(history) >= MAX_EDIT_OPERATIONS_PER_RESERVATION:
-                raise BookingError(
-                    "reservation reached the idempotent edit limit; recreate it before further Agent edits"
-                )
-            reservation["edit_operations"] = [
-                *history,
-                {"op_id": op_id, "signature": operation_signature},
-            ]
+        history_op_id = _append_edit_history(
+            reservation,
+            request.actor,
+            now,
+            op_id,
+            operation_signature,
+            before,
+        )
         reservation["updated_at"] = to_iso(now)
         log = _log_item(
             request.actor,
@@ -549,11 +670,166 @@ def edit_booking(
             reservation,
             "ok",
             "queued" if queued else "updated",
-            operation_id=op_id,
+            operation_id=history_op_id,
         )
         return ledger, BookingResult(reservation, True, "queued" if queued else "updated", queued), [log], True
 
     return store.transaction(mutate)
+
+
+def _edit_started_reservation(
+    ledger: dict,
+    reservation: dict,
+    config: Config,
+    request: EditRequest,
+    now: datetime,
+    current_start: datetime,
+    current_end: datetime,
+    op_id: Optional[str],
+    operation_signature: str,
+    before: dict,
+    memory_capacities: Dict[int, int],
+):
+    immutable_changes = (
+        request.start_at is not None
+        or request.mode is not None
+        or request.preferred_gpus is not None
+        or request.excluded_gpus is not None
+        or request.count is not None
+        or request.update_expected_memory
+        or request.update_share_units
+        or request.allow_queue
+    )
+    if immutable_changes:
+        raise BookingError(
+            "a started reservation may only change its end time; "
+            "elapsed time, GPUs, mode, share, and memory are immutable"
+        )
+    if request.duration_seconds is None:
+        raise BookingError("a started reservation edit must provide a new total duration")
+    duration_seconds = request.duration_seconds
+    if duration_seconds <= 0:
+        raise BookingError("duration must be positive")
+    _validate_duration_granularity(duration_seconds, config.slot_minutes)
+    new_end = current_start + timedelta(seconds=duration_seconds)
+    earliest_end = ceil_to_slot(now, config.slot_minutes)
+    if new_end < earliest_end or new_end <= now:
+        raise BookingError(
+            "cannot edit elapsed time; the new end must be at or after "
+            f"{to_iso(earliest_end)}"
+        )
+
+    if new_end > current_end:
+        future_start = max(ceil_to_slot(now, config.slot_minutes), current_end)
+        policy_reason = booking_policy_conflict(
+            config,
+            future_start,
+            new_end,
+            now=now,
+        )
+        if policy_reason:
+            raise BookingError(policy_reason)
+        shadow_ledger = {
+            **ledger,
+            "reservations": [
+                item
+                for item in ledger.get("reservations", [])
+                if item.get("id") != reservation.get("id")
+            ],
+        }
+        mode = str(reservation.get("mode", MODE_SHARED))
+        gpus = _normalize_preferred_gpus(reservation.get("gpus", []))
+        assert gpus is not None
+        extension = new_end - future_start
+        slot = find_earliest_slot(
+            shadow_ledger,
+            config,
+            len(gpus),
+            future_start,
+            extension,
+            mode,
+            request.actor.uid,
+            gpus,
+            False,
+            _normalize_gpu_order(request.gpu_order, config),
+            _normalize_gpu_scores(request.gpu_scores, config),
+            _normalize_expected_memory(reservation.get("expected_memory_mb")),
+            memory_capacities,
+            (
+                reservation_share_units(reservation, config.max_shared_users)
+                if mode == MODE_SHARED
+                else 1
+            ),
+            (),
+        )
+        if slot is None:
+            raise BookingError(
+                "cannot extend this reservation because its GPUs are unavailable "
+                "during the requested future interval"
+            )
+
+    reservation["end_at"] = to_iso(new_end)
+    reservation["updated_at"] = to_iso(now)
+    history_op_id = _append_edit_history(
+        reservation,
+        request.actor,
+        now,
+        op_id,
+        operation_signature,
+        before,
+    )
+    log = _log_item(
+        request.actor,
+        "edit",
+        reservation,
+        "ok",
+        "updated future end of started reservation",
+        operation_id=history_op_id,
+    )
+    return ledger, BookingResult(reservation, True, "updated", False), [log], True
+
+
+def _reservation_edit_state(reservation: dict) -> dict:
+    return {
+        "gpus": [int(item) for item in reservation.get("gpus", [])],
+        "mode": reservation.get("mode"),
+        "start_at": reservation.get("start_at"),
+        "end_at": reservation.get("end_at"),
+        "expected_memory_mb": reservation.get("expected_memory_mb"),
+        "share_units": reservation.get("share_units"),
+    }
+
+
+def _append_edit_history(
+    reservation: dict,
+    actor: Actor,
+    now: datetime,
+    op_id: Optional[str],
+    operation_signature: str,
+    before: dict,
+) -> str:
+    history = reservation.get("edit_operations", [])
+    if not isinstance(history, list):
+        raise BookingError("invalid edit operation history")
+    if len(history) >= MAX_EDIT_OPERATIONS_PER_RESERVATION:
+        raise BookingError(
+            "reservation reached the idempotent edit limit (history full); "
+            "recreate it before further edits"
+        )
+    history_op_id = op_id or str(uuid.uuid4())
+    reservation["edit_operations"] = [
+        *history,
+        {
+            "op_id": history_op_id,
+            "signature": operation_signature,
+            "at": to_iso(now),
+            "actor_uid": actor.uid,
+            "actor_username": actor.username,
+            "before": before,
+            "after": _reservation_edit_state(reservation),
+        },
+    ]
+    return history_op_id
 
 
 def find_applied_edit(
@@ -680,6 +956,9 @@ def _find_available_gpus_with_reason(
     share_units: int = 1,
     excluded_gpus: Optional[Sequence[int]] = None,
 ) -> Tuple[List[int], str]:
+    policy_reason = booking_policy_conflict(config, start, end)
+    if policy_reason:
+        return [], policy_reason
     available = []
     reasons = []
     excluded = set(_normalize_excluded_gpus(excluded_gpus, config))
@@ -738,15 +1017,34 @@ def find_earliest_slot(
         if allow_queue
         else earliest_start
     )
-    search_until = search_start + timedelta(hours=config.queue_search_hours)
+    horizon = now + timedelta(days=config.booking_horizon_days)
+    search_until = min(
+        search_start + timedelta(hours=config.queue_search_hours),
+        horizon,
+    )
     index = ReservationIndex.from_ledger(ledger, now)
     candidate_starts = _candidate_starts_from_index(
         index, search_start, search_until, config.slot_minutes
+    )
+    candidate_starts = sorted(
+        set(candidate_starts)
+        | {
+            ceil_to_slot(parse_iso(end_at), config.slot_minutes)
+            for _start_at, end_at, _reason in config.booking_blackouts
+            if search_start <= parse_iso(end_at) <= search_until
+        }
     )
     if not allow_queue:
         candidate_starts = [earliest_start]
 
     for candidate_start in candidate_starts:
+        if booking_policy_conflict(
+            config,
+            candidate_start,
+            candidate_start + duration,
+            now=now,
+        ):
+            continue
         gpus = _gpus_at_start(
             index,
             config,
@@ -787,7 +1085,8 @@ def find_nearest_slot(
     now = utc_now()
     lower_bound = floor_to_slot(now, config.slot_minutes)
     target = max(lower_bound, ceil_to_slot(target_start, config.slot_minutes))
-    search_until = target + timedelta(hours=config.queue_search_hours)
+    horizon = now + timedelta(days=config.booking_horizon_days)
+    search_until = min(target + timedelta(hours=config.queue_search_hours), horizon)
     index = ReservationIndex.from_ledger(ledger, lower_bound)
     candidates = set(
         _candidate_starts_from_index(
@@ -798,6 +1097,11 @@ def find_nearest_slot(
         )
     )
     candidates.add(target)
+    candidates.update(
+        ceil_to_slot(parse_iso(end_at), config.slot_minutes)
+        for _start_at, end_at, _reason in config.booking_blackouts
+        if lower_bound <= parse_iso(end_at) <= search_until
+    )
     for reservation in index.spans:
         before = floor_to_slot(reservation.start - duration, config.slot_minutes)
         if lower_bound <= before <= search_until:
@@ -811,6 +1115,13 @@ def find_nearest_slot(
         ),
     )
     for candidate_start in ordered:
+        if booking_policy_conflict(
+            config,
+            candidate_start,
+            candidate_start + duration,
+            now=now,
+        ):
+            continue
         gpus = _gpus_at_start(
             index,
             config,
@@ -847,6 +1158,8 @@ def _gpus_at_start(
     excluded_gpus: Optional[Sequence[int]],
 ) -> List[int]:
     end = start + duration
+    if booking_policy_conflict(config, start, end):
+        return []
     excluded = set(_normalize_excluded_gpus(excluded_gpus, config))
     if preferred_gpus is not None:
         for gpu in preferred_gpus:
@@ -883,6 +1196,31 @@ def _gpus_at_start(
         excluded,
     )
     return gpus
+
+
+def booking_policy_conflict(
+    config: Config,
+    start: datetime,
+    end: datetime,
+    *,
+    now: Optional[datetime] = None,
+) -> str:
+    current = (now or utc_now()).astimezone(timezone.utc).replace(microsecond=0)
+    horizon = current + timedelta(days=config.booking_horizon_days)
+    if end > horizon:
+        return (
+            f"reservation ends beyond the {config.booking_horizon_days}-day booking "
+            f"horizon ({to_iso(horizon)})"
+        )
+    for start_at, end_at, reason in config.booking_blackouts:
+        blocked_start = parse_iso(start_at)
+        blocked_end = parse_iso(end_at)
+        if start < blocked_end and end > blocked_start:
+            return (
+                f"administrator blackout {to_iso(blocked_start)} -> "
+                f"{to_iso(blocked_end)}: {reason}"
+            )
+    return ""
 
 
 def can_place_gpu(

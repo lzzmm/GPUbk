@@ -48,6 +48,23 @@ def build_login_summary(
         process_state or {},
         set(int(gpu) for gpu in reliable_gpus),
     )
+    notifications = []
+    notification_cutoff = current - timedelta(seconds=max(86400, within_seconds))
+    for reservation in ledger.get("reservations", []):
+        if int(reservation.get("uid", -1)) != uid:
+            continue
+        for notice in reservation.get("notifications", []):
+            if not isinstance(notice, dict):
+                continue
+            try:
+                created_at = parse_iso(str(notice["created_at"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+            if created_at >= notification_cutoff:
+                notifications.append(
+                    {**notice, "reservation_id": str(reservation.get("id", ""))}
+                )
+    notifications.sort(key=lambda item: str(item.get("created_at", "")), reverse=True)
     return {
         "schema_version": LOGIN_NOTICE_SCHEMA_VERSION,
         "kind": "login-notice",
@@ -56,6 +73,7 @@ def build_login_summary(
         "active": [_public_item(item) for item in active],
         "upcoming": [_public_item(item) for item in upcoming],
         "overdue": overdue,
+        "notifications": notifications[:5],
     }
 
 
@@ -63,7 +81,8 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
     active = summary.get("active", [])
     upcoming = summary.get("upcoming", [])
     overdue = summary.get("overdue", [])
-    if not active and not upcoming and not overdue:
+    notifications = summary.get("notifications", [])
+    if not active and not upcoming and not overdue and not notifications:
         return ""
 
     labels = []
@@ -73,6 +92,8 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
         labels.append(f"{len(upcoming)} upcoming")
     if overdue:
         labels.append(f"{len(overdue)} overdue occupancy")
+    if notifications:
+        labels.append(f"{len(notifications)} notice{'s' if len(notifications) != 1 else ''}")
     lines = [style(f"GPUBK: {', '.join(labels)}", "heading", enabled=color)]
     generated_at = parse_iso(summary["generated_at"])
     if active:
@@ -85,6 +106,16 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
             lines[-1] += f"  (+{len(upcoming) - 1} more upcoming)"
     for item in overdue:
         lines.append(style(_overdue_line(item), "error", enabled=color))
+    if notifications:
+        lines.append(
+            style(
+                "  NOTICE " + str(notifications[0].get("message", "administrator update")),
+                "error",
+                enabled=color,
+            )
+        )
+        if len(notifications) > 1:
+            lines[-1] += f"  (+{len(notifications) - 1} more; run `bk n`)"
     return "\n".join(lines)
 
 

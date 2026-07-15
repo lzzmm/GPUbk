@@ -4,6 +4,14 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Add private per-user booking presets, three-use suggestions, and history-derived editable
+  defaults for guided booking without learning incidental GPU assignments.
+- Enforce an administrator-controlled booking horizon (30 days by default) and atomic,
+  reason-labelled blackout windows across CLI, TUI, broker, Agent, and MCP scheduling paths.
+- Allow started reservations to change only their future end while preserving elapsed facts,
+  and retain structured before/after history for every edit.
+- Add reason-required administrator cancellation with owner notifications, login warnings,
+  `bk n`, and owner-visible cancelled/expired history through `bk l --history`.
 - Expose optional cluster context, readiness, recommendation, booking, personal usage,
   edit, and cancellation through MCP only when a catalog exists. Cluster MCP writes require
   stable operation IDs, retain node-qualified ownership, reuse the versioned CLI routing

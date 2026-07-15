@@ -31,7 +31,12 @@ def _reservation(reservation_id):
 
 
 def _concurrent_booking(data_dir, start_at, uid, result_queue):
-    config = Config(data_dir=Path(data_dir), gpu_count=1, max_shared_users=2)
+    config = Config(
+        data_dir=Path(data_dir),
+        gpu_count=1,
+        max_shared_users=2,
+        booking_horizon_days=3650,
+    )
     store = LedgerStore(config.data_dir)
     try:
         add_booking(
@@ -51,7 +56,12 @@ def _concurrent_booking(data_dir, start_at, uid, result_queue):
 
 
 def _concurrent_weighted_booking(data_dir, start_at, uid, result_queue):
-    config = Config(data_dir=Path(data_dir), gpu_count=1, max_shared_users=4)
+    config = Config(
+        data_dir=Path(data_dir),
+        gpu_count=1,
+        max_shared_users=4,
+        booking_horizon_days=3650,
+    )
     store = LedgerStore(config.data_dir)
     try:
         add_booking(
@@ -72,7 +82,12 @@ def _concurrent_weighted_booking(data_dir, start_at, uid, result_queue):
 
 
 def _concurrent_idempotent_edit(data_dir, reservation_id, result_queue):
-    config = Config(data_dir=Path(data_dir), gpu_count=1, max_shared_users=2)
+    config = Config(
+        data_dir=Path(data_dir),
+        gpu_count=1,
+        max_shared_users=2,
+        booking_horizon_days=3650,
+    )
     store = LedgerStore(config.data_dir)
     try:
         result = edit_booking(
@@ -852,7 +867,12 @@ class LedgerStorageTests(unittest.TestCase):
     def test_cross_process_agent_edit_is_applied_exactly_once(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)
-            config = Config(data_dir=data_dir, gpu_count=1, max_shared_users=2)
+            config = Config(
+                data_dir=data_dir,
+                gpu_count=1,
+                max_shared_users=2,
+                booking_horizon_days=3650,
+            )
             store = LedgerStore(data_dir)
             created = add_booking(
                 store,

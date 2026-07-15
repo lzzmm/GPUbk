@@ -79,6 +79,39 @@ class LoginNoticeTests(unittest.TestCase):
 
         self.assertEqual(render_login_summary(summary), "")
 
+    def test_recent_administrator_cancellation_is_visible_at_login(self):
+        now = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
+        cancelled = reservation(
+            "cancelled-booking",
+            1001,
+            now + timedelta(hours=1),
+            now + timedelta(hours=2),
+            status="cancelled",
+        )
+        cancelled["notifications"] = [
+            {
+                "id": "notice-id",
+                "type": "reservation-admin-cancelled",
+                "created_at": iso(now - timedelta(minutes=1)),
+                "actor_uid": 0,
+                "actor_username": "root",
+                "reason": "maintenance",
+                "message": "Reservation cancelled by administrator: maintenance",
+            }
+        ]
+
+        summary = build_login_summary(
+            {"reservations": [cancelled]},
+            1001,
+            now=now,
+            within_seconds=86400,
+        )
+        rendered = render_login_summary(summary)
+
+        self.assertEqual(len(summary["notifications"]), 1)
+        self.assertIn("1 notice", rendered)
+        self.assertIn("maintenance", rendered)
+
     def test_expired_reservation_with_reliable_unreserved_process_warns(self):
         now = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
         ledger = {

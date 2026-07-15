@@ -56,11 +56,14 @@ from .config import (
     CONFIG_UPDATE_JOURNAL_NAME,
     CONFIG_VERSION,
     MAX_GPU_COUNT,
+    MAX_BOOKING_HORIZON_DAYS,
     MAX_SHARED_UNITS,
     SYSTEM_CONFIG_FILE,
     Config,
+    load_config,
     validate_gpu_list,
     validate_gpu_priority,
+    validate_booking_blackouts,
 )
 from .fileio import fsync_directory, open_existing_regular
 from .gpu import detect_gpu_count, snapshot
@@ -249,6 +252,15 @@ class AdminTransferPlan:
         }
 
 
+def _public_blackouts(
+    blackouts: Sequence[tuple[str, str, str]],
+) -> list[dict[str, str]]:
+    return [
+        {"start_at": start, "end_at": end, "reason": reason}
+        for start, end, reason in blackouts
+    ]
+
+
 @dataclass(frozen=True)
 class AdminGpuPolicyPlan:
     config_file: Path
@@ -265,6 +277,12 @@ class AdminGpuPolicyPlan:
     current_document: dict
     desired_document: dict
     blockers: tuple[str, ...]
+    current_booking_horizon_days: int = 30
+    desired_booking_horizon_days: int = 30
+    booking_horizon_days_update: Optional[int] = None
+    current_booking_blackouts: tuple[tuple[str, str, str], ...] = ()
+    desired_booking_blackouts: tuple[tuple[str, str, str], ...] = ()
+    booking_blackouts_update: Optional[tuple[tuple[str, str, str], ...]] = None
 
     @property
     def changed(self) -> bool:
@@ -282,6 +300,8 @@ class AdminGpuPolicyPlan:
                     str(gpu): priority for gpu, priority in self.current_gpu_priority
                 },
                 "require_shared_memory": self.current_require_shared_memory,
+                "booking_horizon_days": self.current_booking_horizon_days,
+                "booking_blackouts": _public_blackouts(self.current_booking_blackouts),
             },
             "desired": {
                 "disabled_gpus": list(self.desired_disabled_gpus),
@@ -289,6 +309,8 @@ class AdminGpuPolicyPlan:
                     str(gpu): priority for gpu, priority in self.desired_gpu_priority
                 },
                 "require_shared_memory": self.desired_require_shared_memory,
+                "booking_horizon_days": self.desired_booking_horizon_days,
+                "booking_blackouts": _public_blackouts(self.desired_booking_blackouts),
             },
             "changed": self.changed,
             "blockers": list(self.blockers),
@@ -459,7 +481,7 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     transfer_parser.add_argument("--json", action="store_true")
     policy_parser = commands.add_parser(
         "gpu-policy",
-        help="inspect or safely update GPU eligibility and preference tiers",
+        help="safely update GPU, VRAM, horizon, and blackout policy",
     )
     policy_parser.add_argument(
         "--config-file", type=Path, default=SYSTEM_CONFIG_FILE
@@ -499,6 +521,24 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     )
     policy_parser.set_defaults(require_shared_memory=None)
     policy_parser.add_argument(
+        "--booking-horizon-days",
+        type=int,
+        help="maximum future booking horizon (default policy: 30 days)",
+    )
+    blackouts = policy_parser.add_mutually_exclusive_group()
+    blackouts.add_argument(
+        "--blackout",
+        nargs=3,
+        action="append",
+        metavar=("START", "END", "REASON"),
+        help="replace blackout windows; repeat for more (timezone-aware ISO times)",
+    )
+    blackouts.add_argument(
+        "--clear-blackouts",
+        action="store_true",
+        help="remove all administrator blackout windows",
+    )
+    policy_parser.add_argument(
         "--recover",
         action="store_true",
         help="roll back an interrupted managed configuration update",
@@ -506,6 +546,21 @@ def run_admin_cli(argv: Sequence[str]) -> int:
     policy_parser.add_argument("--yes", action="store_true")
     policy_parser.add_argument("--dry-run", action="store_true")
     policy_parser.add_argument("--json", action="store_true")
+    cancel_parser = commands.add_parser(
+        "cancel",
+        help="cancel any active reservation with an owner-visible reason",
+    )
+    cancel_parser.add_argument("reservation", help="full or unique short reservation ID")
+    cancel_parser.add_argument(
+        "--reason",
+        required=True,
+        help="reason preserved in the reservation, audit log, and user notification",
+    )
+    cancel_parser.add_argument(
+        "--config-file", type=Path, default=SYSTEM_CONFIG_FILE
+    )
+    cancel_parser.add_argument("--yes", action="store_true")
+    cancel_parser.add_argument("--json", action="store_true")
     uninstall_parser = commands.add_parser(
         "uninstall",
         help="safely remove administrator-managed server state",
@@ -660,6 +715,8 @@ def run_admin_cli(argv: Sequence[str]) -> int:
         return _run_admin_transfer(args)
     if args.action == "gpu-policy":
         return _run_admin_gpu_policy(args)
+    if args.action == "cancel":
+        return _run_admin_cancel(args)
 
     interactive = sys.stdin.isatty() and not args.yes and not args.json
     detected_gpu_count = _detected_gpu_count(args.gpu_count)
@@ -721,6 +778,71 @@ def run_admin_cli(argv: Sequence[str]) -> int:
             "'sudo bk admin services install --yes', or test in the foreground with "
             f"'bk broker' as {plan.service.username}"
         )
+    return 0
+
+
+def _run_admin_cancel(args: argparse.Namespace) -> int:
+    if os.geteuid() != 0:
+        raise BookingError("administrator cancellation must run as root; use sudo")
+    previous = os.environ.get("BK_CONFIG_FILE")
+    os.environ["BK_CONFIG_FILE"] = str(args.config_file)
+    try:
+        config = load_config()
+    finally:
+        if previous is None:
+            os.environ.pop("BK_CONFIG_FILE", None)
+        else:
+            os.environ["BK_CONFIG_FILE"] = previous
+    from .broker import ledger_store_for_config
+    from .identity import current_actor
+    from .scheduler import cancel_booking_as_admin
+
+    store = ledger_store_for_config(config)
+    ledger = store.load()
+    token = str(args.reservation)
+    matches = [
+        item
+        for item in ledger.get("reservations", [])
+        if str(item.get("id", "")).startswith(token)
+    ]
+    if not matches:
+        raise BookingError("reservation not found")
+    if len(matches) > 1:
+        raise BookingError("reservation ID prefix is ambiguous; provide more characters")
+    target = matches[0]
+    if not args.yes:
+        if not sys.stdin.isatty():
+            raise BookingError("pass --yes to confirm administrator cancellation")
+        answer = input(
+            f"Cancel {str(target['id'])[:8]} owned by {target.get('username')}? [y/N]: "
+        ).strip().lower()
+        if answer not in {"y", "yes"}:
+            print("No changes made.")
+            return 1
+    reservation = cancel_booking_as_admin(
+        store,
+        config,
+        str(target["id"]),
+        current_actor(),
+        args.reason,
+    )
+    result = {
+        "schema_version": ADMIN_SCHEMA_VERSION,
+        "kind": "admin-cancel",
+        "status": "cancelled",
+        "reservation_id": reservation["id"],
+        "owner_uid": reservation["uid"],
+        "owner_username": reservation.get("username"),
+        "reason": args.reason.strip(),
+    }
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    else:
+        print(
+            f"cancelled: {str(reservation['id'])[:8]} owner={reservation.get('username')} "
+            f"reason={args.reason.strip()}"
+        )
+        print("The owner can see this cancellation with `bk notifications` or `bk l --history`.")
     return 0
 
 
@@ -1275,6 +1397,9 @@ def _run_admin_gpu_policy(args: argparse.Namespace) -> int:
             args.gpu_priority is not None,
             args.clear_priority,
             args.require_shared_memory is not None,
+            args.booking_horizon_days is not None,
+            args.blackout is not None,
+            args.clear_blackouts,
         )
     )
     if args.recover:
@@ -1314,11 +1439,14 @@ def _run_admin_gpu_policy(args: argparse.Namespace) -> int:
 
     disabled_value: object = () if args.enable_all else args.disabled_gpus
     priority_value: object = () if args.clear_priority else args.gpu_priority
+    blackout_value: object = () if args.clear_blackouts else args.blackout
     plan = inspect_admin_gpu_policy(
         config_file,
         disabled_gpus=disabled_value,
         gpu_priority=priority_value,
         require_shared_memory=args.require_shared_memory,
+        booking_horizon_days=args.booking_horizon_days,
+        booking_blackouts=blackout_value,
     )
     status = "blocked" if plan.blockers else ("planned" if plan.changed else "unchanged")
     public_plan = plan.public_document(status="dry-run" if args.dry_run else status)
@@ -1337,7 +1465,7 @@ def _run_admin_gpu_policy(args: argparse.Namespace) -> int:
     if not args.yes:
         if args.json:
             print(json.dumps(public_plan, ensure_ascii=False, sort_keys=True))
-        print("bk: pass --yes to apply this GPU policy", file=sys.stderr)
+        print("bk: pass --yes to apply this scheduling policy", file=sys.stderr)
         return 1
     result = apply_admin_gpu_policy(plan)
     if args.json:
@@ -1349,7 +1477,7 @@ def _run_admin_gpu_policy(args: argparse.Namespace) -> int:
             )
         )
     else:
-        print(f"updated GPU policy: {plan.config_file}")
+        print(f"updated scheduling policy: {plan.config_file}")
         _print_gpu_policy_restart_hint()
     return 0
 
@@ -1363,7 +1491,7 @@ def _print_gpu_policy_plan(plan: AdminGpuPolicyPlan) -> None:
     desired_priority = ",".join(
         f"{gpu}={priority}" for gpu, priority in plan.desired_gpu_priority
     ) or "equal"
-    print("GPUBK GPU policy")
+    print("GPUBK scheduling policy")
     print(f"  config:            {plan.config_file}")
     print(f"  disabled current:  {current_disabled}")
     print(f"  disabled desired:  {desired_disabled}")
@@ -1374,6 +1502,18 @@ def _print_gpu_policy_plan(plan: AdminGpuPolicyPlan) -> None:
         f"{'required' if plan.current_require_shared_memory else 'automatic'} -> "
         f"{'required' if plan.desired_require_shared_memory else 'automatic'}"
     )
+    print(
+        "  booking horizon:   "
+        f"{plan.current_booking_horizon_days}d -> "
+        f"{plan.desired_booking_horizon_days}d"
+    )
+    print(
+        "  blackout windows:  "
+        f"{len(plan.current_booking_blackouts)} -> "
+        f"{len(plan.desired_booking_blackouts)}"
+    )
+    for start, end, reason in plan.desired_booking_blackouts:
+        print(f"    blocked:          {start} -> {end}  {reason}")
     print(f"  change:            {'yes' if plan.changed else 'no'}")
     for blocker in plan.blockers:
         print(f"  blocked:           {blocker}")
@@ -1971,6 +2111,8 @@ def inspect_admin_gpu_policy(
     disabled_gpus: object = None,
     gpu_priority: object = None,
     require_shared_memory: Optional[bool] = None,
+    booking_horizon_days: Optional[int] = None,
+    booking_blackouts: object = None,
     expected_owner: int = 0,
 ) -> AdminGpuPolicyPlan:
     config_file = _absolute_path(config_file)
@@ -1991,7 +2133,35 @@ def inspect_admin_gpu_policy(
         if require_shared_memory is None
         else require_shared_memory
     )
+    current_booking_horizon_days = document.get("booking_horizon_days", 30)
+    if (
+        isinstance(current_booking_horizon_days, bool)
+        or not isinstance(current_booking_horizon_days, int)
+        or not 1 <= current_booking_horizon_days <= MAX_BOOKING_HORIZON_DAYS
+    ):
+        raise BookingError("trusted configuration booking_horizon_days is invalid")
+    if booking_horizon_days is not None and (
+        isinstance(booking_horizon_days, bool)
+        or not isinstance(booking_horizon_days, int)
+        or not 1 <= booking_horizon_days <= MAX_BOOKING_HORIZON_DAYS
+    ):
+        raise BookingError(
+            f"booking horizon must be between 1 and {MAX_BOOKING_HORIZON_DAYS} days"
+        )
+    desired_booking_horizon_days = (
+        current_booking_horizon_days
+        if booking_horizon_days is None
+        else booking_horizon_days
+    )
     try:
+        current_booking_blackouts = validate_booking_blackouts(
+            document.get("booking_blackouts")
+        )
+        desired_booking_blackouts = (
+            current_booking_blackouts
+            if booking_blackouts is None
+            else validate_booking_blackouts(booking_blackouts)
+        )
         current_disabled = validate_gpu_list(
             document.get("disabled_gpus"),
             gpu_count,
@@ -2027,6 +2197,15 @@ def inspect_admin_gpu_policy(
         desired_document.pop("gpu_priority", None)
     if require_shared_memory is not None:
         desired_document["require_shared_memory"] = desired_require_shared_memory
+    if booking_horizon_days is not None:
+        desired_document["booking_horizon_days"] = desired_booking_horizon_days
+    if booking_blackouts is not None:
+        if desired_booking_blackouts:
+            desired_document["booking_blackouts"] = _public_blackouts(
+                desired_booking_blackouts
+            )
+        else:
+            desired_document.pop("booking_blackouts", None)
 
     data_dir = _manifest_absolute_path(manifest, "data_dir")
     broker_socket = _manifest_absolute_path(manifest, "broker_socket")
@@ -2068,6 +2247,14 @@ def inspect_admin_gpu_policy(
         current_require_shared_memory=current_require_shared_memory,
         desired_require_shared_memory=desired_require_shared_memory,
         require_shared_memory_update=require_shared_memory,
+        current_booking_horizon_days=current_booking_horizon_days,
+        desired_booking_horizon_days=desired_booking_horizon_days,
+        booking_horizon_days_update=booking_horizon_days,
+        current_booking_blackouts=current_booking_blackouts,
+        desired_booking_blackouts=desired_booking_blackouts,
+        booking_blackouts_update=(
+            desired_booking_blackouts if booking_blackouts is not None else None
+        ),
         current_document=document,
         desired_document=desired_document,
         blockers=tuple(blockers),
@@ -2089,6 +2276,8 @@ def apply_admin_gpu_policy(
         disabled_gpus=plan.desired_disabled_gpus,
         gpu_priority=plan.desired_gpu_priority,
         require_shared_memory=plan.require_shared_memory_update,
+        booking_horizon_days=plan.booking_horizon_days_update,
+        booking_blackouts=plan.booking_blackouts_update,
         expected_owner=expected_owner,
     )
     if fresh.current_document != plan.current_document:
@@ -2157,6 +2346,16 @@ def apply_admin_gpu_policy(
                             if fresh.require_shared_memory_update is not None
                             else []
                         ),
+                        *(
+                            ["booking_horizon_days"]
+                            if fresh.booking_horizon_days_update is not None
+                            else []
+                        ),
+                        *(
+                            ["booking_blackouts"]
+                            if fresh.booking_blackouts_update is not None
+                            else []
+                        ),
                     ],
                     "from_sha256": _sha256(config_payload),
                     "to_sha256": _sha256(desired_payload),
@@ -2211,6 +2410,8 @@ def apply_admin_gpu_policy(
             str(gpu): priority for gpu, priority in fresh.desired_gpu_priority
         },
         "require_shared_memory": fresh.desired_require_shared_memory,
+        "booking_horizon_days": fresh.desired_booking_horizon_days,
+        "booking_blackouts": _public_blackouts(fresh.desired_booking_blackouts),
     }
 
 

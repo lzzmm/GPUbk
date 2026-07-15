@@ -12,12 +12,14 @@ JSON commands, or an optional local MCP server.
 ## What It Covers
 
 - Shared and exclusive reservations in configurable intervals (5 minutes by default).
+- Private reusable presets and learned, editable guided-booking defaults.
 - Automatic queueing, live GPU awareness, and per-GPU VRAM budgets.
 - A compact timeline that works on dark and light terminals.
 - Scheduled commands with automatic `CUDA_VISIBLE_DEVICES`.
 - NVML process monitoring and recent-load history.
 - Stable JSON, MCP tools, a bundled Codex Skill, and an optional external allocator.
 - Atomic file transactions, UID ownership checks, backups, and an append-only audit log.
+- Administrator booking horizons, blackout windows, reasoned cancellation, and user notices.
 
 GPUBK is a cooperative scheduler. It does not replace Linux device permissions
 or stop a user with direct access to `/dev/nvidia*` from bypassing the tool.
@@ -103,8 +105,24 @@ bk 1 1h -e 2,3                  # automatic placement, except GPUs 2 and 3
 bk x 2 4h                        # exclusive mode
 bk 1 1h -t +30m                 # human-friendly relative time
 bk 1 1h --at "tomorrow 09:00"   # local wall-clock time
-bk 1 1h --start 2030-01-01T20:00:00+08:00  # exact machine time
+bk 1 1h --start "$(date -d 'tomorrow 20:00' --iso-8601=seconds)"  # exact ISO time
 ```
+
+Save common requests as per-user presets. Presets live in the user's private
+`XDG_CONFIG_HOME` and never store a start time. Automatic presets keep placement
+dynamic; `-g` or `-e` can explicitly pin or exclude devices.
+
+```bash
+bk preset save train 2 4h 12g -s 2   # 2 GPUs, 2 shared slots, 12 GiB/GPU
+bk preset save debug 1 30m -x -g 0    # exclusive, fixed GPU 0
+bk p                                  # list presets
+bk p train                            # book the earliest legal train slot
+bk preset delete train
+```
+
+After three matching reservations, GPUBK suggests a preset. `bk add` also uses
+the most common recent mode, GPU count, duration, shared slots, and per-GPU VRAM
+as editable defaults. It never learns an incidental GPU assignment.
 
 Use `bk COMMAND --help` or `bk help COMMAND` for contextual help. Help never
 opens the guided form, full-screen TUI, or MCP stdio server.
@@ -116,6 +134,9 @@ bk l
 bk e 1 --duration 2h
 bk e 1 --at "tomorrow 09:00"
 bk d 1
+bk l --history                      # own active, cancelled, and expired records
+bk n                                # administrator notices and cancellation reasons
+bk history ID                       # detailed before/after edits and cancellation
 bk lg --limit 100                # recent operations for this UID
 bk lg --limit 20 --json          # bounded machine-readable audit events
 bk config                         # inspect effective configuration and policy
@@ -131,6 +152,8 @@ prefixes instead of guessing.
 Scheduling rules are intentionally small:
 
 - Start times and durations use the server's configured booking boundary.
+- Reservations cannot end beyond the administrator's future-booking horizon
+  (30 days by default) or overlap an administrator blackout window.
 - Without `--at` or `--start`, GPUBK starts in the active booking interval when possible
   (`12:41` starts at `12:40`) and prints `queued:` when it must start later.
 - `--at` accepts `+30m`, `20:00`, `tomorrow 09:00`, or `07-13 20:00`.
@@ -185,8 +208,9 @@ do not trigger that private-directory probe.
 
 `bk add` and a flag-free `bk edit ID` are recoverable guided flows. They accept
 the same natural time forms, re-prompt an invalid field, support `back` and
-`cancel`, and show a local-time change summary before writing. An edit cannot
-target a reservation that has started or supply a start in the past. `--queue`
+`cancel`, and show a local-time change summary before writing. Before start, all
+future fields may be edited. After start, elapsed time and resources are immutable;
+only the future end may change (`+30m`, `-15m`, `20:00`, or `total 2h`). `--queue`
 may resolve a resource conflict after a valid start, but never repairs an
 invalid past time. `bk slots` is read-only and prints a copyable command for its
 first option.
@@ -860,6 +884,28 @@ Use `--enable-all` or `--clear-priority` to clear either policy. If power is los
 during the update, leave `/etc/gpubk/config-update.json` in place and run
 `sudo bk admin gpu-policy --recover --dry-run`, followed by the same command with
 `--yes`. Normal startup fails closed until the prior trusted files are restored.
+
+The same reviewed transaction sets the booking horizon and replaces blackout
+windows. Repeat `--blackout` to define more than one window:
+
+```bash
+sudo systemctl stop gpubk-broker.service gpubk-monitor.service
+sudo bk admin gpu-policy --booking-horizon-days 30 \
+  --blackout 2026-08-01T00:00:00+08:00 2026-08-01T12:00:00+08:00 maintenance \
+  --dry-run
+sudo bk admin gpu-policy --booking-horizon-days 30 \
+  --blackout 2026-08-01T00:00:00+08:00 2026-08-01T12:00:00+08:00 maintenance \
+  --yes
+sudo systemctl start gpubk-broker.service gpubk-monitor.service
+```
+
+Use `--clear-blackouts` to remove all windows. To cancel any active reservation,
+the administrator must provide an owner-visible reason; the cancelled record and
+edit history remain in the ledger retention window:
+
+```bash
+sudo bk admin cancel RESERVATION_ID --reason "cooling maintenance" --yes
+```
 
 For a reversible foreground trial before enabling system services, start the
 broker in a second terminal as the selected owner, without `sudo`:

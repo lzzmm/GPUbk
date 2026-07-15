@@ -1220,7 +1220,7 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertEqual(state.add_cursor_gpu, 1)
         self.assertEqual(state.add_booking_mode, MODE_EXCLUSIVE)
 
-    def test_started_reservation_cannot_enter_timeline_edit(self):
+    def test_started_reservation_enters_end_only_timeline_edit(self):
         with tempfile.TemporaryDirectory() as tmp:
             config = Config(data_dir=Path(tmp), gpu_count=1)
             store = LedgerStore(config.data_dir)
@@ -1232,12 +1232,30 @@ class TuiAddPreviewTests(unittest.TestCase):
             )
             state = TuiState(selected=_own_reservation_index(store, created.reservation["id"]))
 
-            with mock.patch("bk.tui.utc_now", return_value=self.start + timedelta(minutes=1)):
+            running_now = self.start + timedelta(minutes=1)
+            with mock.patch("bk.tui.utc_now", return_value=running_now), mock.patch(
+                "bk.scheduler.utc_now", return_value=running_now
+            ):
                 _start_edit_select(config, store, state)
+                original_start_steps = state.add_start_steps
+                _handle_add_key(curses.KEY_RIGHT, config, store, state)
+                self.assertEqual(state.add_start_steps, original_start_steps)
+                self.assertTrue(state.error)
+                _handle_add_key(ord("]"), config, store, state)
+                preview = _build_add_preview(
+                    store.load(), config, state, state.editor_view_start
+                )
+                self.assertTrue(preview.valid, preview.reason)
+                _handle_add_key(10, config, store, state)
 
+            updated = next(
+                item
+                for item in store.load()["reservations"]
+                if item["id"] == created.reservation["id"]
+            )
         self.assertFalse(state.editor_active)
-        self.assertTrue(state.error)
-        self.assertIn("after it has started", state.message)
+        self.assertEqual(updated["start_at"], iso(self.start))
+        self.assertEqual(updated["end_at"], iso(self.start + timedelta(minutes=35)))
 
     def test_edit_auto_find_excludes_original_reservation(self):
         with tempfile.TemporaryDirectory() as tmp:

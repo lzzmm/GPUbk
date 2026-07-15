@@ -27,7 +27,7 @@ from bk.config import (
 )
 from bk.granularity import floor_to_slot
 from bk.models import Actor, BookingError, BookingRequest, EditRequest
-from bk.scheduler import add_booking, cancel_booking, edit_booking
+from bk.scheduler import add_booking, cancel_booking, cancel_booking_as_admin, edit_booking
 from bk.storage import LedgerStore
 from bk.timeparse import to_iso, utc_now
 
@@ -210,6 +210,46 @@ class BrokerTests(unittest.TestCase):
                         "booking.cancel",
                         {"reservation_id": "missing", "uid": 0},
                     )
+
+    def test_broker_authenticates_administrator_cancellation_from_peer_uid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            peer = {"uid": 1001}
+            config, server = self.setup_broker(Path(tmp), peer)
+            store = BrokerLedgerStore(config)
+            start = floor_to_slot(utc_now(), config.slot_minutes) + timedelta(
+                minutes=config.slot_minutes
+            )
+            with RunningBroker(server, config.broker_socket):
+                created = add_booking(
+                    store,
+                    config,
+                    BookingRequest(
+                        actor=Actor(9999, "spoofed"),
+                        count=1,
+                        duration_seconds=300,
+                        start_at=start,
+                    ),
+                )
+                peer["uid"] = 1002
+                with self.assertRaisesRegex(BookingError, "requires sudo"):
+                    cancel_booking_as_admin(
+                        store,
+                        config,
+                        created.reservation["id"],
+                        Actor(0, "forged-root"),
+                        "maintenance",
+                    )
+                peer["uid"] = 0
+                cancelled = cancel_booking_as_admin(
+                    store,
+                    config,
+                    created.reservation["id"],
+                    Actor(1002, "forged-user"),
+                    "cooling maintenance",
+                )
+
+            self.assertEqual(cancelled["cancel_operation"]["kind"], "administrator")
+            self.assertEqual(cancelled["notifications"][0]["actor_uid"], 0)
 
     def test_worker_transaction_can_update_only_its_own_job_state(self):
         with tempfile.TemporaryDirectory() as tmp:
