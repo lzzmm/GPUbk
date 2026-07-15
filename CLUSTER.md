@@ -236,7 +236,10 @@ bk c history --since 365d --all
 Each generation is deterministic for its range, gzip compressed, checksummed, fsynced,
 published by one same-directory rename, and then mode `0555` with `0444` payloads.
 Repeating an identical export verifies and returns the existing generation. A new
-generation that overlaps published data is rejected. Daily `usage-users` and
+generation that overlaps published data is rejected. After a crash or power loss, the
+next exporter removes only strictly named, safely owned incomplete generation directories
+while holding the same per-node export lock. A malformed entry or symlink fails closed and
+is left untouched for administrator inspection. Daily `usage-users` and
 `usage-samples` payloads remain `gpubk.usage.v1`; raw ledgers, process arguments,
 environment variables, job specs, logs, secrets, and internal storage files are never
 copied. `bk c history` verifies a payload before reading it and aggregates identities
@@ -261,6 +264,8 @@ identity and avoids creating a second writer.
 ## Failure rules
 
 - An unreachable node is shown as unavailable; healthy nodes remain usable.
+- Cancelling or leaving the cluster TUI stops in-flight refresh waits promptly and
+  prevents queued node calls from starting; spawned local process groups are still reaped.
 - A disabled node is skipped without waiting for SSH and retains its catalog and history
   metadata until an administrator enables or removes it.
 - Read-only comparison may become stale. The destination broker always revalidates

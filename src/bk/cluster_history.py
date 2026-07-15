@@ -39,8 +39,10 @@ MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_PAYLOAD_BYTES = 128 * 1024 * 1024
 MAX_COMPRESSED_BYTES = 64 * 1024 * 1024
 _NODE_ID = re.compile(r"^[0-9a-f]{20}$")
-_GENERATION = re.compile(
-    r"^\d{8}T\d{6}Z-\d{8}T\d{6}Z-(?:5m|10m|1h|1d)$"
+_GENERATION_PATTERN = r"\d{8}T\d{6}Z-\d{8}T\d{6}Z-(?:5m|10m|1h|1d)"
+_GENERATION = re.compile(rf"^{_GENERATION_PATTERN}$")
+_TEMP_GENERATION = re.compile(
+    rf"^\.tmp-{_GENERATION_PATTERN}-[0-9a-f]{{32}}$"
 )
 _PAYLOAD_NAME = re.compile(r"^day-\d{5}-(?:samples|users)\.json\.gz$")
 _PRIVATE_KEYS = frozenset(
@@ -152,6 +154,7 @@ def export_cluster_history(
         config.lock_timeout_seconds,
         owner_uid=owner_uid,
     ):
+        _cleanup_stale_temporary_generations(namespace, owner_uid=owner_uid)
         existing = _generation_manifests(namespace, node_id)
         for generation in existing:
             if generation.name == generation_name:
@@ -423,7 +426,7 @@ def _generation_manifests(namespace: Path, node_id: str) -> list[HistoryGenerati
     _validate_namespace(namespace)
     generations = []
     for entry in _directory_entries(namespace):
-        if entry.name == ".export.lock" or entry.name.startswith(".tmp-"):
+        if entry.name == ".export.lock" or _TEMP_GENERATION.fullmatch(entry.name):
             continue
         if not _GENERATION.fullmatch(entry.name):
             raise BookingError(f"unexpected entry in history namespace {node_id}: {entry.name}")
@@ -910,23 +913,66 @@ def _require_day_boundary(value: datetime, label: str) -> None:
         raise BookingError(f"{label} must be a complete UTC-day boundary (00:00Z)")
 
 
-def _remove_temporary_generation(path: Path) -> None:
+def _cleanup_stale_temporary_generations(
+    namespace: Path,
+    *,
+    owner_uid: int,
+) -> None:
+    allowed_owner_uids = {os.geteuid()}
+    if os.geteuid() == 0:
+        allowed_owner_uids.add(owner_uid)
+    removed = False
+    for entry in _directory_entries(namespace):
+        if not entry.name.startswith(".tmp-"):
+            continue
+        if not _TEMP_GENERATION.fullmatch(entry.name):
+            raise BookingError(
+                f"unexpected temporary entry in history namespace: {entry.name}"
+            )
+        path = Path(entry.path)
+        if not _remove_temporary_generation(
+            path,
+            allowed_owner_uids=allowed_owner_uids,
+        ):
+            raise BookingError(
+                f"cannot safely remove stale history export directory: {path}"
+            )
+        removed = True
+    if removed:
+        fsync_directory(namespace)
+
+
+def _remove_temporary_generation(
+    path: Path,
+    *,
+    allowed_owner_uids: Optional[set[int]] = None,
+) -> bool:
     if not os.path.lexists(path):
-        return
+        return True
     try:
         metadata = path.lstat()
         if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
-            return
-        for entry in _directory_entries(path):
+            return False
+        if allowed_owner_uids is not None and metadata.st_uid not in allowed_owner_uids:
+            return False
+        entries = _directory_entries(path)
+        for entry in entries:
             item = Path(entry.path)
             item_metadata = item.lstat()
             if not stat.S_ISREG(item_metadata.st_mode) or item_metadata.st_nlink != 1:
-                return
-        for entry in _directory_entries(path):
+                return False
+            if (
+                allowed_owner_uids is not None
+                and item_metadata.st_uid not in allowed_owner_uids
+            ):
+                return False
+        os.chmod(path, 0o700)
+        for entry in entries:
             Path(entry.path).unlink()
         path.rmdir()
-    except OSError:
-        return
+        return True
+    except (OSError, BookingError):
+        return False
 
 
 @contextmanager

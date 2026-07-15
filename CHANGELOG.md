@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Keep cluster TUI shutdown responsive when a node process closes its output pipes
+  before exiting, and avoid starting queued SSH work after cancellation is already set.
+- Recover safe interrupted cluster-history exports under the per-node lock, while
+  refusing malformed, foreign-owned, linked, or otherwise unsafe temporary entries.
 - Distinguish unknown live telemetry from zero idle GPUs in cluster views, and print
   a clear `cancelled` label after human cluster cancellation commands.
 - Show configured global principals in live cluster reservation views and enrich

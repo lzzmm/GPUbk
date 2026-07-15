@@ -93,6 +93,8 @@ def _invoke_node(
     cancel_event: Optional[Event],
     expected_node_id: Optional[str],
 ) -> NodeReply:
+    if cancel_event is not None and cancel_event.is_set():
+        return _cancelled_reply(node)
     command, environment = node_command(node, argv)
     try:
         returncode, stdout, stderr = _run_node_process(
@@ -110,13 +112,7 @@ def _invoke_node(
             error_code="timeout",
         )
     except _NodeRequestCancelled:
-        return NodeReply(
-            node,
-            None,
-            "request cancelled",
-            cancelled=True,
-            error_code="cancelled",
-        )
+        return _cancelled_reply(node)
     except _NodeOutputTooLarge:
         return NodeReply(
             node,
@@ -197,6 +193,16 @@ def _invoke_node(
             error_code="transport",
         )
     return NodeReply(reply_node, payload, None)
+
+
+def _cancelled_reply(node: ClusterNode) -> NodeReply:
+    return NodeReply(
+        node,
+        None,
+        "request cancelled",
+        cancelled=True,
+        error_code="cancelled",
+    )
 
 
 def node_command(
@@ -291,10 +297,13 @@ def _run_node_process(
                 else:
                     _append_bounded_tail(stderr, chunk, MAX_NODE_STDERR_BYTES)
 
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise subprocess.TimeoutExpired(list(argv), timeout_seconds)
-        returncode = process.wait(timeout=remaining)
+        returncode = _wait_for_node_process(
+            process,
+            argv,
+            deadline,
+            timeout_seconds,
+            cancel_event=cancel_event,
+        )
         _kill_process_group(process)
         return returncode, bytes(stdout), bytes(stderr)
     except BaseException:
@@ -304,6 +313,28 @@ def _run_node_process(
         for stream in streams:
             _close_selector_stream(selector, stream)
         selector.close()
+
+
+def _wait_for_node_process(
+    process: subprocess.Popen,
+    argv: Sequence[str],
+    deadline: float,
+    timeout_seconds: float,
+    *,
+    cancel_event: Optional[Event],
+) -> int:
+    """Wait without losing cancellation after a child closes its pipes early."""
+
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            raise _NodeRequestCancelled
+        returncode = process.poll()
+        if returncode is not None:
+            return returncode
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired(list(argv), timeout_seconds)
+        time.sleep(min(remaining, 0.05))
 
 
 def _append_bounded_tail(buffer: bytearray, chunk: bytes, limit: int) -> None:

@@ -8,6 +8,7 @@ from unittest import mock
 
 from bk.cluster_history import (
     _query_sample_batches,
+    _remove_temporary_generation,
     export_cluster_history,
     load_archived_user_usage,
     resolve_history_window,
@@ -186,6 +187,86 @@ class ClusterHistoryTests(unittest.TestCase):
             incremental=True,
         )
         self.assertEqual(start, end)
+
+    def test_export_cleans_a_safe_stale_temporary_generation(self):
+        namespace = self.archive / self.node["id"]
+        namespace.mkdir(mode=0o755)
+        stale = namespace / (
+            ".tmp-20300101T000000Z-20300102T000000Z-10m-" + "b" * 32
+        )
+        stale.mkdir(mode=0o700)
+        payload = stale / "day-00000-samples.json.gz"
+        payload.write_bytes(b"incomplete")
+        payload.chmod(0o444)
+        stale.chmod(0o555)
+
+        with self.identity():
+            result = export_cluster_history(
+                self.archive,
+                self.config,
+                start=self.start,
+                end=self.end,
+                resolution="10m",
+                api=self.api,
+            )
+
+        self.assertEqual(result["status"], "exported")
+        self.assertFalse(stale.exists())
+
+    def test_export_rejects_an_unrecognized_temporary_entry(self):
+        namespace = self.archive / self.node["id"]
+        namespace.mkdir(mode=0o755)
+        (namespace / ".tmp-unrecognized").mkdir(mode=0o700)
+
+        with self.identity(), self.assertRaisesRegex(
+            BookingError,
+            "unexpected temporary entry",
+        ):
+            export_cluster_history(
+                self.archive,
+                self.config,
+                start=self.start,
+                end=self.end,
+                resolution="10m",
+                api=self.api,
+            )
+
+    def test_stale_history_cleanup_never_follows_a_temporary_symlink(self):
+        namespace = self.archive / self.node["id"]
+        namespace.mkdir(mode=0o755)
+        outside = self.root / "outside"
+        outside.mkdir()
+        marker = outside / "keep"
+        marker.write_text("safe")
+        stale = namespace / (
+            ".tmp-20300101T000000Z-20300102T000000Z-10m-" + "c" * 32
+        )
+        stale.symlink_to(outside, target_is_directory=True)
+
+        with self.identity(), self.assertRaisesRegex(
+            BookingError,
+            "cannot safely remove stale history export directory",
+        ):
+            export_cluster_history(
+                self.archive,
+                self.config,
+                start=self.start,
+                end=self.end,
+                resolution="10m",
+                api=self.api,
+            )
+
+        self.assertTrue(stale.is_symlink())
+        self.assertEqual(marker.read_text(), "safe")
+
+    def test_best_effort_temporary_cleanup_never_masks_the_export_error(self):
+        temporary = self.root / "temporary"
+        temporary.mkdir()
+        with mock.patch(
+            "bk.cluster_history._directory_entries",
+            side_effect=BookingError("cannot inspect incomplete export"),
+        ):
+            self.assertFalse(_remove_temporary_generation(temporary))
 
     def test_public_queries_are_month_batched_and_split_only_when_bounded(self):
         calls = []

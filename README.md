@@ -802,6 +802,9 @@ bk c history --since 30d
 
 Later exports are incremental. Every node writes only its stable-ID namespace; every
 generation is compressed, checksummed, immutable-style, and atomically published.
+If an export is interrupted, the next locked export removes only a strictly validated
+incomplete generation; suspicious temporary entries and symlinks are reported and left
+untouched.
 Only versioned public usage summaries and samples are exported, never a ledger, command
 arguments, job specs, secrets, or logs. Booking remains available when the archive is
 offline. NFS `root_squash`, multi-owner roots, daily operation, and recovery rules are

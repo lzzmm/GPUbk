@@ -1,8 +1,9 @@
 import json
 import subprocess
 import sys
+import time
 import unittest
-from threading import Event
+from threading import Event, Timer
 from unittest import mock
 
 from bk import cluster_transport
@@ -39,6 +40,49 @@ class ClusterTransportTests(unittest.TestCase):
                 2,
                 cancel_event=cancelled,
             )
+
+    def test_cancelled_request_does_not_start_a_node_process(self):
+        node = ClusterNode(
+            "gpu-a",
+            "a" * 20,
+            "local",
+            None,
+            "/usr/local/bin/bk",
+            0,
+            8,
+        )
+        cancelled = Event()
+        cancelled.set()
+        with mock.patch("bk.cluster_transport._run_node_process") as run_process:
+            reply = invoke_node(
+                node,
+                ["agent", "context", "--compact"],
+                cancel_event=cancelled,
+            )
+        self.assertTrue(reply.cancelled)
+        self.assertEqual(reply.error_code, "cancelled")
+        run_process.assert_not_called()
+
+    def test_cancellation_remains_responsive_after_child_closes_its_pipes(self):
+        cancelled = Event()
+        timer = Timer(0.05, cancelled.set)
+        timer.start()
+        started = time.monotonic()
+        try:
+            with self.assertRaises(cluster_transport._NodeRequestCancelled):
+                cluster_transport._run_node_process(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import os,time; os.close(1); os.close(2); time.sleep(2)",
+                    ],
+                    None,
+                    2,
+                    cancel_event=cancelled,
+                )
+        finally:
+            timer.cancel()
+        self.assertLess(time.monotonic() - started, 0.75)
 
     def test_structured_remote_error_is_returned_after_identity_check(self):
         node = ClusterNode(
