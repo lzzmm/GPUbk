@@ -16,6 +16,14 @@ COMMIT_SHA = re.compile(r"[0-9a-f]{40}")
 APACHE_2_NORMALIZED_SHA256 = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
 
 
+def public_docs(language: str) -> str:
+    if language == "en":
+        paths = (ROOT / "README.md", ROOT / "docs" / "GUIDE.md")
+    else:
+        paths = (ROOT / "README.zh-CN.md", ROOT / "docs" / "GUIDE.zh-CN.md")
+    return "\n".join(path.read_text(encoding="utf-8") for path in paths)
+
+
 class ReleaseConfigurationTests(unittest.TestCase):
     def test_user_facing_brand_uses_consistent_capitalization(self):
         legacy = "GPU" + "bk"
@@ -80,8 +88,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("recursive-include .github/workflows *.yml", manifest)
 
     def test_remote_gpu_acceptance_runner_is_packaged_and_documented(self):
-        english = (ROOT / "README.md").read_text(encoding="utf-8")
-        chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+        english = public_docs("en")
+        chinese = public_docs("zh")
         releasing = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
         command = "python3 tools/remote_acceptance.py USER@GPU-HOST"
 
@@ -92,8 +100,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("tools/remote_acceptance.py", releasing)
 
     def test_cluster_acceptance_and_design_are_packaged_and_documented(self):
-        english = (ROOT / "README.md").read_text(encoding="utf-8")
-        chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+        english = public_docs("en")
+        chinese = public_docs("zh")
         releasing = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
         manifest = (ROOT / "MANIFEST.in").read_text(encoding="utf-8")
         command = "python3 tools/cluster_acceptance.py user@gpu-a user@gpu-b"
@@ -146,8 +154,8 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertNotIn("The detailed guide below is currently in Chinese.", english)
 
     def test_shared_server_setup_uses_service_owned_broker_storage(self):
-        english = (ROOT / "README.md").read_text(encoding="utf-8")
-        chinese = (ROOT / "README.zh-CN.md").read_text(encoding="utf-8")
+        english = public_docs("en")
+        chinese = public_docs("zh")
         security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
 
         for text in (english, chinese):
@@ -181,7 +189,7 @@ class ReleaseConfigurationTests(unittest.TestCase):
         self.assertIn("TELEMETRY.md", readme)
 
     def test_release_docs_require_stable_scheduled_job_device_binding(self):
-        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        readme = public_docs("en")
         security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
         releasing = (ROOT / "RELEASING.md").read_text(encoding="utf-8")
         telemetry = (ROOT / "TELEMETRY.md").read_text(encoding="utf-8")
