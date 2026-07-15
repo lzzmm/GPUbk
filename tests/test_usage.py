@@ -1,8 +1,12 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from bk.gpu import GpuProcessSnapshot, GpuSnapshot
 from bk.usage import (
+    CONTAINER_IDENTITY_AMBIGUOUS,
+    CONTAINER_IDENTITY_INFERRED,
     USAGE_AUTHORIZED,
     USAGE_UNKNOWN,
     USAGE_UNRESERVED,
@@ -10,6 +14,7 @@ from bk.usage import (
     USAGE_SYSTEM,
     classify_process_usage,
     summarize_process_command,
+    _uid_can_access_docker_socket,
 )
 
 
@@ -84,6 +89,119 @@ class UsageClassificationTests(unittest.TestCase):
 
         self.assertEqual(row.status, USAGE_UNRESERVED)
         self.assertTrue(row.violation)
+
+    def test_root_docker_process_is_inferred_for_one_eligible_reserved_uid(self):
+        process = GpuProcessSnapshot(
+            99,
+            0,
+            "root",
+            "python train.py",
+            container_runtime="docker",
+            container_id="a" * 64,
+            host_uid=0,
+        )
+        snapshots = [GpuSnapshot(0, "sim", processes=(process,))]
+        current = reservation(
+            "alice-container",
+            1001,
+            0,
+            self.now - timedelta(minutes=5),
+            self.now + timedelta(minutes=5),
+        )
+
+        row = classify_process_usage(
+            snapshots,
+            [current],
+            self.now,
+            container_uid_allowed=lambda runtime, uid: runtime == "docker" and uid == 1001,
+        )[0][0]
+
+        self.assertEqual(row.status, USAGE_AUTHORIZED)
+        self.assertEqual(row.process.uid, 1001)
+        self.assertEqual(row.process.host_uid, 0)
+        self.assertEqual(row.process.identity_source, CONTAINER_IDENTITY_INFERRED)
+        self.assertEqual(row.reservation_ids, ("alice-container",))
+
+    def test_root_docker_process_stays_unknown_for_multiple_eligible_users(self):
+        process = GpuProcessSnapshot(
+            99,
+            0,
+            "root",
+            "python train.py",
+            container_runtime="docker",
+            container_id="b" * 64,
+            host_uid=0,
+        )
+        snapshots = [GpuSnapshot(0, "sim", processes=(process,))]
+        reservations = [
+            reservation("alice", 1001, 0, self.now - timedelta(minutes=5), self.now + timedelta(minutes=5)),
+            reservation("bob", 1002, 0, self.now - timedelta(minutes=5), self.now + timedelta(minutes=5)),
+        ]
+
+        row = classify_process_usage(
+            snapshots,
+            reservations,
+            self.now,
+            container_uid_allowed=lambda runtime, uid: True,
+        )[0][0]
+
+        self.assertEqual(row.status, USAGE_UNKNOWN)
+        self.assertFalse(row.violation)
+        self.assertEqual(row.process.uid, 0)
+        self.assertEqual(row.process.identity_source, CONTAINER_IDENTITY_AMBIGUOUS)
+
+    def test_root_docker_process_is_not_inferred_for_ineligible_user(self):
+        process = GpuProcessSnapshot(
+            99,
+            0,
+            "root",
+            "python train.py",
+            container_runtime="docker",
+            container_id="c" * 64,
+        )
+        snapshots = [GpuSnapshot(0, "sim", processes=(process,))]
+        current = reservation(
+            "alice",
+            1001,
+            0,
+            self.now - timedelta(minutes=5),
+            self.now + timedelta(minutes=5),
+        )
+
+        row = classify_process_usage(
+            snapshots,
+            [current],
+            self.now,
+            container_uid_allowed=lambda runtime, uid: False,
+        )[0][0]
+
+        self.assertEqual(row.status, USAGE_UNRESERVED)
+        self.assertEqual(row.process.uid, 0)
+
+    def test_docker_socket_group_membership_controls_inference_eligibility(self):
+        socket_path = Mock()
+        socket_path.stat.return_value = SimpleNamespace(st_mode=0o140660, st_gid=138)
+        account = SimpleNamespace(pw_gid=1001, pw_name="alice")
+        docker_group = SimpleNamespace(gr_mem=["alice"])
+
+        with patch("bk.usage.pwd.getpwuid", return_value=account), patch(
+            "bk.usage.grp.getgrgid",
+            return_value=docker_group,
+        ):
+            self.assertTrue(_uid_can_access_docker_socket(1001, socket_path))
+
+        docker_group.gr_mem = []
+        with patch("bk.usage.pwd.getpwuid", return_value=account), patch(
+            "bk.usage.grp.getgrgid",
+            return_value=docker_group,
+        ):
+            self.assertFalse(_uid_can_access_docker_socket(1001, socket_path))
+
+    def test_world_writable_docker_socket_allows_any_uid_candidate(self):
+        socket_path = Mock()
+        socket_path.stat.return_value = SimpleNamespace(st_mode=0o140666, st_gid=138)
+
+        self.assertTrue(_uid_can_access_docker_socket(1001, socket_path))
 
     def test_process_command_summary_does_not_expose_arbitrary_arguments(self):
         secret = "super-secret-token"

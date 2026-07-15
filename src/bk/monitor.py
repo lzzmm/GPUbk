@@ -664,9 +664,13 @@ def _print_monitor_sample(sample: MonitorSample) -> None:
         f"violations={sample.violation_count} events={len(sample.events)}"
     )
     for event in sample.events:
+        container = event.get("extensions", {}).get("gpubk.container", {})
+        source = container.get("identity_source")
+        source_text = f" source={source}" if source and source != "host" else ""
         print(
             f"  {event['event']} gpu={event['gpu']} pid={event['pid']} "
-            f"user={event['username']} {event.get('old_status', '-')}->{event.get('status', '-')}"
+            f"user={event['username']}{source_text} "
+            f"{event.get('old_status', '-')}->{event.get('status', '-')}"
         )
     for warning in sample.warnings:
         print(f"  warning: {warning}")
@@ -864,6 +868,10 @@ def _build_process_state(
                 "pid": process.pid,
                 "uid": process.uid,
                 "username": process.username,
+                "host_uid": process.host_uid,
+                "identity_source": process.identity_source,
+                "container_runtime": process.container_runtime or None,
+                "container_id": process.container_id or None,
                 "command": summarize_process_command(process.command),
                 "workload_id": workload_ids.get(_process_sample_key(gpu, process.pid, process.host_start_id)),
                 "kind": process.kind,
@@ -891,6 +899,15 @@ def _state_events(previous: Dict[str, dict], current: Dict[str, dict], at: datet
 
 
 def _event(event_type: str, item: dict, at: datetime, old_status: Optional[str] = None) -> dict:
+    container_extension = {
+        "version": 1,
+        "host_uid": item.get("host_uid"),
+        "identity_source": item.get("identity_source", "host"),
+        "runtime": item.get("container_runtime"),
+        "container_id": item.get("container_id"),
+    }
+    if not container_extension["runtime"]:
+        container_extension = {}
     payload = {
         "event": event_type,
         "timestamp": to_iso(at),
@@ -904,6 +921,11 @@ def _event(event_type: str, item: dict, at: datetime, old_status: Optional[str] 
         "kind": item.get("kind", ""),
         "status": item.get("status"),
         "reservation_ids": item.get("reservation_ids", []),
+        "extensions": (
+            {"gpubk.container": container_extension}
+            if container_extension
+            else {}
+        ),
     }
     if old_status is not None:
         payload["old_status"] = old_status
@@ -963,6 +985,19 @@ def _usage_groups(
         group["gpu_memory_mb"] = sum(item.gpu_memory_mb for item in processes)
         group["device_util_percent"] = device.utilization_percent if device is not None else None
         group["workload_ids"] = sorted(workload_set)
+        identity_sources = sorted({item.identity_source for item in processes})
+        container_runtimes = sorted(
+            {item.container_runtime for item in processes if item.container_runtime}
+        )
+        if identity_sources or container_runtimes:
+            group.setdefault("extensions", {})["gpubk.container-summary"] = {
+                "version": 1,
+                "identity_sources": identity_sources,
+                "runtimes": container_runtimes,
+                "container_process_count": sum(
+                    1 for item in processes if item.container_id
+                ),
+            }
         result.append(group)
     return result
 

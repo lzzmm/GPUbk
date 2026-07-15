@@ -380,6 +380,31 @@ class GpuSnapshotTests(unittest.TestCase):
 
         self.assertEqual(len(command.encode("utf-8")), gpu.MAX_PROCESS_COMMAND_BYTES)
 
+    def test_container_identity_is_read_from_common_cgroup_shapes(self):
+        container_id = "a" * 64
+        cases = (
+            (f"0::/system.slice/docker-{container_id}.scope\n", ("docker", container_id)),
+            (
+                f"0::/kubepods.slice/cri-containerd-{container_id}.scope\n",
+                ("containerd", container_id),
+            ),
+            (f"0::/user.slice/libpod-{container_id}.scope\n", ("podman", container_id)),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_dir = Path(tmp)
+            for payload, expected in cases:
+                (proc_dir / "cgroup").write_text(payload, encoding="utf-8")
+                self.assertEqual(gpu._read_container_identity(proc_dir), expected)
+
+    def test_host_cgroup_has_no_container_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            proc_dir = Path(tmp)
+            (proc_dir / "cgroup").write_text(
+                "0::/user.slice/user-1001.slice/session-1.scope\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(gpu._read_container_identity(proc_dir), ("", ""))
+
     def test_cuda_visible_tokens_use_stable_ids_only_when_every_gpu_has_one(self):
         devices = [
             GpuSnapshot(0, "gpu0", device_uuid="GPU-aaaaaaaa-0000-0000-0000-000000000000"),

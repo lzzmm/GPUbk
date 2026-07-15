@@ -496,6 +496,15 @@ Process status is based on the process UID and active reservation:
 `ok`, `wrong-gpu`, `unreserved`, `unknown`, or `system`. Command lines are
 reduced to safe labels before shared logging.
 
+Rootful Docker GPU processes normally appear as host UID 0. GPUBK recognizes
+Docker, containerd, and Podman cgroups. For Docker, a root process is attributed
+to a reservation only when exactly one active reservation UID on that GPU is
+also eligible to write the Docker socket. The TUI and verbose status append `*`
+and retain `source=container-reservation`; multiple eligible shared users remain
+`container-ambiguous` instead of being guessed. Container IDs are shown in
+short form, while complete shell history, image arguments, and arbitrary command
+parameters are not collected.
+
 History is stored in checksummed daily partitions with 1-minute, 5-minute,
 10-minute, hourly, and daily levels. The public `gpubk.usage.v1` query model is
 available through Python, JSON CLI, and MCP; visualizers should not parse storage

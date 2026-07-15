@@ -419,6 +419,14 @@ monitor 还会原子更新一个很小的 `usage/collector.json` 心跳。Usage 
 进程状态根据进程 UID 和有效预约判断，包括 `ok`、`wrong-gpu`、`unreserved`、
 `unknown` 和 `system`。命令行写入共享日志前会缩减为安全标签。
 
+rootful Docker 的 GPU 进程在宿主机上通常显示为 UID 0。GPUBK 会从 cgroup
+识别 Docker、containerd 和 Podman。对于 Docker，只有当该 GPU 当前恰好存在一个
+有效预约 UID，并且这个 UID 有权写入 Docker socket 时，才把 root 容器推断归属给
+该预约。TUI 和详细状态会在用户名后显示 `*`，并保留
+`source=container-reservation`。多人 shared 下存在多个候选时保持
+`container-ambiguous`，不会猜测。界面只显示短 container ID，不会采集 shell
+历史、完整镜像参数或任意命令参数。
+
 历史数据按天分区并带校验和，提供 1 分钟、5 分钟、10 分钟、小时和每日层级。
 Python、JSON CLI 和 MCP 统一返回 `gpubk.usage.v1` 公共模型；可视化程序不应
 直接解析内部文件。完整说明见 [Telemetry](../TELEMETRY.md)。

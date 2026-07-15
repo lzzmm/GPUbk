@@ -91,7 +91,14 @@ from .timeparse import (
 )
 from .tutorial import CLI_TIP, mark_onboarding_seen, onboarding_seen, run_cli_tutorial
 from .tui import run_tui
-from .usage import USAGE_SYSTEM, assess_gpu_live_states, classify_process_usage, summarize_process_command
+from .usage import (
+    USAGE_SYSTEM,
+    assess_gpu_live_states,
+    classify_process_usage,
+    process_container_label,
+    process_owner_label,
+    summarize_process_command,
+)
 from .usage_cli import run_usage_cli
 from .usage_store import UsageAuditStore
 from .worker import (
@@ -4467,10 +4474,18 @@ def _print_status(
             for item in rows:
                 process = item.process
                 sm = f"{process.sm_utilization_percent}%" if process.sm_utilization_percent is not None else "-"
+                container = process_container_label(process)
+                attribution = (
+                    f" source={process.identity_source}"
+                    if process.identity_source != "host"
+                    else ""
+                )
                 print(
                     f"     pid={process.pid} uid={process.uid if process.uid is not None else '?'} "
-                    f"user={process.username} sm={sm} mem={process.gpu_memory_mb}MiB "
-                    f"state={item.status} cmd={summarize_process_command(process.command)}"
+                    f"user={process_owner_label(process)} sm={sm} mem={process.gpu_memory_mb}MiB "
+                    f"state={item.status}"
+                    f"{f' container={container}' if container else ''}"
+                    f"{attribution} cmd={summarize_process_command(process.command)}"
                 )
 
     actor = _current_actor()

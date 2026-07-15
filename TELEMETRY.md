@@ -216,6 +216,15 @@ Whole-device utilization cannot be divided accurately among simultaneous shared
 users, so the user API does not manufacture an equal split. CUDA MPS, restricted
 `/proc`, and some containers can also prevent exact process attribution; such
 records remain explicit `unknown` or `unattributed` data rather than guessed data.
+For a rootful Docker process, GPUBK reads the host cgroup to retain the runtime
+and container ID. If exactly one UID with access to the Docker socket has an
+active reservation on that GPU, the process is attributed to that UID with
+`identity_source=container-reservation`; human views append `*` to the owner.
+If more than one eligible UID is present, the process remains
+`container-ambiguous` and `unknown`. A root container with no eligible
+reservation remains `unreserved`. The original host UID is retained in every
+case, and container inference is never presented as kernel-proven ownership.
+Rootless containers normally retain their mapped host UID and need no inference.
 The collector publishes those active gaps through `process_identity_gap`, and a
 strict post-start doctor check rejects the degraded heartbeat.
 If command-line access is restricted but `/proc/<pid>` ownership is visible,

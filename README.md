@@ -20,6 +20,7 @@ administrators get atomic storage, access control, monitoring, and audit history
 
 - Shared or exclusive reservations, automatic placement, and configurable time slots.
 - Live GPU, process, memory, and utilization views without a web service.
+- Container-aware attribution with explicit verified, inferred, or ambiguous ownership.
 - Scheduled commands with automatic `CUDA_VISIBLE_DEVICES` selection.
 - Local, versioned storage with atomic writes, backups, and UID-based authorization.
 - CLI, curses TUI, JSON output, MCP tools, and multi-host expansion support.
