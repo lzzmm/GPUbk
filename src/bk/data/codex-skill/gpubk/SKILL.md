@@ -55,6 +55,9 @@ Never merge identities by username; only administrator-provided `(node_id, uid)`
 principal mappings are authoritative. A cluster reservation never spans hosts.
 Never recommend `user@host` for a shared root-owned catalog. Use a username-free host
 or per-user SSH alias so the destination broker sees each caller's own remote UID.
+On a client without local GPUs, do not invent a local node or run `cluster init`.
+Probe the first remote node and, only after explicit administrator approval, run the
+tokenized `add_argv`; the first `cluster add` safely creates a remote-only catalog.
 If an operation retry may belong to a disabled node, surface the unresolved routing
 error instead of generating a new operation ID or writing to another node. When the
 original destination is known, retry the exact intent against `bk @NODE` with the same
@@ -175,6 +178,9 @@ evidence of unattended command execution.
   a stopped broker and monitor, and preserve its recovery journal after any interrupted handoff;
   never rewrite reservation UIDs or copy the live ledger as a substitute.
 - Do not enable a worker, monitor, or service on a shared server without the user's or administrator's approval.
+- Never run `sudo bk admin cluster delete` without explicit administrator approval. It
+  removes only client-side routing, but every user on that client immediately loses the
+  federated view; it must not be presented as a way to delete remote reservations or data.
 - Do not disable `worker_live_guard` merely to make a scheduled command start sooner.
 - Before an approved service deployment, run `bk doctor --probe --json --strict` as a normal user
   to verify broker connectivity, then as the configured monitor UID to verify writes and process

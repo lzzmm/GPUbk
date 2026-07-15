@@ -167,7 +167,9 @@ is a warning rather than a reservation-readiness failure. Its `ready` field is f
 no enabled node is usable. `cluster-node-probe` is a pre-catalog, read-only SSH discovery
 document with the validated node ID, endpoint metadata, issues, and a tokenized `add_argv`;
 `add_argv` is null unless clocks, actor identity, GPUs, and retry-safe booking capabilities
-all pass. Catalog nodes
+all pass. When no catalog exists, that reviewed add command atomically creates a
+remote-only catalog; it never replaces a catalog that appears concurrently. `cluster init`
+is only for a client that should advertise its own local GPU host. Catalog nodes
 omit `enabled` for the default
 true state and use `enabled=false` for maintenance; disabled nodes remain visible in
 context/history but are not contacted or considered for placement.
@@ -177,6 +179,10 @@ Root-owned catalog SSH targets are username-free hosts or per-user aliases. A fi
 numeric UID. User-owned custom catalogs may pin a username, but probe returns no root
 administrator `add_argv` for such a target. Administrator repair mode may read a legacy
 pinned entry only so status, set, remove, or tracked uninstall can correct it safely.
+The standard `/etc/gpubk/cluster.json` file and its parent must remain root-owned and
+non-writable by group or other users. `bk admin cluster delete` is an explicitly
+confirmed client-side routing operation; it does not contact or mutate any GPU host,
+reservation, usage store, archive, worker, or SSH configuration.
 
 Reservation references outside their owning node use `NODE/SHORT_ID`. Automatic
 booking never splits a request across nodes. Edit and cancel route back to the node

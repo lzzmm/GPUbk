@@ -45,6 +45,8 @@ class BundledSkillTests(unittest.TestCase):
         self.assertIn("--require-monitor", text)
         self.assertIn("--exclude-gpu", text)
         self.assertIn("policy.disabled_gpus", text)
+        self.assertIn("remote-only catalog", text)
+        self.assertIn("cluster delete", text)
 
         protocol = (
             Path(__file__).parents[1]
@@ -59,6 +61,8 @@ class BundledSkillTests(unittest.TestCase):
         self.assertIn("enabled_gpus", protocol)
         self.assertIn("disabled_gpus", protocol)
         self.assertIn("request-excluded", protocol)
+        self.assertIn("remote-only catalog", protocol)
+        self.assertIn("/etc/gpubk/cluster.json", protocol)
 
     def test_install_is_complete_and_refuses_accidental_overwrite(self):
         with tempfile.TemporaryDirectory() as tmp:
