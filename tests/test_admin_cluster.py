@@ -135,6 +135,49 @@ class AdminClusterTests(unittest.TestCase):
         self.assertEqual(removed.nodes, (self.local_node(),))
         self.assertEqual(removed.principals, ())
 
+    def test_disable_and_enable_preserve_node_identity_mappings_and_history(self):
+        path = Path("/etc/gpubk/cluster.json")
+        remote = self.remote_node()
+        current = ClusterConfig(
+            path,
+            (self.local_node(), remote),
+            (
+                {
+                    "id": "alice",
+                    "members": [{"node_id": remote.node_id, "uid": 1002}],
+                },
+            ),
+            Path("/srv/gpubk-history"),
+        )
+        with (
+            mock.patch("bk.admin_cluster.os.geteuid", return_value=0),
+            mock.patch("bk.admin_cluster.load_cluster_config", return_value=current),
+            mock.patch("bk.admin_cluster.write_cluster_config") as write,
+            redirect_stdout(StringIO()),
+        ):
+            self.assertEqual(
+                run_admin_cli(["cluster", "disable", "gpu-b", "--yes"]),
+                0,
+            )
+        disabled = write.call_args.args[0]
+        self.assertFalse(disabled.node("gpu-b").enabled)
+        self.assertEqual(disabled.principals, current.principals)
+        self.assertEqual(disabled.history_root, current.history_root)
+
+        with (
+            mock.patch("bk.admin_cluster.os.geteuid", return_value=0),
+            mock.patch("bk.admin_cluster.load_cluster_config", return_value=disabled),
+            mock.patch("bk.admin_cluster.write_cluster_config") as write,
+            redirect_stdout(StringIO()),
+        ):
+            self.assertEqual(
+                run_admin_cli(["cluster", "enable", "gpu-b", "--yes"]),
+                0,
+            )
+        enabled = write.call_args.args[0]
+        self.assertTrue(enabled.node("gpu-b").enabled)
+        self.assertEqual(enabled.principals, current.principals)
+
     def test_status_lists_identity_members_and_unmap_rejects_unknown_pair(self):
         local = self.local_node()
         remote = self.remote_node()

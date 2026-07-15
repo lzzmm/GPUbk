@@ -30,6 +30,7 @@ class ClusterNode:
     executable: str
     priority: int
     timeout_seconds: float
+    enabled: bool = True
 
 
 @dataclass(frozen=True)

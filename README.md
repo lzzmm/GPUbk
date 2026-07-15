@@ -679,13 +679,27 @@ sudo bk admin cluster map lab-user gpu-b 2042 --yes
 # Undo a wrong mapping with: sudo bk admin cluster unmap gpu-b 2042 --yes
 sudo bk admin cluster status
 bk c
+bk c check
 bk c recommend 1 30m
 bk c book 1 30m -j
 ```
 
 `bk cluster -h` and every subcommand's `-h` work before this catalog exists. For
 retry-safe automation, keep the same `--op-id` when repeating an exact cluster book,
-edit, or cancel request.
+edit, or cancel request. Every user should run `bk c check` once: it verifies that
+their own SSH identity can reach each enabled node, that stable identities and clocks
+are valid, and that the remote version supports retry-safe writes.
+
+Put a host into maintenance without deleting its endpoint, UID mappings, or archived
+history. Disabled hosts are not contacted and never participate in placement:
+
+```bash
+sudo bk admin cluster disable gpu-b --yes
+sudo bk admin cluster enable gpu-b --yes
+```
+
+Human cluster tables use the caller's local timezone. Structured `--json` documents
+continue to use canonical UTC timestamps.
 
 Before enabling a real shared catalog, the repository includes one end-to-end candidate test:
 

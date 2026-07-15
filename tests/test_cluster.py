@@ -71,7 +71,16 @@ class ClusterTests(unittest.TestCase):
         load.assert_not_called()
         self.assertIn("GPUBK cluster federation", output.getvalue())
 
-        for command in ("status", "recommend", "usage", "history", "edit", "cancel", "tui"):
+        for command in (
+            "status",
+            "check",
+            "recommend",
+            "usage",
+            "history",
+            "edit",
+            "cancel",
+            "tui",
+        ):
             with self.subTest(command=command):
                 with (
                     mock.patch("bk.cluster.load_cluster_config") as load,
@@ -116,6 +125,30 @@ class ClusterTests(unittest.TestCase):
             self.assertEqual(loaded.nodes, config.nodes)
             self.assertEqual(loaded.principals, config.principals)
             self.assertEqual(path.stat().st_mode & 0o777, 0o644)
+
+    def test_catalog_round_trips_disabled_node_without_changing_schema(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "cluster.json"
+            node = ClusterNode(
+                "maintenance",
+                "d" * 20,
+                "ssh",
+                "user@remote",
+                "/usr/local/bin/bk",
+                4,
+                9,
+                False,
+            )
+            write_cluster_config(ClusterConfig(path, (node,)), require_root=False)
+            document = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(document["schema_version"], CLUSTER_SCHEMA_VERSION)
+            self.assertIs(document["nodes"][0]["enabled"], False)
+            self.assertEqual(load_cluster_config(path).nodes, (node,))
+
+            document["nodes"][0]["enabled"] = "no"
+            path.write_text(json.dumps(document), encoding="utf-8")
+            with self.assertRaisesRegex(BookingError, "enabled must be true or false"):
+                load_cluster_config(path)
 
     def test_catalog_round_trips_optional_history_root(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -384,6 +417,130 @@ class ClusterTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertIn("healthy", output.getvalue())
 
+    def test_disabled_node_is_not_queried_or_considered_for_recommendation(self):
+        disabled = ClusterNode(
+            "maintenance",
+            "a" * 20,
+            "ssh",
+            "a",
+            "/usr/bin/bk",
+            0,
+            8,
+            False,
+        )
+        healthy = ClusterNode("healthy", "b" * 20, "ssh", "b", "/usr/bin/bk", 1, 8)
+        config = ClusterConfig(Path("/cluster.json"), (disabled, healthy))
+        reply = NodeReply(
+            healthy,
+            {
+                "generated_at": to_iso(utc_now()),
+                "recommendation": {
+                    "gpus": [0],
+                    "start_at": "2030-01-01T00:00:00Z",
+                    "end_at": "2030-01-01T00:30:00Z",
+                },
+            },
+            None,
+        )
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel", return_value=[reply]) as parallel,
+            redirect_stdout(StringIO()),
+        ):
+            self.assertEqual(run_cluster_cli(["recommend", "1", "30m"]), 0)
+        self.assertEqual(parallel.call_args.args[0], (healthy,))
+
+    def test_all_disabled_nodes_fail_before_any_booking_transport(self):
+        disabled = ClusterNode(
+            "maintenance",
+            "a" * 20,
+            "ssh",
+            "a",
+            "/usr/bin/bk",
+            0,
+            8,
+            False,
+        )
+        config = ClusterConfig(Path("/cluster.json"), (disabled,))
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel") as parallel,
+            self.assertRaisesRegex(BookingError, "no enabled nodes"),
+        ):
+            run_cluster_cli(["book", "1", "30m"])
+        parallel.assert_not_called()
+
+    def test_cluster_status_and_check_report_disabled_nodes_without_contacting_them(self):
+        enabled = ClusterNode("gpu-a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        disabled = ClusterNode(
+            "gpu-b",
+            "b" * 20,
+            "ssh",
+            "b",
+            "/usr/bin/bk",
+            0,
+            8,
+            False,
+        )
+        config = ClusterConfig(Path("/cluster.json"), (enabled, disabled))
+        payload = {
+            "generated_at": to_iso(utc_now()),
+            "software": {"version": "0.2.1"},
+            "actor": {"uid": 1001, "username": "alice"},
+            "policy": {
+                "gpu_count": 1,
+                "monitoring": {"collector": {"state": "running"}},
+            },
+            "gpu_advice": {"gpus": []},
+            "capabilities": {
+                "federated_node_identity": True,
+                "idempotent_booking": True,
+                "preflight_idempotent_replay": True,
+                "idempotent_edit": True,
+                "idempotent_cancel": True,
+                "operation_status": True,
+            },
+        }
+
+        def invoke(node, _argv, *, cancel_event=None):
+            self.assertIs(node, enabled)
+            return NodeReply(node, payload, None)
+
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._invoke", side_effect=invoke) as remote,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["status"]), 0)
+            self.assertEqual(run_cluster_cli(["check"]), 0)
+        self.assertEqual(remote.call_count, 2)
+        self.assertIn("disabled", output.getvalue())
+        self.assertIn("Cluster check: ready", output.getvalue())
+        self.assertIn("skip gpu-b", output.getvalue())
+
+    def test_cluster_check_fails_on_missing_write_capability(self):
+        node = ClusterNode("legacy", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        reply = NodeReply(
+            node,
+            {
+                "generated_at": to_iso(utc_now()),
+                "software": {"version": "0.1.0"},
+                "actor": {"uid": 1001, "username": "alice"},
+                "capabilities": {"federated_node_identity": True},
+            },
+            None,
+        )
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster.query_cluster_contexts", return_value=[reply]),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["check"]), 3)
+        self.assertIn("missing write capabilities", output.getvalue())
+
     def test_malformed_node_does_not_block_a_healthy_recommendation(self):
         malformed = ClusterNode("malformed", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
         healthy = ClusterNode("healthy", "b" * 20, "ssh", "b", "/usr/bin/bk", 1, 8)
@@ -420,6 +577,87 @@ class ClusterTests(unittest.TestCase):
             self.assertEqual(run_cluster_cli(["recommend", "1", "30m"]), 0)
         self.assertIn("healthy", output.getvalue())
         self.assertNotIn("malformed", output.getvalue())
+
+    def test_recommendation_rejects_wrong_or_duplicate_gpu_placement(self):
+        malformed = ClusterNode("malformed", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        healthy = ClusterNode("healthy", "b" * 20, "ssh", "b", "/usr/bin/bk", 1, 8)
+        config = ClusterConfig(Path("/cluster.json"), (malformed, healthy))
+        generated = to_iso(utc_now())
+        replies = [
+            NodeReply(
+                malformed,
+                {
+                    "generated_at": generated,
+                    "recommendation": {
+                        "gpus": [0, 0],
+                        "start_at": "2030-01-01T00:00:00Z",
+                        "end_at": "2030-01-01T00:30:00Z",
+                    },
+                },
+                None,
+            ),
+            NodeReply(
+                healthy,
+                {
+                    "generated_at": generated,
+                    "recommendation": {
+                        "gpus": [0],
+                        "start_at": "2030-01-01T00:00:00Z",
+                        "end_at": "2030-01-01T00:30:00Z",
+                    },
+                },
+                None,
+            ),
+        ]
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel", return_value=replies),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["recommend", "1", "30m"]), 0)
+        self.assertIn("healthy", output.getvalue())
+        self.assertNotIn("malformed", output.getvalue())
+
+    def test_malformed_context_fields_do_not_break_cluster_status(self):
+        malformed = ClusterNode("malformed", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
+        healthy = ClusterNode("healthy", "b" * 20, "ssh", "b", "/usr/bin/bk", 1, 8)
+        config = ClusterConfig(Path("/cluster.json"), (malformed, healthy))
+        replies = [
+            NodeReply(
+                malformed,
+                {
+                    "generated_at": to_iso(utc_now()),
+                    "software": [],
+                    "policy": [],
+                    "gpu_advice": {"gpus": [None, {"live": []}]},
+                    "reservations": [None],
+                    "actor": [],
+                },
+                None,
+            ),
+            NodeReply(
+                healthy,
+                {
+                    "generated_at": to_iso(utc_now()),
+                    "software": {"version": "0.2.1"},
+                    "policy": {"gpu_count": 1},
+                    "gpu_advice": {"gpus": []},
+                    "reservations": [],
+                    "actor": {"uid": 1001, "username": "alice"},
+                },
+                None,
+            ),
+        ]
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster.query_cluster_contexts", return_value=replies),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["status"]), 0)
+        self.assertIn("malformed", output.getvalue())
+        self.assertIn("healthy", output.getvalue())
 
     def test_stale_preflight_rejection_never_fails_over_to_another_node(self):
         first = ClusterNode("first", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
@@ -712,6 +950,25 @@ class ClusterTests(unittest.TestCase):
             with self.assertRaisesRegex(BookingError, "cannot safely route"):
                 _find_cluster_operation_node(config, "operation-1")
 
+        disabled = ClusterNode(
+            second.name,
+            second.node_id,
+            second.transport,
+            second.target,
+            second.executable,
+            second.priority,
+            second.timeout_seconds,
+            False,
+        )
+        config = ClusterConfig(Path("/cluster.json"), (first, disabled))
+        with mock.patch(
+            "bk.cluster._parallel",
+            return_value=[NodeReply(first, missing, None)],
+        ) as parallel:
+            with self.assertRaisesRegex(BookingError, "disabled by administrator"):
+                _find_cluster_operation_node(config, "operation-1")
+        self.assertEqual(parallel.call_args.args[0], (first,))
+
     def test_usage_merges_only_explicitly_mapped_node_uids(self):
         first = ClusterNode("a", "a" * 20, "ssh", "a", "/usr/bin/bk", 0, 8)
         second = ClusterNode("b", "b" * 20, "ssh", "b", "/usr/bin/bk", 0, 8)
@@ -789,6 +1046,48 @@ class ClusterTests(unittest.TestCase):
         )
         self.assertEqual(json.loads(output.getvalue())["kind"], "cluster-usage")
         self.assertEqual(len(output.getvalue().splitlines()), 1)
+
+    def test_usage_skips_disabled_nodes_and_ignores_malformed_user_values(self):
+        enabled = ClusterNode("gpu-a", "a" * 20, "ssh", "gpu-a", "/usr/bin/bk", 0, 8)
+        disabled = ClusterNode(
+            "gpu-b",
+            "b" * 20,
+            "ssh",
+            "gpu-b",
+            "/usr/bin/bk",
+            0,
+            8,
+            False,
+        )
+        config = ClusterConfig(Path("/cluster.json"), (enabled, disabled))
+        reply = NodeReply(
+            enabled,
+            {
+                "users": [
+                    None,
+                    {
+                        "uid": 1001,
+                        "username": "alice",
+                        "active_gpu_seconds": "broken",
+                        "reserved_gpu_seconds": float("nan"),
+                        "max_gpu_memory_mb": True,
+                        "avg_sm_percent": float("inf"),
+                    },
+                ]
+            },
+            None,
+        )
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster._parallel", return_value=[reply]) as parallel,
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["usage", "-j"]), 0)
+        result = json.loads(output.getvalue())
+        self.assertEqual(parallel.call_args.args[0], (enabled,))
+        self.assertEqual(result["principals"][0]["active_gpu_seconds"], 0)
+        self.assertFalse(result["nodes"][1]["enabled"])
 
     def test_cancel_accepts_stable_operation_id_and_returns_cluster_json(self):
         node = ClusterNode("gpu-a", "a" * 20, "ssh", "gpu-a", "/usr/bin/bk", 0, 8)

@@ -572,12 +572,24 @@ sudo bk admin cluster map lab-user gpu-b 2042 --yes
 # 映射有误时撤销：sudo bk admin cluster unmap gpu-b 2042 --yes
 sudo bk admin cluster status
 bk c
+bk c check
 bk c recommend 1 30m
 bk c book 1 30m -j
 ```
 
 目录尚未创建时也可以使用 `bk cluster -h` 及各子命令的 `-h`。自动化重试完全相同的
-集群预约、修改或取消请求时，应复用同一个 `--op-id`。
+集群预约、修改或取消请求时，应复用同一个 `--op-id`。每个用户都应至少运行一次
+`bk c check`：它会检查该用户自己的 SSH 身份能否访问每个启用节点，并校验稳定节点
+身份、时钟以及远端版本是否支持可安全重试的写操作。
+
+节点维护时不需要删除端点、UID 映射或历史归档。停用节点不会被访问，也不会参与选址：
+
+```bash
+sudo bk admin cluster disable gpu-b --yes
+sudo bk admin cluster enable gpu-b --yes
+```
+
+面向人的集群表格使用执行命令一侧的本地时区；带 `--json` 的结构化输出仍统一使用 UTC。
 
 正式启用共享目录前，可以先从本仓库执行一次端到端候选版本验收：
 

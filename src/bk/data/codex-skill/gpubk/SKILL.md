@@ -31,11 +31,15 @@ bk log --limit 100 --json
 ```
 
 When `bk c status --json` succeeds, the client has a federated node catalog.
+Run `bk c check --json` before the first cross-node write in a session; do not route
+to a node whose catalog entry has `enabled=false` or whose check status is not `ready`.
 Use `bk c recommend COUNT DURATION --json` before a cross-node write and keep the
 returned node name attached to every reservation ID. Use `bk c book ... --json`
 for automatic single-node placement or `bk @NODE ... --json` for an explicit node.
 Never merge identities by username; only administrator-provided `(node_id, uid)`
 principal mappings are authoritative. A cluster reservation never spans hosts.
+If an operation retry may belong to a disabled node, surface the unresolved routing
+error instead of generating a new operation ID or writing to another node.
 
 Read [references/protocol.md](references/protocol.md) when implementing an integration or interpreting every field.
 Use the context `administrator` object only to help the user contact the responsible operator;

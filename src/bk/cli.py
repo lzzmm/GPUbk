@@ -3581,6 +3581,7 @@ ADMINISTRATION (current administrator only)
         cluster_help = """
 CLUSTER (shown only when a catalog is configured)
   bk c                           all configured GPU nodes
+  bk c check                     verify access, identity, clocks, and writes
   bk c recommend 2 1h           compare earliest single-node slots
   bk c book 2 1h                book the best node
   bk c tui                       full-screen node browser

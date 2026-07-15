@@ -48,6 +48,50 @@ class ClusterTuiTests(unittest.TestCase):
         self.assertTrue(any("123456" in line for line in lines))
         self.assertTrue(any("24.0GiB" in line for line in lines))
 
+    def test_render_marks_disabled_node_without_treating_it_as_offline(self):
+        node = ClusterNode(
+            "gpu-maint",
+            "a" * 20,
+            "ssh",
+            "gpu-maint",
+            "/usr/bin/bk",
+            0,
+            8,
+            False,
+        )
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        lines = render_cluster_lines(
+            config,
+            [NodeReply(node, None, "disabled by administrator", error_code="disabled")],
+            0,
+            100,
+            12,
+        )
+        self.assertTrue(any("disabled" in line for line in lines))
+        self.assertTrue(any("routing is paused" in line for line in lines))
+        self.assertFalse(any("Unavailable:" in line for line in lines))
+
+    def test_render_survives_malformed_optional_context_fields(self):
+        node = ClusterNode("gpu-a", "a" * 20, "local", None, "/usr/bin/bk", 0, 8)
+        config = ClusterConfig(Path("/cluster.json"), (node,))
+        payload = {
+            "generated_at": "2030-01-01T00:00:00Z",
+            "software": [],
+            "policy": [],
+            "gpu_advice": {"gpus": [None, {"index": "?", "live": []}]},
+            "reservations": [None, {"gpus": None}],
+            "actor": [],
+        }
+        lines = render_cluster_lines(
+            config,
+            [NodeReply(node, payload, None)],
+            0,
+            100,
+            14,
+        )
+        self.assertEqual(len(lines), 14)
+        self.assertTrue(any("gpu-a" in line for line in lines))
+
 
 if __name__ == "__main__":
     unittest.main()

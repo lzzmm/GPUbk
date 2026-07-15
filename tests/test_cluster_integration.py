@@ -123,6 +123,39 @@ class ClusterProcessIntegrationTests(unittest.TestCase):
             )
             self.assertEqual(len(ledger["reservations"]), 1)
 
+    def test_readiness_check_skips_disabled_node_without_starting_a_process(self):
+        disabled = ClusterNode(
+            self.second.name,
+            self.second.node_id,
+            self.second.transport,
+            self.second.target,
+            self.second.executable,
+            self.second.priority,
+            self.second.timeout_seconds,
+            False,
+        )
+        config = ClusterConfig(self.config.path, (self.first, disabled))
+        contacted = []
+
+        def command(node, argv):
+            contacted.append(node.name)
+            return self.node_command(node, argv)
+
+        output = StringIO()
+        with (
+            mock.patch("bk.cluster.load_cluster_config", return_value=config),
+            mock.patch("bk.cluster_transport.node_command", side_effect=command),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(run_cluster_cli(["check", "--json"]), 0)
+
+        result = json.loads(output.getvalue())
+        self.assertTrue(result["ready"])
+        self.assertEqual(contacted, ["gpu-a"])
+        self.assertEqual(result["summary"]["enabled"], 1)
+        self.assertEqual(result["summary"]["disabled"], 1)
+        self.assertEqual(result["nodes"][1]["status"], "disabled")
+
     def test_concurrent_exclusive_writes_serialize_without_overlap(self):
         def submit(_index):
             operation_id = str(uuid.uuid4())

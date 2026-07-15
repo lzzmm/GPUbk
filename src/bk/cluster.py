@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import stat
@@ -23,7 +24,7 @@ from .cluster_transport import (
 from .fileio import fsync_directory, open_existing_regular
 from .models import BookingError
 from .node_identity import stable_node_identity
-from .timeparse import parse_iso, utc_now
+from .timeparse import format_local, parse_iso, utc_now
 
 
 CLUSTER_SCHEMA_VERSION = "gpubk.cluster.v1"
@@ -67,6 +68,10 @@ class ClusterConfig:
         if not matches:
             raise BookingError(f"unknown cluster node {name!r}")
         return matches[0]
+
+    @property
+    def enabled_nodes(self) -> tuple[ClusterNode, ...]:
+        return tuple(node for node in self.nodes if node.enabled)
 
 
 @dataclass(frozen=True)
@@ -215,6 +220,7 @@ def write_cluster_config(config: ClusterConfig, *, require_root: bool = True) ->
                 ),
                 **({"priority": node.priority} if node.priority else {}),
                 **({"timeout_seconds": node.timeout_seconds} if node.timeout_seconds != 8 else {}),
+                **({"enabled": False} if not node.enabled else {}),
             }
             for node in config.nodes
         ],
@@ -254,6 +260,9 @@ def run_cluster_cli(argv: Sequence[str]) -> int:
     if action in {"status", "st", "list", "ls", "context", "ctx"}:
         parsed = _cluster_status_parser(action).parse_args(_cluster_help_args(args))
         return _cluster_status(load_cluster_config(), json_output=parsed.json)
+    if action in {"check", "health", "doctor"}:
+        parsed = _cluster_status_parser("check").parse_args(_cluster_help_args(args))
+        return _cluster_check(load_cluster_config(), json_output=parsed.json)
     if action in {"recommend", "rec"}:
         parsed = _cluster_booking_parser("bk cluster recommend").parse_args(
             _cluster_help_args(args)
@@ -307,6 +316,10 @@ def run_cluster_cli(argv: Sequence[str]) -> int:
 def run_node_cli(node_name: str, argv: Sequence[str]) -> int:
     config = load_cluster_config()
     node = config.node(node_name)
+    if not node.enabled:
+        raise BookingError(
+            f"cluster node {node_name!r} is disabled by the administrator"
+        )
     if not argv:
         raise BookingError(f"bk @{node_name} requires a GPUBK command")
     command = list(argv)
@@ -339,8 +352,9 @@ def run_node_cli(node_name: str, argv: Sequence[str]) -> int:
         short_id = reservation.get("short_id") or str(reservation.get("id", ""))[:8]
         print(
             f"{payload.get('status', 'created')} on {node.name}: {short_id} "
-            f"GPU={','.join(map(str, reservation.get('gpus', [])))} "
-            f"{reservation.get('start_at', '?')} -> {reservation.get('end_at', '?')}"
+            f"GPU={_gpu_text(reservation.get('gpus'))} "
+            f"{_local_time(reservation.get('start_at'))} -> "
+            f"{_local_time(reservation.get('end_at'))}"
         )
     elif payload:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
@@ -348,7 +362,7 @@ def run_node_cli(node_name: str, argv: Sequence[str]) -> int:
 
 
 def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
-    replies = _parallel(config.nodes, ["agent", "context", "--compact"])
+    replies = query_cluster_contexts(config)
     if json_output:
         print(
             json.dumps(
@@ -360,7 +374,8 @@ def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
                             "name": reply.node.name,
                             "node_id": reply.node.node_id,
                             "priority": reply.node.priority,
-                            "available": reply.error is None,
+                            "enabled": reply.node.enabled,
+                            "available": reply.node.enabled and reply.error is None,
                             "error": reply.error,
                             "context": reply.payload,
                         }
@@ -380,6 +395,12 @@ def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
     failed = 0
     reservations = []
     for reply in replies:
+        if not reply.node.enabled:
+            print(
+                f"{reply.node.name:<16} {'-':<10} {'disabled':<12} "
+                f"{'-':>5} {'-':>5} {'-':>5} {'maintenance':<18}"
+            )
+            continue
         if reply.error:
             failed += 1
             print(
@@ -390,27 +411,47 @@ def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
         payload = reply.payload or {}
         software = payload.get("software", {})
         version = software.get("version", "legacy") if isinstance(software, dict) else "legacy"
-        policy = payload.get("policy", {})
-        gpus = payload.get("gpu_advice", {}).get("gpus", [])
-        idle = sum(1 for gpu in gpus if gpu.get("live", {}).get("status") == "idle")
-        mine = sum(1 for item in payload.get("reservations", []) if item.get("mine"))
-        actor = payload.get("actor", {})
+        raw_policy = payload.get("policy")
+        policy = raw_policy if isinstance(raw_policy, dict) else {}
+        advice = payload.get("gpu_advice")
+        raw_gpus = advice.get("gpus") if isinstance(advice, dict) else None
+        gpus = [gpu for gpu in raw_gpus if isinstance(gpu, dict)] if isinstance(raw_gpus, list) else []
+        idle = sum(
+            1
+            for gpu in gpus
+            if isinstance(gpu.get("live"), dict)
+            and gpu["live"].get("status") == "idle"
+        )
+        raw_reservations = payload.get("reservations")
+        node_reservations = (
+            [item for item in raw_reservations if isinstance(item, dict)]
+            if isinstance(raw_reservations, list)
+            else []
+        )
+        mine = sum(1 for item in node_reservations if item.get("mine"))
+        raw_actor = payload.get("actor")
+        actor = raw_actor if isinstance(raw_actor, dict) else {}
         principal = _principal_for(config, reply.node.node_id, actor.get("uid"))
         actor_text = principal or f"{actor.get('username', '?')}:{actor.get('uid', '?')}"
-        collector = payload.get("policy", {}).get("monitoring", {}).get("collector")
+        monitoring = policy.get("monitoring") if isinstance(policy, dict) else None
+        collector = monitoring.get("collector") if isinstance(monitoring, dict) else None
         state = collector.get("state", "ok") if isinstance(collector, dict) else "unknown"
         skew = _clock_skew_seconds(payload)
         if skew is None or skew > MAX_CLOCK_SKEW_SECONDS:
             state = "clock-skew"
+        raw_gpu_count = policy.get("gpu_count")
+        gpu_count = (
+            raw_gpu_count
+            if isinstance(raw_gpu_count, int) and not isinstance(raw_gpu_count, bool)
+            else len(gpus)
+        )
         print(
             f"{reply.node.name:<16} {_clip(str(version), 10):<10} "
             f"{_clip(str(state), 12):<12} "
-            f"{int(policy.get('gpu_count', len(gpus))):>5} {idle:>5} {mine:>5} "
+            f"{gpu_count:>5} {idle:>5} {mine:>5} "
             f"{_clip(actor_text, 18):<18}"
         )
-        for reservation in payload.get("reservations", []):
-            if isinstance(reservation, dict):
-                reservations.append((reply.node.name, reservation))
+        reservations.extend((reply.node.name, item) for item in node_reservations)
     if reservations:
         print("\nReservations")
         print(f"{'ID':<25} {'User':<18} {'Mode':<10} {'GPU':<10} {'Start':<22} {'End':<22}")
@@ -424,11 +465,134 @@ def _cluster_status(config: ClusterConfig, *, json_output: bool = False) -> int:
                 f"{_clip(qualified, 25):<25} "
                 f"{_clip(str(reservation.get('username', '?')), 18):<18} "
                 f"{_clip(str(reservation.get('mode', '?')), 10):<10} "
-                f"{_clip(','.join(map(str, reservation.get('gpus', []))), 10):<10} "
-                f"{_clip(str(reservation.get('start_at', '?')), 22):<22} "
-                f"{_clip(str(reservation.get('end_at', '?')), 22):<22}"
+                f"{_clip(_gpu_text(reservation.get('gpus')), 10):<10} "
+                f"{_clip(_local_time(reservation.get('start_at')), 22):<22} "
+                f"{_clip(_local_time(reservation.get('end_at')), 22):<22}"
             )
-    return 3 if failed == len(config.nodes) else 0
+    enabled = config.enabled_nodes
+    return 3 if not enabled or failed == len(enabled) else 0
+
+
+def _cluster_check(config: ClusterConfig, *, json_output: bool = False) -> int:
+    replies = query_cluster_contexts(config)
+    required = tuple(
+        dict.fromkeys((*_BOOK_CAPABILITIES, *_EDIT_CAPABILITIES, *_CANCEL_CAPABILITIES))
+    )
+    checks = []
+    for reply in replies:
+        check = {
+            "name": reply.node.name,
+            "node_id": reply.node.node_id,
+            "enabled": reply.node.enabled,
+            "status": "disabled" if not reply.node.enabled else "ready",
+            "version": None,
+            "actor": None,
+            "clock_skew_seconds": None,
+            "missing_capabilities": [],
+            "warnings": [],
+            "error": None,
+        }
+        if not reply.node.enabled:
+            checks.append(check)
+            continue
+        if reply.error:
+            check["status"] = "failed"
+            check["error"] = reply.error
+            checks.append(check)
+            continue
+        payload = reply.payload or {}
+        software = payload.get("software")
+        if isinstance(software, dict):
+            check["version"] = software.get("version")
+        actor = payload.get("actor")
+        if isinstance(actor, dict):
+            check["actor"] = {
+                "uid": actor.get("uid"),
+                "username": actor.get("username"),
+            }
+        skew = _clock_skew_seconds(payload)
+        check["clock_skew_seconds"] = None if skew is None else round(skew, 3)
+        missing = _missing_capabilities(payload, required)
+        check["missing_capabilities"] = missing
+        if missing:
+            check["status"] = "failed"
+            check["error"] = f"missing write capabilities: {','.join(missing)}"
+        elif skew is None or skew > MAX_CLOCK_SKEW_SECONDS:
+            check["status"] = "failed"
+            check["error"] = "clock is unavailable or outside the 30s limit"
+        elif (
+            not isinstance(actor, dict)
+            or isinstance(actor.get("uid"), bool)
+            or not isinstance(actor.get("uid"), int)
+        ):
+            check["status"] = "failed"
+            check["error"] = "remote actor identity is unavailable"
+        policy = payload.get("policy")
+        gpu_count = policy.get("gpu_count") if isinstance(policy, dict) else None
+        if (
+            check["status"] == "ready"
+            and (
+                isinstance(gpu_count, bool)
+                or not isinstance(gpu_count, int)
+                or gpu_count < 1
+            )
+        ):
+            check["status"] = "failed"
+            check["error"] = "node advertises no schedulable GPUs"
+        monitoring = policy.get("monitoring") if isinstance(policy, dict) else None
+        collector = monitoring.get("collector") if isinstance(monitoring, dict) else None
+        collector_state = collector.get("state") if isinstance(collector, dict) else None
+        if collector_state not in {"running", "ready"}:
+            check["warnings"].append(
+                f"telemetry collector state is {collector_state or 'unknown'}"
+            )
+        checks.append(check)
+
+    enabled = [item for item in checks if item["enabled"]]
+    failures = [item for item in enabled if item["status"] == "failed"]
+    warnings = sum(len(item["warnings"]) for item in enabled)
+    ready = bool(enabled) and not failures
+    payload = {
+        "schema_version": CLUSTER_SCHEMA_VERSION,
+        "kind": "cluster-check",
+        "ready": ready,
+        "summary": {
+            "configured": len(checks),
+            "enabled": len(enabled),
+            "disabled": len(checks) - len(enabled),
+            "failed": len(failures),
+            "warnings": warnings,
+        },
+        "nodes": checks,
+    }
+    if json_output:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+        return 0 if ready else 3
+    state = "ready" if ready else "not ready"
+    print(
+        f"Cluster check: {state} | {len(enabled)} enabled, "
+        f"{len(checks) - len(enabled)} disabled, {warnings} warning(s)"
+    )
+    for item in checks:
+        if item["status"] == "disabled":
+            print(f"skip {item['name']}: disabled by administrator")
+            continue
+        if item["status"] == "failed":
+            print(f"fail {item['name']}: {item['error']}")
+            continue
+        actor = item["actor"] or {}
+        version = item["version"] or "unknown"
+        skew = item["clock_skew_seconds"]
+        clock = f"{skew:.1f}s" if isinstance(skew, (int, float)) else "unknown"
+        print(
+            f"pass {item['name']}: v{version} actor="
+            f"{actor.get('username', '?')}:{actor.get('uid', '?')} clock={clock}"
+        )
+        for warning in item["warnings"]:
+            print(f"warn {item['name']}: {warning}")
+    if not enabled:
+        print("fail cluster: no enabled nodes; ask an administrator to enable one")
+    return 0 if ready else 3
 
 
 def _cluster_recommend(
@@ -444,7 +608,7 @@ def _cluster_recommend(
     replies = (
         []
         if replay_node is not None
-        else _parallel(config.nodes, intent.recommendation_argv())
+        else _parallel(_require_enabled_nodes(config), intent.recommendation_argv())
     )
     candidates, rejected = _rank_cluster_candidates(intent, replies)
     if replay_node is None and not candidates:
@@ -502,6 +666,15 @@ def _rank_cluster_candidates(
             continue
         try:
             remote_start = parse_iso(str(recommendation["start_at"]))
+            remote_end = parse_iso(str(recommendation["end_at"]))
+            gpus = _gpu_indices(recommendation.get("gpus"))
+            if (
+                gpus is None
+                or len(gpus) != intent.count
+                or len(set(gpus)) != len(gpus)
+                or remote_end <= remote_start
+            ):
+                raise ValueError("invalid recommendation placement")
             if intent.start is None:
                 generated_at = parse_iso(str(payload["generated_at"]))
                 wait = max(remote_start - generated_at, timedelta(0))
@@ -637,8 +810,9 @@ def _submit_cluster_booking(
     print(
         f"{payload.get('status', 'created')} on {selected.node.name}: "
         f"{reservation.get('short_id', reservation.get('id', '?'))} "
-        f"GPU={','.join(map(str, reservation.get('gpus', [])))} "
-        f"{reservation.get('start_at', '?')} -> {reservation.get('end_at', '?')}"
+        f"GPU={_gpu_text(reservation.get('gpus'))} "
+        f"{_local_time(reservation.get('start_at'))} -> "
+        f"{_local_time(reservation.get('end_at'))}"
     )
     return 0
 
@@ -651,7 +825,9 @@ def _cluster_usage(
     compact: bool,
 ) -> int:
     remote_args = ["usage", "me", *forwarded, "--json", "--compact"]
-    replies = _parallel(config.nodes, remote_args)
+    replies = _parallel(_require_enabled_nodes(config), remote_args)
+    replies.extend(_disabled_replies(config))
+    replies.sort(key=lambda item: (item.node.priority, item.node.name))
     principals = _aggregate_cluster_usage(config, replies)
     payload = {
         "schema_version": CLUSTER_SCHEMA_VERSION,
@@ -661,7 +837,8 @@ def _cluster_usage(
             {
                 "name": reply.node.name,
                 "node_id": reply.node.node_id,
-                "available": reply.error is None,
+                "enabled": reply.node.enabled,
+                "available": reply.node.enabled and reply.error is None,
                 "error": reply.error,
                 "usage": reply.payload,
             }
@@ -689,9 +866,10 @@ def _cluster_usage(
                 f"{_duration(principal['violation_gpu_seconds']):>10}"
             )
         for reply in replies:
-            if reply.error:
+            if reply.error and reply.node.enabled:
                 print(f"warning: {reply.node.name}: {reply.error}")
-    return 3 if all(reply.error for reply in replies) else 0
+    enabled_replies = [reply for reply in replies if reply.node.enabled]
+    return 3 if not enabled_replies or all(reply.error for reply in enabled_replies) else 0
 
 
 def _cluster_history(config: ClusterConfig, args: argparse.Namespace) -> int:
@@ -783,7 +961,11 @@ def _aggregate_cluster_usage(config: ClusterConfig, replies: Sequence[NodeReply]
     for reply in replies:
         if reply.error or not reply.payload:
             continue
-        for user in reply.payload.get("users", []):
+        raw_users = reply.payload.get("users")
+        users = raw_users if isinstance(raw_users, list) else []
+        for user in users:
+            if not isinstance(user, dict):
+                continue
             uid = user.get("uid")
             if isinstance(uid, bool) or not isinstance(uid, int):
                 continue
@@ -825,14 +1007,19 @@ def _aggregate_cluster_usage(config: ClusterConfig, replies: Sequence[NodeReply]
                 "violation_gpu_seconds",
                 "sampled_gpu_seconds",
             ):
-                group[key] += max(0.0, float(user.get(key, 0)))
+                group[key] += _nonnegative_number(user.get(key))
+            memory = _nonnegative_number(user.get("max_gpu_memory_mb"))
             group["max_gpu_memory_mb"] = max(
-                group["max_gpu_memory_mb"], int(user.get("max_gpu_memory_mb") or 0)
+                group["max_gpu_memory_mb"], int(memory)
             )
             average = user.get("avg_sm_percent")
-            if isinstance(average, (int, float)):
+            if (
+                isinstance(average, (int, float))
+                and not isinstance(average, bool)
+                and math.isfinite(float(average))
+            ):
                 group["_sm_weighted"] += float(average) * max(
-                    0.0, float(user.get("sampled_gpu_seconds", 0))
+                    0.0, _nonnegative_number(user.get("sampled_gpu_seconds"))
                 )
     result = []
     for identity in sorted(groups):
@@ -979,6 +1166,8 @@ def _parallel(
     argv: list[str],
     cancel_event: Optional[Event] = None,
 ) -> list[NodeReply]:
+    if not nodes:
+        return []
     replies = []
     with ThreadPoolExecutor(max_workers=min(16, len(nodes))) as executor:
         futures = {
@@ -997,11 +1186,13 @@ def query_cluster_contexts(
     config: ClusterConfig,
     cancel_event: Optional[Event] = None,
 ) -> list[NodeReply]:
-    return _parallel(
-        config.nodes,
+    replies = _parallel(
+        config.enabled_nodes,
         ["agent", "context", "--compact"],
         cancel_event,
     )
+    replies.extend(_disabled_replies(config))
+    return sorted(replies, key=lambda item: (item.node.priority, item.node.name))
 
 
 def _invoke(
@@ -1113,9 +1304,10 @@ def _find_cluster_operation_node(
     operation_id: str,
 ) -> Optional[ClusterNode]:
     replies = _parallel(
-        config.nodes,
+        config.enabled_nodes,
         ["agent", "operation", operation_id, "--compact"],
     )
+    replies.extend(_disabled_replies(config))
     found = []
     failures = []
     for reply in replies:
@@ -1245,8 +1437,9 @@ def _parse_node(value: object) -> ClusterNode:
     }
     if unknown:
         raise BookingError(f"unknown cluster node field: {sorted(unknown)[0]}")
-    if value.get("enabled", True) is False:
-        raise BookingError("disabled nodes must be removed from the active catalog")
+    enabled = value.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise BookingError("cluster node enabled must be true or false")
     name = value.get("name")
     node_id = value.get("node_id")
     transport = value.get("transport")
@@ -1270,7 +1463,16 @@ def _parse_node(value: object) -> ClusterNode:
         raise BookingError(f"cluster node {name} priority is invalid")
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not 1 <= timeout <= 300:
         raise BookingError(f"cluster node {name} timeout_seconds must be 1-300")
-    return ClusterNode(name, node_id, transport, target, executable, priority, float(timeout))
+    return ClusterNode(
+        name,
+        node_id,
+        transport,
+        target,
+        executable,
+        priority,
+        float(timeout),
+        enabled,
+    )
 
 
 def _validate_principal(value: object, nodes: Sequence[ClusterNode]) -> dict:
@@ -1399,8 +1601,9 @@ def _print_cluster_candidates(candidates: Sequence[ClusterCandidate]) -> None:
         reply = candidate.reply
         recommendation = reply.payload["recommendation"]
         print(
-            f"{reply.node.name:<16} {','.join(map(str, recommendation['gpus'])):<12} "
-            f"{recommendation['start_at']:<27} {recommendation['end_at']:<27}"
+            f"{reply.node.name:<16} {_gpu_text(recommendation.get('gpus')):<12} "
+            f"{_local_time(recommendation.get('start_at')):<27} "
+            f"{_local_time(recommendation.get('end_at')):<27}"
         )
 
 
@@ -1414,6 +1617,7 @@ First setup (administrator):
 
 Everyday commands:
   bk cluster                  show all configured nodes
+  bk cluster check            verify access, identity, clocks, and write support
   bk cluster recommend 2 1h  compare earliest legal placements
   bk cluster book 2 1h       book the best single node
   bk cluster usage --since 7d  aggregate this SSH identity's history
@@ -1438,6 +1642,41 @@ def _duration(seconds: object) -> str:
     hours, remainder = divmod(value, 3600)
     minutes = remainder // 60
     return f"{hours}h{minutes:02d}m" if hours else f"{minutes}m"
+
+
+def _local_time(value: object) -> str:
+    if not isinstance(value, str):
+        return "?"
+    try:
+        return format_local(value)
+    except (TypeError, ValueError):
+        return value
+
+
+def _gpu_indices(value: object) -> Optional[list[int]]:
+    if not isinstance(value, list):
+        return None
+    if any(
+        isinstance(item, bool) or not isinstance(item, int) or item < 0
+        for item in value
+    ):
+        return None
+    return value
+
+
+def _gpu_text(value: object) -> str:
+    indices = _gpu_indices(value)
+    return ",".join(map(str, indices)) if indices else "-"
+
+
+def _nonnegative_number(value: object) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(float(value))
+    ):
+        return 0.0
+    return max(0.0, float(value))
 
 
 def _clock_skew_seconds(payload: dict) -> Optional[float]:
@@ -1479,3 +1718,25 @@ def _is_booking_command(argv: Sequence[str]) -> bool:
         "exclusive",
         "x",
     }
+
+
+def _require_enabled_nodes(config: ClusterConfig) -> tuple[ClusterNode, ...]:
+    nodes = config.enabled_nodes
+    if not nodes:
+        raise BookingError(
+            "cluster has no enabled nodes; ask an administrator to enable one"
+        )
+    return nodes
+
+
+def _disabled_replies(config: ClusterConfig) -> list[NodeReply]:
+    return [
+        NodeReply(
+            node,
+            None,
+            "disabled by administrator",
+            error_code="disabled",
+        )
+        for node in config.nodes
+        if not node.enabled
+    ]

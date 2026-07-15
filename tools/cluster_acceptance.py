@@ -457,6 +457,10 @@ def exercise_cluster(bk: Path, catalog: Path, nodes: Sequence[RemoteNode]) -> di
     if any(not item.get("available") for item in statuses if isinstance(item, dict)):
         raise ClusterAcceptanceError("at least one candidate node is unavailable")
 
+    health = run_client(bk, catalog, "cluster", "check", "--json")
+    if not isinstance(health, dict) or health.get("ready") is not True:
+        raise ClusterAcceptanceError("cluster readiness check did not pass")
+
     recommendation = run_client(
         bk,
         catalog,
@@ -507,6 +511,7 @@ def exercise_cluster(bk: Path, catalog: Path, nodes: Sequence[RemoteNode]) -> di
         raise ClusterAcceptanceError("isolated reservations remained active after cleanup")
     return {
         "status": status,
+        "health": health,
         "recommendation": recommendation,
         "bookings": [first, second],
         "replay": replay,
@@ -606,7 +611,10 @@ def main(argv: list[str] | None = None) -> int:
                 )
             catalog = work / "cluster.json"
             write_catalog(catalog, remote_nodes)
-            print("Exercising status, recommendation, booking, replay, and cancel...", flush=True)
+            print(
+                "Exercising status, health, recommendation, booking, replay, and cancel...",
+                flush=True,
+            )
             result_payload = exercise_cluster(client, catalog, remote_nodes)
         except Exception as exc:
             failure = exc

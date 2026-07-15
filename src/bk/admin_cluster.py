@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
@@ -64,6 +65,15 @@ def add_admin_cluster_parser(commands) -> None:
     cluster_remove.add_argument("name")
     cluster_remove.add_argument("--cluster-file", type=Path)
     cluster_remove.add_argument("--yes", action="store_true")
+
+    for action, help_text in (
+        ("disable", "temporarily remove one node from live cluster routing"),
+        ("enable", "return one configured node to live cluster routing"),
+    ):
+        lifecycle = cluster_commands.add_parser(action, help=help_text)
+        lifecycle.add_argument("name")
+        lifecycle.add_argument("--cluster-file", type=Path)
+        lifecycle.add_argument("--yes", action="store_true")
 
     cluster_map = cluster_commands.add_parser(
         "map",
@@ -313,6 +323,12 @@ def _updated_cluster_config(
         )
     elif args.cluster_action == "remove":
         nodes, principals = _remove_cluster_node(current, principals, args.name)
+    elif args.cluster_action in {"enable", "disable"}:
+        nodes = _set_cluster_node_enabled(
+            current,
+            args.name,
+            enabled=args.cluster_action == "enable",
+        )
     elif args.cluster_action == "map":
         return _map_cluster_principal(current, principals, args)
     elif args.cluster_action == "unmap":
@@ -351,6 +367,21 @@ def _remove_cluster_node(
         if members:
             cleaned.append({"id": principal["id"], "members": members})
     return nodes, cleaned
+
+
+def _set_cluster_node_enabled(
+    current: ClusterConfig,
+    name: str,
+    *,
+    enabled: bool,
+) -> list[ClusterNode]:
+    node = current.node(name)
+    if node.enabled == enabled:
+        return list(current.nodes)
+    return [
+        replace(item, enabled=enabled) if item.name == name else item
+        for item in current.nodes
+    ]
 
 
 def _map_cluster_principal(
@@ -454,6 +485,7 @@ def print_admin_cluster(config: ClusterConfig, *, json_output: bool) -> int:
                 "transport": node.transport,
                 "target": node.target,
                 "priority": node.priority,
+                "enabled": node.enabled,
             }
             for node in config.nodes
         ],
@@ -466,9 +498,10 @@ def print_admin_cluster(config: ClusterConfig, *, json_output: bool) -> int:
     print(f"Cluster catalog: {config.path}")
     for node in config.nodes:
         endpoint = "this host" if node.transport == "local" else node.target
+        state = "enabled" if node.enabled else "disabled"
         print(
             f"  {node.name:<16} {node.node_id} {node.transport:<5} "
-            f"priority={node.priority} endpoint={endpoint}"
+            f"{state:<9} priority={node.priority} endpoint={endpoint}"
         )
     if config.principals:
         names = {node.node_id: node.name for node in config.nodes}

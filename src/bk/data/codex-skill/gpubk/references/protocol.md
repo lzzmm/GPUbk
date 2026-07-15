@@ -21,6 +21,7 @@ bk log --limit 100 --json
 bk usage me --since 24h --json --compact
 bk usage samples --since 2d --resolution 5m --json --compact
 bk c status --json
+bk c check --json
 bk c recommend COUNT DURATION --json
 bk c book COUNT DURATION --op-id ID --json
 ```
@@ -148,12 +149,19 @@ priority, and node name. `cluster-booking-result` contains one destination node,
 stable operation ID, and the unchanged destination `bk.agent.v1` result.
 Cluster edit and cancel accept caller-supplied stable operation IDs and return a
 `cluster-mutation-result` containing the owning node and unchanged destination result.
+`cluster-check` reports per-node reachability, stable identity, actor attribution,
+clock skew, schedulable GPU count, and required write capabilities. Its `ready` field
+is false when no enabled node is usable. Catalog nodes omit `enabled` for the default
+true state and use `enabled=false` for maintenance; disabled nodes remain visible in
+context/history but are not contacted or considered for placement.
 
 Reservation references outside their owning node use `NODE/SHORT_ID`. Automatic
 booking never splits a request across nodes. Edit and cancel route back to the node
 prefix. Cross-node usage combines UIDs only when the administrator catalog maps their
 `(node_id, uid)` pairs to the same principal; identical usernames remain separate.
 SSH is the authentication boundary and the remote process's numeric UID is authoritative.
+An explicit operation-ID retry is fail-closed when a disabled or unreachable node prevents
+the client from proving where that operation was committed. Never reroute that retry.
 
 An operation ID identifies one immutable write intent for the current UID, including a scheduled
 command's submission `PATH`. Exact retries return

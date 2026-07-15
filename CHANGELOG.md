@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## 0.2.1 - 2026-07-15
 
+- Add non-destructive cluster node disable/enable operations, skip maintenance nodes
+  without SSH delays or placement, retain their identity mappings and history, and add
+  `bk cluster check` for per-user reachability, identity, clock, GPU, and write-capability
+  validation. Human cluster times now use the local timezone while JSON remains UTC.
 - Make `bk admin install` idempotent for an existing managed deployment: preserve
   configuration and data, reject accidental policy changes, reconcile tracked command
   and unit files, perform a controlled restart, and recover service availability after

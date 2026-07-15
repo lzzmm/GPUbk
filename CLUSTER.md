@@ -33,6 +33,7 @@ ssh -T user@gpu-b /usr/local/bin/bk agent context --compact
 sudo bk admin cluster add gpu-b user@gpu-b NODE_ID_FROM_CONTEXT --yes
 sudo bk admin cluster status
 bk cluster
+bk cluster check
 bk cluster recommend 1 30m
 ```
 
@@ -42,6 +43,24 @@ local entry is created from that host's stable identity; SSH entries use the sta
 Each ordinary user still needs non-interactive SSH access with a previously verified
 host key. `bk cluster status` reports one unreachable account without disabling other
 healthy nodes.
+
+Before booking, every ordinary user can validate their own route with `bk cluster
+check`. It checks endpoint reachability, stable identity, actor attribution, clock
+skew, schedulable GPUs, and the capabilities needed for retry-safe book/edit/cancel
+operations. Telemetry degradation is reported as a warning because the scheduler can
+still operate conservatively.
+
+For maintenance, disable a node instead of deleting it:
+
+```bash
+sudo bk admin cluster disable gpu-b --yes
+sudo bk admin cluster enable gpu-b --yes
+```
+
+A disabled node is not contacted and cannot receive new cluster writes. Its endpoint,
+stable identity, principal mappings, and archived history remain in the version-1
+catalog. Old catalogs have no `enabled` field and therefore continue to treat every
+node as enabled.
 
 ## User model
 
@@ -162,6 +181,8 @@ identity and avoids creating a second writer.
 ## Failure rules
 
 - An unreachable node is shown as unavailable; healthy nodes remain usable.
+- A disabled node is skipped without waiting for SSH and retains its catalog and history
+  metadata until an administrator enables or removes it.
 - Read-only comparison may become stale. The destination broker always revalidates
   under its local transaction lock before committing.
 - Explicit `@NODE` requests never fail over to another host.
@@ -234,6 +255,7 @@ required idempotency, operation-status, and node-identity capabilities.
 - [x] Add cluster-mode CLI help; keep all cluster UI hidden in single-host mode.
 - [x] Add TUI node switcher and aggregate personal summary only when configured.
 - [x] Add administrator catalog/identity inspection and safe update commands.
+- [x] Add non-destructive node maintenance state and a per-user cluster readiness check.
 - [x] Gate writes by advertised capabilities and recover ambiguous writes by
       querying the same operation ID on the same node.
 - [x] Add optional per-node history export, verification, and read-only aggregation

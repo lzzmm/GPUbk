@@ -119,6 +119,7 @@ class ClusterAcceptanceTests(unittest.TestCase):
                 {"available": True, "context": {"reservations": []}},
             ]
         }
+        health = {"ready": True}
         recommendation = {"selected_node": "node-1"}
 
         def booking(node, reservation_id):
@@ -140,7 +141,17 @@ class ClusterAcceptanceTests(unittest.TestCase):
                 {"context": {"reservations": []}},
             ]
         }
-        side_effect = [status, recommendation, first, second, first, "cancelled", "cancelled", final]
+        side_effect = [
+            status,
+            health,
+            recommendation,
+            first,
+            second,
+            first,
+            "cancelled",
+            "cancelled",
+            final,
+        ]
         with mock.patch.object(ACCEPTANCE, "run_client", side_effect=side_effect) as client:
             result = ACCEPTANCE.exercise_cluster(
                 Path("/tmp/bk"),
@@ -148,7 +159,8 @@ class ClusterAcceptanceTests(unittest.TestCase):
                 [mock.Mock(), mock.Mock()],
             )
         self.assertEqual(result["replay"]["node"]["name"], "node-1")
-        self.assertEqual(client.call_count, 8)
+        self.assertTrue(result["health"]["ready"])
+        self.assertEqual(client.call_count, 9)
 
     def test_failed_run_still_writes_a_private_report(self):
         with tempfile.TemporaryDirectory() as raw_directory:

@@ -13,6 +13,7 @@ from .cluster import (
     _clock_skew_seconds,
     query_cluster_contexts,
 )
+from .timeparse import parse_iso
 
 
 def run_cluster_tui(config: ClusterConfig) -> int:
@@ -42,23 +43,31 @@ def render_cluster_lines(
     for index, node in enumerate(config.nodes):
         reply = by_name.get(node.name)
         marker = ">" if index == selected else " "
-        if reply is None:
+        if not node.enabled:
+            state, gpus, idle, mine, actor = "disabled", "-", "-", "-", "maintenance"
+        elif reply is None:
             state, gpus, idle, mine, actor = "waiting", "-", "-", "-", "-"
         elif reply.error:
             state, gpus, idle, mine, actor = "offline", "-", "-", "-", reply.error
         else:
             payload = reply.payload or {}
-            advice = payload.get("gpu_advice", {}).get("gpus", [])
-            policy = payload.get("policy", {})
-            collector = policy.get("monitoring", {}).get("collector")
-            state = collector.get("state", "ok") if isinstance(collector, dict) else "unknown"
+            advice = _dict_items(_mapping(payload.get("gpu_advice")).get("gpus"))
+            policy = _mapping(payload.get("policy"))
+            collector = _mapping(_mapping(policy.get("monitoring")).get("collector"))
+            state = str(collector.get("state", "unknown"))
             skew = _clock_skew_seconds(payload)
             if skew is None or skew > MAX_CLOCK_SKEW_SECONDS:
                 state = "clock-skew"
             gpus = str(policy.get("gpu_count", len(advice)))
-            idle = str(sum(1 for item in advice if item.get("live", {}).get("status") == "idle"))
-            mine = str(sum(1 for item in payload.get("reservations", []) if item.get("mine")))
-            identity = payload.get("actor", {})
+            idle = str(
+                sum(
+                    1
+                    for item in advice
+                    if _mapping(item.get("live")).get("status") == "idle"
+                )
+            )
+            mine = str(sum(1 for item in _dict_items(payload.get("reservations")) if item.get("mine")))
+            identity = _mapping(payload.get("actor"))
             actor = f"{identity.get('username', '?')}:{identity.get('uid', '?')}"
         lines.append(
             _fit(
@@ -72,37 +81,44 @@ def render_cluster_lines(
     reply = by_name.get(node.name)
     version = "-"
     if reply is not None and reply.error is None:
-        software = (reply.payload or {}).get("software", {})
-        if isinstance(software, dict):
-            version = str(software.get("version", "legacy"))
+        software = _mapping((reply.payload or {}).get("software"))
+        version = str(software.get("version", "legacy"))
     lines.append(
         _fit(
             f"{node.name}  {node.node_id}  v{version}  priority={node.priority}",
             width,
         )
     )
-    if reply is None:
+    if not node.enabled:
+        lines.append(
+            _fit(
+                "Disabled by administrator; routing is paused while configuration and history are retained.",
+                width,
+            )
+        )
+    elif reply is None:
         lines.append(_fit("Waiting for the first response.", width))
     elif reply.error:
         lines.append(_fit(f"Unavailable: {reply.error}", width))
     else:
         payload = reply.payload or {}
         lines.append(_fit("GPU  State       Util   Free VRAM   Predicted", width))
-        for gpu in payload.get("gpu_advice", {}).get("gpus", []):
-            live = gpu.get("live", {})
-            memory = gpu.get("memory", {})
-            history = gpu.get("history", {})
+        advice = _mapping(payload.get("gpu_advice"))
+        for gpu in _dict_items(advice.get("gpus")):
+            live = _mapping(gpu.get("live"))
+            memory = _mapping(gpu.get("memory"))
+            history = _mapping(gpu.get("history"))
             util = live.get("utilization_percent")
             free = memory.get("free_mb")
             predicted = history.get("predicted_percent")
             lines.append(
                 _fit(
-                    f"{int(gpu.get('index', -1)):>3}  {str(live.get('status', '?')):<10} "
+                    f"{str(gpu.get('index', '?')):>3}  {str(live.get('status', '?')):<10} "
                     f"{_percent(util):>5}  {_memory(free):>10}   {_percent(predicted):>8}",
                     width,
                 )
             )
-        reservations = payload.get("reservations", [])
+        reservations = _dict_items(payload.get("reservations"))
         if reservations:
             lines.append(_fit("", width))
             lines.append(_fit("ID        User             Mode       GPU      Start -> End", width))
@@ -112,8 +128,9 @@ def render_cluster_lines(
                     _fit(
                         f"{short_id:<9} {str(reservation.get('username', '?')):<16} "
                         f"{str(reservation.get('mode', '?')):<10} "
-                        f"{','.join(map(str, reservation.get('gpus', []))):<8} "
-                        f"{reservation.get('start_at', '?')} -> {reservation.get('end_at', '?')}",
+                        f"{_gpu_text(reservation.get('gpus')):<8} "
+                        f"{_local_time(reservation.get('start_at'))} -> "
+                        f"{_local_time(reservation.get('end_at'))}",
                         width,
                     )
                 )
@@ -189,6 +206,8 @@ def _cluster_tui_main(screen, config: ClusterConfig) -> None:
                         attribute |= curses.A_REVERSE
                     elif "offline" in line or "clock-skew" in line:
                         attribute |= curses.color_pair(2) if colors else curses.A_BOLD
+                    elif "disabled" in line:
+                        attribute |= curses.A_DIM
                     elif "running" in line or " idle " in line:
                         attribute |= curses.color_pair(3) if colors else 0
                     screen.addnstr(row, 0, line, max(0, width - 1), attribute)
@@ -220,10 +239,42 @@ def _fit(value: str, width: int) -> str:
 
 
 def _percent(value: object) -> str:
-    return "-" if not isinstance(value, (int, float)) else f"{value:.0f}%"
+    return (
+        "-"
+        if isinstance(value, bool) or not isinstance(value, (int, float))
+        else f"{value:.0f}%"
+    )
 
 
 def _memory(value: object) -> str:
-    if not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return "-"
     return f"{value / 1024:.1f}GiB"
+
+
+def _local_time(value: object) -> str:
+    if not isinstance(value, str):
+        return "?"
+    try:
+        return parse_iso(value).astimezone().strftime("%m-%d %H:%M")
+    except (TypeError, ValueError):
+        return value
+
+
+def _mapping(value: object) -> dict:
+    return value if isinstance(value, dict) else {}
+
+
+def _dict_items(value: object) -> list[dict]:
+    return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
+
+
+def _gpu_text(value: object) -> str:
+    if not isinstance(value, list):
+        return "-"
+    indices = [
+        item
+        for item in value
+        if isinstance(item, int) and not isinstance(item, bool) and item >= 0
+    ]
+    return ",".join(map(str, indices)) if indices else "-"
