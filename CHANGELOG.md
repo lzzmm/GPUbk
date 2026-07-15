@@ -2,6 +2,11 @@
 
 All notable changes are documented here. The project follows Semantic Versioning once a public release is published.
 
+## 0.2.4 - 2026-07-16
+
+- Publish final releases directly to the protected PyPI environment, retaining
+  artifact hash verification, installation smoke tests, and immutable GitHub releases.
+
 ## 0.2.3 - 2026-07-16
 
 - Align CLI reservation tables and TUI GPU detail rows, add bounded list views, and
