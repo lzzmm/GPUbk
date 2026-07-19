@@ -2313,6 +2313,18 @@ class CliTests(unittest.TestCase):
             self.assertIn("book: bk 1 30m --gpu 0", result.stdout)
             self.assertFalse((data_dir / "ledger.json").exists())
 
+    def test_gpu_shortcut_can_recommend_a_simultaneous_gpu_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp)
+            result = self.run_bk(["g", "4"], data_dir, {"BK_GPU_COUNT": "4"})
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("4 GPUs | suggested now | 0,1,2,3", result.stdout)
+            for gpu in range(4):
+                self.assertIn(f"GPU {gpu}:", result.stdout)
+            self.assertIn("book: bk 4 30m --gpu 0,1,2,3", result.stdout)
+            self.assertFalse((data_dir / "ledger.json").exists())
+
     def test_gpu_shortcut_prefers_active_booking_and_shows_live_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             data_dir = Path(tmp)

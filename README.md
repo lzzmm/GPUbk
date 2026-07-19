@@ -85,7 +85,8 @@ bk 2 1h30m 12g     # two GPUs, 90 minutes, 12 GiB per GPU
 bk x 1 2h           # exclusive reservation
 bk a                # guided reservation
 bk l                # list your reservations
-bk g                # suggest a GPU available now
+bk g                # show your current GPU, or suggest one
+bk g 4              # inspect a simultaneous 4-GPU recommendation
 bk run -- python train.py
 bk t                # visual terminal timeline
 bk u                # your usage summary

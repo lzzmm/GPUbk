@@ -81,6 +81,7 @@ A normal first session is:
 bk info              # administrator account and contact
 bk login             # current and next reservation, without GPU probing
 bk g                 # GPU you can use now, or one read-only suggestion
+bk g 4               # inspect a simultaneous four-GPU set without booking it
 bk slots 1 30m       # preview choices, no write
 bk 1 30m             # book the earliest suitable shared GPU
 bk st                # check live state
@@ -453,6 +454,7 @@ Install the `gpu` extra, then run a single sample or a low-overhead monitor:
 bk m --once
 bk m
 bk g                              # current booked GPU, otherwise one suggestion
+bk g 4                            # simultaneous four-GPU suggestion
 bk u                              # this UID, last 24 hours
 bk u users --since 30d           # visible per-user summaries
 bk u samples --since 2d --resolution 5m --json
@@ -464,6 +466,8 @@ your reservations is active, it prints those GPU IDs, remaining time, live
 utilization, and free VRAM. Otherwise it recommends one legal 30-minute shared
 placement using both the ledger and current telemetry. It never creates a
 reservation; use the printed `bk 1 30m --gpu N` command to book it.
+`bk g COUNT` asks the same question for a simultaneous GPU set and prints a
+ready-to-run booking command; it is also read-only.
 
 `bk u` reports sampled history only. Future reservations are excluded.
 `Reserved` is past reservation time covered by monitor samples, while `Idle` is

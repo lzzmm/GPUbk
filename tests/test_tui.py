@@ -1541,7 +1541,7 @@ class TuiAddPreviewTests(unittest.TestCase):
             shared_style="solid",
         )
 
-        self.assertEqual(cell[:2], (BAR_CHAR, color_map["one"]))
+        self.assertEqual(cell[:2], (SHARED_START_CHAR, color_map["one"]))
 
     def test_short_shared_reservation_has_a_visible_two_edge_marker(self):
         short = reservation(
@@ -1565,6 +1565,30 @@ class TuiAddPreviewTests(unittest.TestCase):
         )
 
         self.assertEqual(cell[:2], (SHARED_SHORT_CHAR, color_map["short"]))
+        self.assertTrue(cell[2] & curses.A_BOLD)
+
+    def test_short_exclusive_reservation_stays_visible_when_zoomed_out(self):
+        short = reservation(
+            "exclusive-short",
+            os.getuid(),
+            MODE_EXCLUSIVE,
+            [0],
+            self.start + timedelta(minutes=10),
+            self.start + timedelta(minutes=40),
+        )
+        color_map = _reservation_color_map([short])
+
+        cell = _cell_for_gpu(
+            0,
+            color_map,
+            [short],
+            self.start,
+            self.start + timedelta(hours=2),
+            None,
+            shared_limit=4,
+        )
+
+        self.assertEqual(cell[:2], (SHARED_SHORT_CHAR, color_map["exclusive-short"]))
         self.assertTrue(cell[2] & curses.A_BOLD)
 
     def test_shared_reservation_marks_start_and_end_when_compressed(self):

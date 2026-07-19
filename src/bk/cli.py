@@ -1251,9 +1251,19 @@ def _run_command(argv: List[str], config: Config, store: LedgerStore) -> int:
 def _gpu_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     parser = argparse.ArgumentParser(
         prog="bk gpu",
-        description="Show only the GPU(s) you can use now, or one read-only suggestion.",
+        description=(
+            "Show GPU(s) you can use now; COUNT requests a read-only simultaneous set."
+        ),
     )
-    parser.parse_args(argv)
+    parser.add_argument(
+        "count",
+        nargs="?",
+        type=int,
+        help="show a simultaneous recommendation for this many GPUs",
+    )
+    args = parser.parse_args(argv)
+    if args.count is not None and not 1 <= args.count <= config.gpu_count:
+        parser.error(f"count must be between 1 and {config.gpu_count}")
 
     actor = _current_actor()
     now = utc_now()
@@ -1263,6 +1273,19 @@ def _gpu_command(argv: List[str], config: Config, store: LedgerStore) -> int:
     advice = build_gpu_advice(config)
     snapshots = {item.index: item for item in advice.snapshots}
     colors = color_enabled(sys.stdout)
+
+    if args.count is not None:
+        return _print_gpu_set_recommendation(
+            args.count,
+            config,
+            store,
+            actor,
+            now,
+            advice,
+            snapshots,
+            exclusive_blocks,
+            colors=colors,
+        )
 
     if current:
         gpus = sorted({int(gpu) for item in current for gpu in item.get("gpus", [])})
@@ -1348,6 +1371,53 @@ def _gpu_command(argv: List[str], config: Config, store: LedgerStore) -> int:
         print(f"book: bk 1 30m --gpu {gpu}")
     else:
         print(f"book: bk 1 30m --gpu {gpu} --at \"{start.astimezone():%m-%d %H:%M}\"")
+    return 0
+
+
+def _print_gpu_set_recommendation(
+    count: int,
+    config: Config,
+    store: LedgerStore,
+    actor: Actor,
+    now: datetime,
+    advice: GpuAdvice,
+    snapshots: dict,
+    exclusive_blocks: Sequence[dict],
+    *,
+    colors: bool,
+) -> int:
+    response = recommend_booking(
+        config,
+        store,
+        actor,
+        count=count,
+        duration_seconds=max(30 * 60, config.slot_seconds),
+        start_at=now,
+        mode=MODE_SHARED,
+        allow_queue=True,
+        share_units=1,
+    )
+    recommendation = response["recommendation"]
+    _print_exclusive_blocks(exclusive_blocks, now, colors=colors)
+    if recommendation is None:
+        print(
+            f"GPU - | no legal {count}-GPU 30m slot in the next "
+            f"{config.queue_search_hours}h"
+        )
+        return 3
+
+    gpus = [int(gpu) for gpu in recommendation["gpus"]]
+    start = parse_iso(recommendation["start_at"])
+    when = "now" if start <= now else format_local(start)
+    heading = f"{len(gpus)} GPUs | suggested {when} | {','.join(map(str, gpus))}"
+    print(style(heading, "heading", enabled=colors))
+    for gpu in gpus:
+        print(f"  GPU {gpu}: {_gpu_live_summary(gpu, advice, snapshots)}")
+    gpu_arg = ",".join(map(str, gpus))
+    command = f"bk {count} 30m --gpu {gpu_arg}"
+    if start > now:
+        command += f' --at "{start.astimezone():%m-%d %H:%M}"'
+    print(f"book: {command}")
     return 0
 
 
@@ -4529,7 +4599,7 @@ BOOK
 VIEW
   bk info                         administrator account and contact
   bk login                        own bookings and exclusive warnings
-  bk g                            GPU you can use now, or one suggestion
+  bk g [COUNT]                    your GPU now, or suggest COUNT GPUs
   bk st                           compact live status
   bk tl [window] [--step auto]   fine-grained aligned timeline
   bk slots 2 1h                  read-only earliest alternatives
