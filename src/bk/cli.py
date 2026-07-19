@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from itertools import combinations, islice
 from pathlib import Path
@@ -1990,19 +1991,8 @@ def _update_command(argv: List[str]) -> int:
             [str(managed_python), "-m", "bk", "admin", "install", "--yes"],
             check=True,
         )
-        print("Verifying deployment...")
-        subprocess.run(
-            [
-                str(managed_python),
-                "-m",
-                "bk",
-                "doctor",
-                "--probe",
-                "--require-monitor",
-                "--strict",
-            ],
-            check=True,
-        )
+        print("Waiting for the broker socket and first monitor heartbeat...")
+        _verify_updated_deployment(managed_python)
     except (OSError, subprocess.CalledProcessError) as exc:
         if stopped:
             print("Upgrade did not complete; attempting to restore GPUBK services...", file=sys.stderr)
@@ -2013,6 +2003,53 @@ def _update_command(argv: List[str]) -> int:
         raise BookingError(f"upgrade failed: {exc}") from exc
     print(f"Upgrade complete: {managed_python} -m bk --version")
     return 0
+
+
+def _verify_updated_deployment(
+    managed_python: Path,
+    *,
+    attempts: int = 20,
+    delay_seconds: float = 1.0,
+) -> None:
+    """Wait briefly for newly started services, then expose the final doctor output."""
+    command = [
+        str(managed_python),
+        "-m",
+        "bk",
+        "doctor",
+        "--probe",
+        "--require-monitor",
+        "--strict",
+    ]
+    last_result: Optional[subprocess.CompletedProcess[str]] = None
+    for attempt in range(1, attempts + 1):
+        result = subprocess.run(
+            command,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        last_result = result
+        if result.returncode == 0:
+            if result.stdout:
+                print(result.stdout, end="" if result.stdout.endswith("\n") else "\n")
+            if result.stderr:
+                print(result.stderr, end="" if result.stderr.endswith("\n") else "\n", file=sys.stderr)
+            return
+        if attempt < attempts:
+            time.sleep(delay_seconds)
+
+    assert last_result is not None
+    if last_result.stdout:
+        print(last_result.stdout, end="" if last_result.stdout.endswith("\n") else "\n")
+    if last_result.stderr:
+        print(
+            last_result.stderr,
+            end="" if last_result.stderr.endswith("\n") else "\n",
+            file=sys.stderr,
+        )
+    raise subprocess.CalledProcessError(last_result.returncode, command)
 
 
 def _worker_status_line(status: dict) -> str:

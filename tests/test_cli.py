@@ -15,6 +15,7 @@ from bk.cli import (
     _maybe_print_preset_suggestion,
     _run_with_booking_deadline,
     _update_command,
+    _verify_updated_deployment,
     main as bk_main,
 )
 from bk.collector_status import collector_document
@@ -163,6 +164,39 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertIn("GPUBK update guide", output.getvalue())
             self.assertIn("sudo bk update --apply --extras gpu", output.getvalue())
+
+    def test_update_verification_waits_for_service_readiness(self):
+        pending = subprocess.CompletedProcess(["doctor"], 2, "not ready\n", "")
+        ready = subprocess.CompletedProcess(["doctor"], 0, "ready\n", "")
+        output = StringIO()
+        with (
+            mock.patch("bk.cli.subprocess.run", side_effect=[pending, pending, ready]) as run,
+            mock.patch("bk.cli.time.sleep") as sleep,
+            redirect_stdout(output),
+        ):
+            _verify_updated_deployment(Path("/opt/gpubk/bin/python"))
+
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual(output.getvalue(), "ready\n")
+
+    def test_update_verification_reports_the_last_failure(self):
+        failed = subprocess.CompletedProcess(["doctor"], 2, "still not ready\n", "detail\n")
+        output = StringIO()
+        errors = StringIO()
+        with (
+            mock.patch("bk.cli.subprocess.run", return_value=failed),
+            mock.patch("bk.cli.time.sleep"),
+            redirect_stdout(output),
+            redirect_stderr(errors),
+            self.assertRaises(subprocess.CalledProcessError),
+        ):
+            _verify_updated_deployment(
+                Path("/opt/gpubk/bin/python"), attempts=2, delay_seconds=0
+            )
+
+        self.assertEqual(output.getvalue(), "still not ready\n")
+        self.assertEqual(errors.getvalue(), "detail\n")
 
     def test_default_command_starts_plain_interactive_shell(self):
         with tempfile.TemporaryDirectory() as tmp:
