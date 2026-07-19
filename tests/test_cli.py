@@ -151,6 +151,19 @@ class CliTests(unittest.TestCase):
             self.assertIn("preserves /etc/gpubk policy, /var/lib/gpubk history", text)
             self.assertIn("sudo bk update --apply --extras gpu", text)
 
+    def test_admin_update_is_a_compatibility_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            managed_python = Path(tmp) / "gpubk" / "bin" / "python"
+            managed_python.parent.mkdir(parents=True)
+            managed_python.write_text("", encoding="utf-8")
+            output = StringIO()
+            with mock.patch("bk.cli.MANAGED_PYTHON", managed_python), redirect_stdout(output):
+                result = bk_main(["admin", "update"])
+
+            self.assertEqual(result, 0)
+            self.assertIn("GPUBK update guide", output.getvalue())
+            self.assertIn("sudo bk update --apply --extras gpu", output.getvalue())
+
     def test_default_command_starts_plain_interactive_shell(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self.run_bk_with_input([], Path(tmp), "status\nquit\n")
