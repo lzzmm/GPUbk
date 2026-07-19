@@ -154,6 +154,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             if head == "skill":
                 return _skill_command(argv[1:])
             if head == "admin":
+                if len(argv) > 1 and argv[1] in {"update", "upgrade"}:
+                    return _update_command(argv[2:])
                 from .admin import run_admin_cli
 
                 return run_admin_cli(argv[1:])
