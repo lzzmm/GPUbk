@@ -80,7 +80,8 @@ bk 2 1h30m 12g     # 2 张 GPU、90 分钟、每卡预计 12 GiB
 bk x 1 2h           # 排他预约
 bk a                # 引导式预约
 bk l                # 查看自己的预约
-bk g                # 推荐当前可用 GPU
+bk g                # 显示自己当前可用的 GPU，否则推荐一张
+bk g 4              # 查看可同时使用的 4 张 GPU，只读、不预约
 bk run -- python train.py
 bk t                # 可视化终端时间轴
 bk u                # 个人用量统计

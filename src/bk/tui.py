@@ -1433,6 +1433,15 @@ def _cell_for_gpu(
     if not overlapping_spans:
         return FREE_CHAR, COLOR_FREE, 0
     overlapping = [item[0] for item in overlapping_spans]
+    edge_cell = _reservation_edge_cell(
+        overlapping_spans,
+        start,
+        end,
+        color_map,
+        selected_id,
+    )
+    if edge_cell is not None:
+        return edge_cell
     exclusive = _choose_selected_or_first([item for item in overlapping if item.get("mode") == MODE_EXCLUSIVE], selected_id)
     if exclusive is not None:
         if selected_id and exclusive.get("id") == selected_id:
@@ -1442,15 +1451,6 @@ def _cell_for_gpu(
     chosen = _choose_selected_or_first(shared_items, selected_id)
     if chosen is None:
         return FREE_CHAR, COLOR_FREE, 0
-    shared_edge = _shared_edge_cell(
-        [item for item in overlapping_spans if item[0].get("mode") == MODE_SHARED],
-        start,
-        end,
-        color_map,
-        selected_id,
-    )
-    if shared_edge is not None:
-        return shared_edge
     visual_slots = _shared_visual_slots(shared_items, shared_limit)
     occupied_slots = [item for item in visual_slots if item is not None]
     if lane_count <= 1:
@@ -1475,22 +1475,20 @@ def _cell_for_gpu(
     return char, _reservation_color(visible, color_map), attr
 
 
-def _shared_edge_cell(
-    shared_spans: Sequence[Tuple[dict, datetime, datetime]],
+def _reservation_edge_cell(
+    spans: Sequence[Tuple[dict, datetime, datetime]],
     cell_start: datetime,
     cell_end: datetime,
     color_map: dict[str, int],
     selected_id: Optional[str],
 ) -> Optional[Tuple[str, int, int]]:
-    """Render an unmissable marker when a compact shared bar meets a cell edge."""
-    cell_duration = cell_end - cell_start
+    """Keep reservation boundaries visible at every timeline zoom level."""
+    # Shared overlaps need the whole cell for their split/weave encoding. Their
+    # individual boundaries remain available in the expanded GPU lanes.
+    if len(spans) != 1:
+        return None
     edges = []
-    for reservation, reservation_start, reservation_end in shared_spans:
-        # Full-size bars already read clearly. Reserve endpoint markers for a
-        # booking compressed into one time cell, including a 5-minute booking
-        # viewed at a wider zoom level.
-        if reservation_end - reservation_start > cell_duration:
-            continue
+    for reservation, reservation_start, reservation_end in spans:
         starts = cell_start <= reservation_start < cell_end
         ends = cell_start < reservation_end <= cell_end
         if starts or ends:
