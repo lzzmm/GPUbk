@@ -83,6 +83,25 @@ class AnnouncementTests(unittest.TestCase):
         with self.assertRaisesRegex(BookingError, "administrator"):
             remove_announcement(self.store, self.config, user, "missing")
 
+    def test_service_owner_is_not_implicitly_an_announcement_administrator(self):
+        config = Config(
+            data_dir=Path(self.tmp.name),
+            broker_uid=1001,
+            broker_socket=Path(self.tmp.name) / "broker.sock",
+            file_mode=0o644,
+            dir_mode=0o755,
+            broker_socket_mode=0o666,
+        )
+        with self.assertRaisesRegex(BookingError, "requires sudo"):
+            publish_announcement(
+                self.store,
+                config,
+                Actor(uid=1001, username="service-owner"),
+                "unauthorized notice",
+                "warning",
+                3600,
+            )
+
     def test_invalid_level_and_expiry_are_rejected(self):
         with self.assertRaisesRegex(BookingError, "level"):
             publish_announcement(

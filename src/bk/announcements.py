@@ -195,10 +195,8 @@ def edit_announcement(
 
 
 def _require_administrator(config: Config, actor: Actor) -> None:
-    allowed = {0}
-    if config.broker_uid is not None:
-        allowed.add(config.broker_uid)
-    if actor.uid not in allowed:
+    del config
+    if actor.uid != 0:
         raise BookingError(
             "permission denied: administrator announcement requires sudo"
         )
