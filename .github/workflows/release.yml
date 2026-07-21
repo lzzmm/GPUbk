@@ -102,7 +102,7 @@ jobs:
           BK_DATA_DIR: /tmp/gpubk-upgrade-data
           BK_GPU_COUNT: "2"
           BK_MAX_SHARED_USERS: "4"
-          LAST_PUBLIC_VERSION: "0.2.7"
+          LAST_PUBLIC_VERSION: "0.2.8"
         run: |
           python -m venv /tmp/gpubk-upgrade-smoke
           upgrade_python=/tmp/gpubk-upgrade-smoke/bin/python

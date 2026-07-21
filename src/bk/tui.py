@@ -38,7 +38,7 @@ from .scheduler import (
 from .service import public_reservation, submit_cancellation
 from .sharing import parse_share_units, reservation_share_units, share_text
 from .storage import LedgerStore
-from .terminal import pad_display_text, wrap_display_text
+from .terminal import clip_display_text, pad_display_text, wrap_display_text
 from .timeparse import format_local, format_local_range, parse_iso, parse_memory_mb, utc_now
 from .tutorial import TUI_TOUR, mark_onboarding_seen, onboarding_seen
 from .usage import (
@@ -830,6 +830,24 @@ def _announcement_banner_lines(
 ) -> list[str]:
     if not announcements or width < 2 or max_lines < 1:
         return []
+    if len(announcements) > 1:
+        total = len(announcements)
+        visible_limit = max_lines if total <= max_lines else max(1, max_lines - 1)
+        lines = []
+        for index, announcement in enumerate(announcements[:visible_limit], start=1):
+            label = str(announcement.get("level", "warning")).upper()
+            message = " ".join(
+                str(announcement.get("message", "administrator announcement")).split()
+            )
+            lines.append(
+                clip_display_text(
+                    f" [{index}/{total}] {label}: {message}",
+                    width - 1,
+                )
+            )
+        if total > visible_limit:
+            lines.append(f"  ... {total - visible_limit} more; run bk n for all announcements")
+        return lines
     announcement = announcements[0]
     label = str(announcement.get("level", "warning")).upper()
     message = str(announcement.get("message", "administrator announcement"))

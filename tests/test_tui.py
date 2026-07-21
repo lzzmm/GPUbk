@@ -197,6 +197,17 @@ class TuiAddPreviewTests(unittest.TestCase):
         self.assertTrue(announcement_lines[-1].endswith("full announcement"))
         self.assertTrue(all(len(line) <= width - 1 for line in announcement_lines))
 
+        multiple = _announcement_banner_lines(
+            [
+                {"level": "critical", "message": "Reservation policy active"},
+                {"level": "warning", "message": "/data maintenance"},
+            ],
+            width,
+        )
+        self.assertEqual(len(multiple), 2)
+        self.assertIn("CRITICAL", multiple[0])
+        self.assertIn("WARNING", multiple[1])
+
         preview = AddPreview(self.start, self.end, (0,), 0, MODE_SHARED, True, blink=True)
         variants = [
             (_footer_label(TuiState(), None, width), "n NOW", "q quit"),

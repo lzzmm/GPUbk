@@ -46,6 +46,25 @@ def pad_display_text(text: str, width: int) -> str:
     return text + " " * max(0, width - display_width(text))
 
 
+def clip_display_text(text: str, width: int, *, suffix: str = "...") -> str:
+    if display_width(text) <= width:
+        return text
+    suffix_width = display_width(suffix)
+    if suffix_width >= width:
+        suffix = ""
+        suffix_width = 0
+    retained = []
+    retained_width = 0
+    limit = width - suffix_width
+    for char in text:
+        char_width = _character_width(char)
+        if retained_width + char_width > limit:
+            break
+        retained.append(char)
+        retained_width += char_width
+    return "".join(retained).rstrip() + suffix
+
+
 def wrap_display_text(
     text: str,
     width: int,
