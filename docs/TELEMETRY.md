@@ -39,6 +39,16 @@ Collectors may also implement `bk.telemetry.CollectorStatusSink`. The reference
 store writes a versioned `gpubk.collector.v1` health document by atomic replace.
 Every `UsageQueryService` response includes its classified `collector` view, so
 clients never need to read the status file directly.
+Sample and user-summary responses also include an additive `coverage` object.
+`first_sample_at` and `last_sample_at` describe the span containing returned
+records, while `record_count` reports how many stored records contributed.
+`continuous` is currently always false: an empty or sparse interval remains
+unknown and must never be interpreted as measured zero.
+For an empty UID-filtered user summary, `store_has_samples` reports only whether
+the interval contains any stored samples, without exposing their owners, and
+`matching_process_event` reports whether that UID has an audit event awaiting or
+missing a finalized summary. These additive diagnostics let clients distinguish
+an idle account from UID/container attribution drift.
 For group-writable deployments, the bundled writer additionally requires a
 root-owned explicit configuration and matching numeric `monitor_uid`.
 Applied `bk u maintain --yes` and `bk u migrate --yes` operations require that

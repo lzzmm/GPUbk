@@ -47,6 +47,10 @@ class UsageApiTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["schema_version"], "gpubk.usage.v1")
+        self.assertEqual(payload["coverage"]["record_count"], 1)
+        self.assertEqual(payload["coverage"]["first_sample_at"], "2030-01-01T12:00:00Z")
+        self.assertEqual(payload["coverage"]["last_sample_at"], "2030-01-01T12:01:00Z")
+        self.assertFalse(payload["coverage"]["continuous"])
         self.assertEqual(len(payload["users"]), 1)
         alice = payload["users"][0]
         self.assertEqual(alice["uid"], 1001)
@@ -67,6 +71,7 @@ class UsageApiTests(unittest.TestCase):
         )
 
         self.assertEqual(payload["query"]["resolution_seconds"], 300)
+        self.assertEqual(payload["coverage"]["record_count"], 1)
         self.assertEqual(len(payload["records"]), 1)
         self.assertEqual(payload["records"][0]["resolution_seconds"], 300)
         self.assertEqual(payload["records"][0]["workloads"][0]["label"], "train.py")
@@ -74,6 +79,44 @@ class UsageApiTests(unittest.TestCase):
         self.assertEqual(summaries[0]["uid"], 1001)
         self.assertEqual(summaries[0]["active_gpu_seconds"], 60)
         self.assertEqual(summaries[0]["workloads"][0]["label"], "train.py")
+
+    def test_empty_user_query_reports_empty_coverage(self):
+        payload = self.api.users(
+            start=self.start,
+            end=self.start + timedelta(hours=1),
+            resolution="1m",
+            uid=1001,
+        )
+
+        self.assertEqual(payload["users"], [])
+        self.assertEqual(
+            payload["coverage"],
+            {
+                "record_count": 0,
+                "first_sample_at": None,
+                "last_sample_at": None,
+                "continuous": False,
+                "store_has_samples": False,
+                "matching_process_event": False,
+            },
+        )
+
+    def test_empty_uid_query_distinguishes_samples_owned_by_another_uid(self):
+        workload_id = self.store.register_workload(1002, describe_workload("python train.py"))
+        self.store.append_rollups(
+            [self._record(1002, "bob", 0, workload_id, status="ok", active=60)]
+        )
+
+        payload = self.api.users(
+            start=self.start,
+            end=self.start + timedelta(hours=1),
+            resolution="1m",
+            uid=1001,
+        )
+
+        self.assertEqual(payload["users"], [])
+        self.assertTrue(payload["coverage"]["store_has_samples"])
+        self.assertFalse(payload["coverage"]["matching_process_event"])
 
     def test_event_api_expands_workload_without_exposing_command_arguments(self):
         workload_id = self.store.register_workload(

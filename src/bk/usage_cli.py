@@ -231,6 +231,24 @@ def _print_payload(payload: dict, *, personal: bool = False) -> None:
         _print_samples(payload)
     else:
         print(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True))
+    _print_query_notices(payload)
+
+
+def _print_query_notices(payload: dict) -> None:
+    colors = color_enabled(sys.stdout)
+    if payload.get("truncated") is True:
+        print(
+            style(
+                "warning: result limit reached; narrow the time range or increase --limit",
+                "warning",
+                enabled=colors,
+            )
+        )
+    warnings = payload.get("warnings", [])
+    if not isinstance(warnings, list):
+        return
+    for warning in dict.fromkeys(str(item) for item in warnings if item):
+        print(style(f"warning: {warning}", "warning", enabled=colors))
 
 
 def _print_collector_summary(collector: object) -> None:
@@ -296,15 +314,25 @@ def _print_users(payload: dict, *, personal: bool = False) -> None:
     try:
         start = parse_iso(str(query["start_at"])).astimezone()
         end = parse_iso(str(query["end_at"])).astimezone()
-        print(
-            f"history: {start:%Y-%m-%d %H:%M} -> {end:%Y-%m-%d %H:%M} "
-            "(sampled past only; future reservations excluded)"
-        )
+        print(f"requested: {start:%Y-%m-%d %H:%M} -> {end:%Y-%m-%d %H:%M}")
     except (KeyError, TypeError, ValueError):
-        print("history: sampled past only; future reservations excluded")
+        print("requested: sampled history ending now")
+    coverage = payload.get("coverage", {})
+    if isinstance(coverage, dict) and coverage.get("first_sample_at") and coverage.get("last_sample_at"):
+        try:
+            first = parse_iso(str(coverage["first_sample_at"])).astimezone()
+            last = parse_iso(str(coverage["last_sample_at"])).astimezone()
+            count = int(coverage.get("record_count", 0))
+            print(
+                f"recorded:  {first:%Y-%m-%d %H:%M} -> {last:%Y-%m-%d %H:%M} "
+                f"({count} stored sample{'s' if count != 1 else ''}; gaps are not treated as zero)"
+            )
+        except (TypeError, ValueError):
+            pass
+    print("scope: sampled past only; future reservations excluded")
     users = payload.get("users", [])
     if not users:
-        print("no user usage records in this interval")
+        _print_empty_user_usage(payload)
         return
     if personal and len(users) == 1:
         _print_personal_dashboard(users[0])
@@ -321,6 +349,48 @@ def _print_users(payload: dict, *, personal: bool = False) -> None:
             f"{format_usage_duration(int(item['violation_gpu_seconds'])):>8} "
             f"{format_usage_memory(int(item['max_gpu_memory_mb'])):>9} {avg_sm:>7} {workloads}"
         )
+
+
+def _print_empty_user_usage(payload: dict) -> None:
+    collector = payload.get("collector", {})
+    state = str(collector.get("state", "unknown")) if isinstance(collector, dict) else "unknown"
+    colors = color_enabled(sys.stdout)
+    coverage = payload.get("coverage", {})
+    if isinstance(coverage, dict) and coverage.get("matching_process_event"):
+        print(style("Your GPU process was observed, but no usage summary is finalized yet.", "warning", enabled=colors))
+        print("Wait one summary interval; if it remains empty, run `bk doctor --require-monitor`.")
+        return
+    if isinstance(coverage, dict) and coverage.get("store_has_samples"):
+        print(style("Usage samples exist, but none match your current numeric UID.", "warning", enabled=colors))
+        print(
+            f"Current UID: {os.getuid()}. This usually means a changed UID or a process "
+            "attributed to root/container ownership; ask the administrator to inspect `bk u users`."
+        )
+        return
+    if state in {"running", "degraded"} and isinstance(collector, dict):
+        rollup = max(1, int(collector.get("rollup_seconds", 60)))
+        started_at = collector.get("started_at")
+        if started_at:
+            try:
+                uptime = max(0, int((utc_now() - parse_iso(str(started_at))).total_seconds()))
+            except ValueError:
+                uptime = rollup
+            if uptime < rollup:
+                remaining = max(1, rollup - uptime)
+                print(style("No finalized usage yet.", "warning", enabled=colors))
+                print(
+                    f"The monitor started {format_usage_duration(uptime)} ago; its first "
+                    f"summary should appear in about {format_usage_duration(remaining)}."
+                )
+                return
+        print(style("No recorded GPU use for this user in the requested interval.", "muted", enabled=colors))
+        print(
+            "A record appears after an active reservation or an attributable GPU process "
+            f"is sampled and the {format_usage_duration(rollup)} summary closes."
+        )
+        return
+    print(style("Usage history is unavailable because the monitor is not healthy.", "warning", enabled=colors))
+    print("Run `bk doctor --require-monitor` or ask the GPUBK administrator to check the monitor service.")
 
 
 def _print_personal_dashboard(item: dict) -> None:

@@ -85,6 +85,7 @@ class UsageQueryService:
                 "gpu": gpu,
                 "limit": limit,
             },
+            "coverage": _sample_coverage(records, normalized_start, normalized_end),
             "records": public_records,
             "truncated": truncated,
             "warnings": list(dict.fromkeys(self.store.last_warnings)),
@@ -174,6 +175,24 @@ class UsageQueryService:
         if len(summaries) > limit:
             summaries = summaries[:limit]
             truncated = True
+        coverage = _sample_coverage(records, normalized_start, normalized_end)
+        if uid is not None and not records:
+            coverage.update(
+                {
+                    "store_has_samples": self._has_any_rollup(normalized_start, normalized_end),
+                    "matching_process_event": next(
+                        self.store.iter_events(
+                            start=normalized_start,
+                            end=normalized_end,
+                            uid=uid,
+                            limit=1,
+                            newest_first=True,
+                        ),
+                        None,
+                    )
+                    is not None,
+                }
+            )
         return {
             "schema_version": USAGE_API_VERSION,
             "kind": "usage-users",
@@ -191,6 +210,7 @@ class UsageQueryService:
                 "uid": uid,
                 "limit": limit,
             },
+            "coverage": coverage,
             "users": summaries,
             "truncated": truncated,
             "warnings": list(dict.fromkeys(self.store.last_warnings)),
@@ -200,6 +220,21 @@ class UsageQueryService:
                 "Missing history means not sampled; it is never interpreted as zero utilization.",
             ],
         }
+
+    def _has_any_rollup(self, start: datetime, end: datetime) -> bool:
+        for tier in dict.fromkeys(TIER_FOR_RESOLUTION.values()):
+            if next(
+                self.store.iter_rollups(
+                    tier,
+                    start=start,
+                    end=end,
+                    limit=1,
+                    newest_first=True,
+                ),
+                None,
+            ) is not None:
+                return True
+        return False
 
     def capabilities(self) -> dict:
         policy = UsageRetentionPolicy.from_config(self.config)
@@ -325,6 +360,28 @@ def auto_resolution(start: datetime, end: datetime) -> int:
     if seconds <= 1500 * 24 * 60 * 60:
         return RESOLUTIONS["1h"]
     return RESOLUTIONS["1d"]
+
+
+def _sample_coverage(records: Sequence[dict], start: datetime, end: datetime) -> dict:
+    """Describe stored sample coverage without implying that sparse spans are continuous."""
+    starts: List[datetime] = []
+    ends: List[datetime] = []
+    for record in records:
+        try:
+            record_start = parse_iso(str(record["window_start"]))
+            record_end = parse_iso(str(record["window_end"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if record_end <= start or record_start >= end:
+            continue
+        starts.append(max(start, record_start))
+        ends.append(min(end, record_end))
+    return {
+        "record_count": len(starts),
+        "first_sample_at": to_iso(min(starts)) if starts else None,
+        "last_sample_at": to_iso(max(ends)) if ends else None,
+        "continuous": False,
+    }
 
 
 def summarize_public_rollups(

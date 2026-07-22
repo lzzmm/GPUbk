@@ -1330,7 +1330,8 @@ class CliTests(unittest.TestCase):
             self.assertIn("sampled ", usage.stdout)
             self.assertIn("latest history may lag up to 1m", usage.stdout)
             self.assertIn("gaps=identity:0", usage.stdout)
-            self.assertIn("sampled past only; future reservations excluded", usage.stdout)
+            self.assertIn("scope: sampled past only; future reservations excluded", usage.stdout)
+            self.assertIn("No recorded GPU use for this user", usage.stdout)
             self.assertIn("Last 7 days", usage.stdout)
             self.assertIn("Last 4 weeks", usage.stdout)
             issue = next(

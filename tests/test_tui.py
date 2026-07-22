@@ -346,7 +346,12 @@ class TuiAddPreviewTests(unittest.TestCase):
     def test_personal_usage_summary_is_compact_and_uses_four_week_trend(self):
         end = datetime(2030, 1, 28, 12, tzinfo=timezone.utc)
         users = {
-            "collector": {"state": "running"},
+            "collector": {"state": "running", "rollup_seconds": 60},
+            "coverage": {
+                "record_count": 1,
+                "first_sample_at": iso(end - timedelta(hours=1)),
+                "last_sample_at": iso(end),
+            },
             "users": [
                 {
                     "active_gpu_seconds": 1800,
@@ -373,11 +378,30 @@ class TuiAddPreviewTests(unittest.TestCase):
         text = "\n".join(lines)
 
         self.assertIn("LAST 24 HOURS", text)
+        self.assertIn("Recorded ", text)
+        self.assertIn("unsampled gaps stay unknown", text)
         self.assertIn("Use  50.0%", text)
         self.assertIn("LAST 7 DAYS", text)
         self.assertIn("LAST 4 WEEKS", text)
         self.assertEqual(sum(line.startswith("week ") for line in lines), 4)
         self.assertTrue(all(len(line) <= 72 for line in lines), text)
+
+    def test_personal_usage_summary_explains_first_rollup_delay(self):
+        end = datetime(2030, 1, 28, 12, tzinfo=timezone.utc)
+        users = {
+            "collector": {
+                "state": "running",
+                "started_at": iso(end - timedelta(seconds=12)),
+                "rollup_seconds": 60,
+            },
+            "users": [],
+        }
+
+        lines = _usage_summary_lines(users, {"records": []}, end, width=72)
+
+        self.assertIn("No finalized usage yet.", lines)
+        self.assertIn("First summary is expected in about 48s.", lines)
+        self.assertTrue(all(len(line) <= 72 for line in lines))
 
     def test_usage_key_opens_dashboard_outside_editor(self):
         config = Config(data_dir=Path("/tmp/gpubk-tui-usage"))

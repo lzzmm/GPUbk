@@ -2724,8 +2724,16 @@ def _usage_summary_lines(
     collector_state = str(collector.get("state", "unknown"))
     lines = [
         "LAST 24 HOURS",
-        f"Monitor {collector_state} | sampled history only; future reservations excluded",
+        f"Monitor {collector_state} | sampled past only; future reservations excluded",
     ]
+    coverage = users_payload.get("coverage", {})
+    if isinstance(coverage, dict) and coverage.get("first_sample_at") and coverage.get("last_sample_at"):
+        try:
+            first = parse_iso(str(coverage["first_sample_at"])).astimezone()
+            last = parse_iso(str(coverage["last_sample_at"])).astimezone()
+            lines.append(f"Recorded {first:%m-%d %H:%M} -> {last:%m-%d %H:%M}; unsampled gaps stay unknown")
+        except ValueError:
+            pass
     users = users_payload.get("users", [])
     if users:
         item = users[0]
@@ -2749,7 +2757,35 @@ def _usage_summary_lines(
             )
         )
     else:
-        lines.append("No sampled usage for your UID in the last 24 hours.")
+        rollup = max(1, int(collector.get("rollup_seconds", 60)))
+        started_at = collector.get("started_at")
+        uptime = rollup
+        if started_at:
+            try:
+                uptime = max(0, int((end - parse_iso(str(started_at))).total_seconds()))
+            except ValueError:
+                pass
+        if collector_state in {"running", "degraded"} and uptime < rollup:
+            lines.extend(
+                (
+                    "No finalized usage yet.",
+                    f"First summary is expected in about {format_usage_duration(rollup - uptime)}.",
+                )
+            )
+        elif collector_state in {"running", "degraded"}:
+            lines.extend(
+                (
+                    "No recorded GPU use for your UID in the last 24 hours.",
+                    f"Active bookings and attributed processes appear after each {format_usage_duration(rollup)} summary.",
+                )
+            )
+        else:
+            lines.extend(
+                (
+                    "Usage history is unavailable because the monitor is not healthy.",
+                    "Run bk doctor --require-monitor or contact the administrator.",
+                )
+            )
 
     daily_rows, weekly_rows = build_activity_trends(
         samples_payload.get("records", []),
