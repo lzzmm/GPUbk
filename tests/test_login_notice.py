@@ -292,6 +292,57 @@ class LoginNoticeTests(unittest.TestCase):
         self.assertIn("reservation expire", plain)
         self.assertIn("\x1b[1;31m", colored)
 
+    def test_never_reserved_process_warns_its_owner_at_login(self):
+        now = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
+        summary = build_login_summary(
+            {"reservations": []},
+            1001,
+            now=now,
+            within_seconds=86400,
+            process_state={
+                "g2:p123": {
+                    "gpu": 2,
+                    "pid": 123,
+                    "uid": 1001,
+                    "status": "unreserved",
+                },
+                "g2:p456": {
+                    "gpu": 2,
+                    "pid": 456,
+                    "uid": 1002,
+                    "status": "unreserved",
+                },
+            },
+            reliable_gpus=(2,),
+        )
+
+        self.assertEqual(summary["unreserved"], [{"gpu": 2, "pids": [123]}])
+        rendered = render_login_summary(summary)
+        self.assertIn("1 unreserved GPU", rendered)
+        self.assertIn("WARNING GPU 2 has your unreserved PID 123", rendered)
+        self.assertIn("`bk a`", rendered)
+
+    def test_unreserved_login_warning_requires_reliable_attribution(self):
+        now = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
+        summary = build_login_summary(
+            {"reservations": []},
+            1001,
+            now=now,
+            within_seconds=86400,
+            process_state={
+                "g2:p123": {
+                    "gpu": 2,
+                    "pid": 123,
+                    "uid": 1001,
+                    "status": "unreserved",
+                }
+            },
+            reliable_gpus=(),
+        )
+
+        self.assertEqual(summary["unreserved"], [])
+        self.assertEqual(render_login_summary(summary), "")
+
     def test_overdue_warning_requires_reliable_gpu_and_no_current_booking(self):
         now = datetime(2030, 1, 1, 10, 0, tzinfo=timezone.utc)
         expired = reservation(

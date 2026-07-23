@@ -432,6 +432,8 @@ monitor 还会原子更新一个很小的 `usage/collector.json` 心跳。Usage 
 
 进程状态根据进程 UID 和有效预约判断，包括 `ok`、`wrong-gpu`、`unreserved`、
 `unknown` 和 `system`。命令行写入共享日志前会缩减为安全标签。
+当 monitor 能可靠确认 UID 时，登录提示也会用橙色警告本人正在运行的
+`unreserved` GPU 与 PID；不会向其他普通用户暴露其进程详情，也不会自动终止任务。
 
 rootful Docker 的 GPU 进程在宿主机上通常显示为 UID 0。GPUBK 会从 cgroup
 识别 Docker、containerd 和 Podman。对于 Docker，只有当该 GPU 当前恰好存在一个

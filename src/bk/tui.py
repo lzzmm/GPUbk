@@ -38,7 +38,7 @@ from .scheduler import (
 from .service import public_reservation, submit_cancellation
 from .sharing import parse_share_units, reservation_share_units, share_text
 from .storage import LedgerStore
-from .terminal import pad_display_text, wrap_display_text
+from .terminal import clip_display_text, pad_display_text, wrap_display_text
 from .timeparse import format_local, format_local_range, parse_iso, parse_memory_mb, utc_now
 from .tutorial import TUI_TOUR, mark_onboarding_seen, onboarding_seen
 from .usage import (
@@ -830,6 +830,24 @@ def _announcement_banner_lines(
 ) -> list[str]:
     if not announcements or width < 2 or max_lines < 1:
         return []
+    if len(announcements) > 1:
+        total = len(announcements)
+        visible_limit = max_lines if total <= max_lines else max(1, max_lines - 1)
+        lines = []
+        for index, announcement in enumerate(announcements[:visible_limit], start=1):
+            label = str(announcement.get("level", "warning")).upper()
+            message = " ".join(
+                str(announcement.get("message", "administrator announcement")).split()
+            )
+            lines.append(
+                clip_display_text(
+                    f" [{index}/{total}] {label}: {message}",
+                    width - 1,
+                )
+            )
+        if total > visible_limit:
+            lines.append(f"  ... {total - visible_limit} more; run bk n for all announcements")
+        return lines
     announcement = announcements[0]
     label = str(announcement.get("level", "warning")).upper()
     message = str(announcement.get("message", "administrator announcement"))
@@ -2706,8 +2724,16 @@ def _usage_summary_lines(
     collector_state = str(collector.get("state", "unknown"))
     lines = [
         "LAST 24 HOURS",
-        f"Monitor {collector_state} | sampled history only; future reservations excluded",
+        f"Monitor {collector_state} | sampled past only; future reservations excluded",
     ]
+    coverage = users_payload.get("coverage", {})
+    if isinstance(coverage, dict) and coverage.get("first_sample_at") and coverage.get("last_sample_at"):
+        try:
+            first = parse_iso(str(coverage["first_sample_at"])).astimezone()
+            last = parse_iso(str(coverage["last_sample_at"])).astimezone()
+            lines.append(f"Recorded {first:%m-%d %H:%M} -> {last:%m-%d %H:%M}; unsampled gaps stay unknown")
+        except ValueError:
+            pass
     users = users_payload.get("users", [])
     if users:
         item = users[0]
@@ -2731,7 +2757,35 @@ def _usage_summary_lines(
             )
         )
     else:
-        lines.append("No sampled usage for your UID in the last 24 hours.")
+        rollup = max(1, int(collector.get("rollup_seconds", 60)))
+        started_at = collector.get("started_at")
+        uptime = rollup
+        if started_at:
+            try:
+                uptime = max(0, int((end - parse_iso(str(started_at))).total_seconds()))
+            except ValueError:
+                pass
+        if collector_state in {"running", "degraded"} and uptime < rollup:
+            lines.extend(
+                (
+                    "No finalized usage yet.",
+                    f"First summary is expected in about {format_usage_duration(rollup - uptime)}.",
+                )
+            )
+        elif collector_state in {"running", "degraded"}:
+            lines.extend(
+                (
+                    "No recorded GPU use for your UID in the last 24 hours.",
+                    f"Active bookings and attributed processes appear after each {format_usage_duration(rollup)} summary.",
+                )
+            )
+        else:
+            lines.extend(
+                (
+                    "Usage history is unavailable because the monitor is not healthy.",
+                    "Run bk doctor --require-monitor or contact the administrator.",
+                )
+            )
 
     daily_rows, weekly_rows = build_activity_trends(
         samples_payload.get("records", []),

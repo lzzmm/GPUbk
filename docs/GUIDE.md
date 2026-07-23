@@ -1175,7 +1175,9 @@ without taking a write lock or probing NVML. Color terminals distinguish current
 and upcoming reservations. It also warns every other user about GPUs currently or
 soon reserved exclusively, even when that user has no booking. A fresh trustworthy
 monitor enables a red alert when this UID still occupies a GPU after its reservation
-expired. With no relevant personal reservation, exclusive restriction, or alert it
+expired. A reliably attributed process that has no reservation at all produces an
+orange `unreserved` warning for its owner with the GPU and PID; another user's
+process details are not exposed. With no relevant personal reservation, exclusive restriction, or alert it
 prints nothing; failures are suppressed so SSH login cannot be blocked.
 `sudo bk admin login-hook uninstall --yes` removes only the marked
 GPUBK file. A full tracked `sudo bk admin uninstall` also removes that managed hook.

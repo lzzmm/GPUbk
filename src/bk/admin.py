@@ -16,6 +16,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -1437,6 +1438,7 @@ def _run_admin_blackout(args: argparse.Namespace) -> int:
         _run_systemctl(
             systemctl, "start", "gpubk-broker.service", "gpubk-monitor.service"
         )
+    _wait_for_broker_ready(config)
     print(f"updated blackout windows: {len(current)} -> {len(desired_blackouts)}")
     print("services restarted; existing GPU processes were not touched")
     announce_level = getattr(args, "announce", None)
@@ -2097,6 +2099,30 @@ def _run_systemctl(executable: str, *arguments: str) -> None:
         detail = (result.stderr or result.stdout).strip().splitlines()
         suffix = f": {detail[-1]}" if detail else ""
         raise BookingError(f"systemctl {' '.join(arguments)} failed{suffix}")
+
+
+def _wait_for_broker_ready(
+    config: Config,
+    *,
+    attempts: int = 50,
+    delay_seconds: float = 0.2,
+) -> None:
+    if config.broker_socket is None or config.broker_uid is None:
+        return
+    from .broker import BrokerClient
+
+    last_error: Optional[BookingError] = None
+    for attempt in range(attempts):
+        try:
+            BrokerClient(config).call("ping", {})
+            return
+        except BookingError as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                time.sleep(delay_seconds)
+    raise BookingError(
+        f"GPUBK broker did not become ready after service restart: {last_error}"
+    )
 
 
 def _run_admin_gpu_policy(args: argparse.Namespace) -> int:

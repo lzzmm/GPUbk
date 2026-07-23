@@ -58,6 +58,13 @@ def build_login_summary(
         process_state or {},
         set(int(gpu) for gpu in reliable_gpus),
     )
+    unreserved = _unreserved_occupancy(
+        uid,
+        process_state or {},
+        set(int(gpu) for gpu in reliable_gpus),
+        active,
+        overdue,
+    )
     notifications = []
     notification_cutoff = current - timedelta(seconds=max(86400, within_seconds))
     for reservation in ledger.get("reservations", []):
@@ -94,6 +101,7 @@ def build_login_summary(
         "active": [_public_item(item) for item in active],
         "upcoming": [_public_item(item) for item in upcoming],
         "overdue": overdue,
+        "unreserved": unreserved,
         "notifications": notifications[:5],
         "announcements": announcements[:3],
         "exclusive_blocks": [_public_item(item) for item in exclusive_blocks],
@@ -105,6 +113,7 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
     active = summary.get("active", [])
     upcoming = summary.get("upcoming", [])
     overdue = summary.get("overdue", [])
+    unreserved = summary.get("unreserved", [])
     notifications = summary.get("notifications", [])
     announcements = summary.get("announcements", [])
     exclusive_blocks = summary.get("exclusive_blocks", [])
@@ -113,6 +122,7 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
         not active
         and not upcoming
         and not overdue
+        and not unreserved
         and not notifications
         and not announcements
         and not exclusive_blocks
@@ -127,6 +137,8 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
         labels.append(f"{len(upcoming)} upcoming")
     if overdue:
         labels.append(f"{len(overdue)} overdue occupancy")
+    if unreserved:
+        labels.append(f"{len(unreserved)} unreserved GPU{'s' if len(unreserved) != 1 else ''}")
     if notifications:
         labels.append(f"{len(notifications)} notice{'s' if len(notifications) != 1 else ''}")
     if announcements:
@@ -157,6 +169,8 @@ def render_login_summary(summary: dict, *, color: bool = False) -> str:
             lines[-1] += f"  (+{len(upcoming) - 1} more upcoming)"
     for item in overdue:
         lines.append(style(_overdue_line(item), "error", enabled=color))
+    for item in unreserved:
+        lines.append(style(_unreserved_line(item), "warning", enabled=color))
     if notifications:
         lines.append(
             style(
@@ -292,6 +306,42 @@ def _overdue_occupancy(
     return result
 
 
+def _unreserved_occupancy(
+    uid: int,
+    process_state: Mapping[str, dict],
+    reliable_gpus: set[int],
+    active: Sequence[dict],
+    overdue: Sequence[dict],
+) -> list[dict]:
+    active_gpus = {
+        int(gpu) for reservation in active for gpu in reservation.get("gpus", [])
+    }
+    overdue_gpus = {int(item["gpu"]) for item in overdue}
+    processes_by_gpu: dict[int, list[int]] = {}
+    for process in process_state.values():
+        if not isinstance(process, dict) or process.get("status") != "unreserved":
+            continue
+        try:
+            process_uid = int(process.get("uid", -1))
+            gpu = int(process.get("gpu", -1))
+            pid = int(process.get("pid", -1))
+        except (TypeError, ValueError):
+            continue
+        if (
+            process_uid != uid
+            or gpu not in reliable_gpus
+            or gpu in active_gpus
+            or gpu in overdue_gpus
+            or pid <= 0
+        ):
+            continue
+        processes_by_gpu.setdefault(gpu, []).append(pid)
+    return [
+        {"gpu": gpu, "pids": sorted(set(pids))}
+        for gpu, pids in sorted(processes_by_gpu.items())
+    ]
+
+
 def _public_item(reservation: dict) -> dict:
     return {
         "id": str(reservation["id"]),
@@ -333,6 +383,14 @@ def _overdue_line(item: dict) -> str:
     return (
         f"  ALERT GPU {item['gpu']} still has your PID {pids} after reservation "
         f"{str(item.get('reservation_id', ''))[:6]} ended at {ended}"
+    )
+
+
+def _unreserved_line(item: dict) -> str:
+    pids = ",".join(str(pid) for pid in item.get("pids", []))
+    return (
+        f"  WARNING GPU {item['gpu']} has your unreserved PID {pids}; "
+        "reserve it with `bk a` or stop the task"
     )
 
 

@@ -2,6 +2,13 @@
 
 All notable changes are documented here. The project follows Semantic Versioning once a public release is published.
 
+## 0.2.9 - 2026-07-21
+
+- Wait for a verified broker `ping` after blackout policy restarts before publishing a
+  matching maintenance announcement, eliminating the service-start socket race.
+- Show multiple simultaneous warning and critical announcements in separate bounded TUI
+  banner rows so a higher-priority notice cannot hide another active notice.
+
 ## 0.2.8 - 2026-07-21
 
 - Accept safe multiline administrator announcements while continuing to reject NUL,

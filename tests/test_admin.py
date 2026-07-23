@@ -64,6 +64,32 @@ class TtyInput(StringIO):
 
 
 class AdminMaintenanceTests(unittest.TestCase):
+    def test_broker_restart_waits_until_ping_succeeds(self):
+        config = Config(
+            data_dir=Path("/tmp/gpubk-test"),
+            broker_socket=Path("/run/gpubk/broker.sock"),
+            broker_uid=1001,
+            file_mode=0o644,
+            dir_mode=0o755,
+            broker_socket_mode=0o666,
+        )
+        client = mock.Mock()
+        client.call.side_effect = [
+            BookingError("socket absent"),
+            BookingError("connection refused"),
+            {"status": "ok"},
+        ]
+        with (
+            mock.patch("bk.broker.BrokerClient", return_value=client),
+            mock.patch("bk.admin.time.sleep") as sleep,
+        ):
+            admin_module._wait_for_broker_ready(
+                config, attempts=3, delay_seconds=0.01
+            )
+
+        self.assertEqual(client.call.call_count, 3)
+        self.assertEqual(sleep.call_count, 2)
+
     def test_guided_announcement_uses_safe_defaults(self):
         config = Config(data_dir=Path("/tmp/gpubk-test"), gpu_count=2)
         answers = ["", "", "", "", "y"]
